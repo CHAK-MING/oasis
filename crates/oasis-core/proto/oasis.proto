@@ -1,0 +1,436 @@
+syntax = "proto3";
+
+package oasis;
+
+// Oasis 管理服务
+service OasisService {
+  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+  // 健康检查：返回 200/OK 即表示服务端在线且与 NATS 通路工作正常
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  // 查询代理在线状态（由服务端访问 NATS/KV 提供）
+  rpc CheckAgents(CheckAgentsRequest) returns (CheckAgentsResponse);
+  // 结果查询（单次，若未就绪可返回 not found）
+  rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+  // 结果订阅（流式，持续推送该 task 的结果消息）
+  rpc StreamTaskResults(StreamTaskResultsRequest) returns (stream StreamTaskResultsResponse);
+
+
+  // 文件管理
+  rpc ApplyFile(ApplyFileRequest) returns (ApplyFileResponse);
+  rpc ClearFiles(ClearFilesRequest) returns (ClearFilesResponse);
+
+  // 节点查询
+  rpc GetNodeLabels(GetNodeLabelsRequest) returns (GetNodeLabelsResponse);
+  rpc GetNodeFacts(GetNodeFactsRequest) returns (GetNodeFactsResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+
+  // CEL选择器解析
+  rpc ResolveSelector(ResolveSelectorRequest) returns (ResolveSelectorResponse);
+
+  // 灰度发布管理
+  rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
+  rpc StartRollout(StartRolloutRequest) returns (StartRolloutResponse);
+  rpc PauseRollout(PauseRolloutRequest) returns (PauseRolloutResponse);
+  rpc ResumeRollout(ResumeRolloutRequest) returns (ResumeRolloutResponse);
+  rpc AbortRollout(AbortRolloutRequest) returns (AbortRolloutResponse);
+  rpc RollbackRollout(RollbackRolloutRequest) returns (RollbackRolloutResponse);
+  rpc GetRollout(GetRolloutRequest) returns (GetRolloutResponse);
+  rpc ListRollouts(ListRolloutsRequest) returns (ListRolloutsResponse);
+
+  // agent 配置管理
+  rpc ApplyAgentConfig(ApplyAgentConfigRequest) returns (ApplyAgentConfigResponse);
+  rpc GetAgentConfig(GetAgentConfigRequest) returns (GetAgentConfigResponse);
+  rpc SetAgentConfig(SetAgentConfigRequest) returns (SetAgentConfigResponse);
+  rpc DelAgentConfig(DelAgentConfigRequest) returns (DelAgentConfigResponse);
+  rpc ListAgentConfig(ListAgentConfigRequest) returns (ListAgentConfigResponse);
+  rpc ShowAgentConfig(ShowAgentConfigRequest) returns (ShowAgentConfigResponse);
+  rpc BackupAgentConfig(BackupAgentConfigRequest) returns (BackupAgentConfigResponse);
+  rpc RestoreAgentConfig(RestoreAgentConfigRequest) returns (RestoreAgentConfigResponse);
+  rpc ValidateAgentConfig(ValidateAgentConfigRequest) returns (ValidateAgentConfigResponse);
+  rpc DiffAgentConfig(DiffAgentConfigRequest) returns (DiffAgentConfigResponse);
+}
+
+message ExecuteTaskRequest {
+
+  repeated string targets = 1;
+  string command = 2;
+  repeated string args = 3;
+  int64 timeout_seconds = 4;
+  // Optional environment variables for the task execution
+  map<string, string> env = 5;
+}
+
+message ExecuteTaskResponse {
+  // 返回任务 ID，用于后续追踪
+  string task_id = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  // server 是否处于健康状态（NATS 可用、内部组件正常）
+  bool ok = 1;
+  // 健康检查信息
+  string message = 2;
+}
+
+message CheckAgentsRequest {
+  repeated string agent_ids = 1;
+}
+
+message AgentStatus {
+  string agent_id = 1;
+  bool online = 2;
+}
+
+message CheckAgentsResponse {
+  repeated AgentStatus statuses = 1;
+}
+
+message GetTaskResultRequest {
+  string task_id = 1;
+  // 等待超时（毫秒），为 0 表示不等待
+  int64 wait_timeout_ms = 2;
+  // 指定查询哪个 agent 的结果，如果为空，则返回第一个成功的结果
+  string agent_id = 3;
+}
+
+message GetTaskResultResponse {
+  bool found = 1;
+  string task_id = 2;
+  string agent_id = 3;
+  string stdout = 4;
+  string stderr = 5;
+  int32 exit_code = 6;
+  int64 timestamp = 7;
+  uint64 duration_ms = 8;
+}
+
+message StreamTaskResultsRequest {
+  string task_id = 1;
+}
+
+message StreamTaskResultsResponse {
+  string task_id = 1;
+  string agent_id = 2;
+  string stdout = 3;
+  string stderr = 4;
+  int32 exit_code = 5;
+  int64 timestamp = 6;
+  uint64 duration_ms = 7;
+}
+
+
+
+
+// CEL选择器解析消息
+message ResolveSelectorRequest {
+  string selector_expression = 1;
+}
+
+message ResolveSelectorResponse {
+  repeated string agent_ids = 1;
+  int32 total_nodes = 2;
+  int32 matched_nodes = 3;
+  string error_message = 4;
+}
+
+// 文件管理消息
+message ApplyFileRequest {
+  string object_name = 1;    
+  bytes file_data = 2;           
+  string destination_path = 3;   
+  string target_selector = 4;    
+  string expected_sha256 = 5;   
+  string owner = 6;            
+  string mode = 7;              
+  bool atomic = 8;         
+}
+
+message ApplyFileResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string applied_nodes = 3;
+  repeated string failed_nodes = 4;
+}
+
+message ClearFilesRequest {}
+message ClearFilesResponse { uint64 deleted_count = 1; }
+
+// Removed: SetNodeLabels/DeleteNodeLabels (unused by CLI)
+
+message GetNodeLabelsRequest {
+  string agent_id = 1;
+}
+
+message GetNodeLabelsResponse {
+  map<string, string> labels = 1;
+}
+
+message GetNodeFactsRequest {
+  string agent_id = 1;
+}
+
+message GetNodeFactsResponse {
+  string facts_json = 1; // JSON serialized AgentFacts
+}
+
+message ListNodesRequest {
+  bool verbose = 1;
+  string selector = 2; // Optional selector expression
+}
+
+message NodeInfo {
+  string agent_id = 1;
+  bool is_online = 2;
+  string facts_json = 3; // JSON serialized AgentFacts
+  map<string, string> labels = 4;
+}
+
+message ListNodesResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+// 灰度发布相关消息
+
+message CreateRolloutRequest {
+  string name = 1;
+  string target_selector = 2;
+  TaskSpecMsg task = 3;
+  RolloutConfigMsg config = 4;
+  map<string, string> labels = 5;
+}
+
+message CreateRolloutResponse {
+  string rollout_id = 1;
+}
+
+message StartRolloutRequest {
+  string rollout_id = 1;
+}
+
+message StartRolloutResponse {}
+
+message PauseRolloutRequest {
+  string rollout_id = 1;
+  string reason = 2;
+}
+
+message PauseRolloutResponse {}
+
+message ResumeRolloutRequest {
+  string rollout_id = 1;
+}
+
+message ResumeRolloutResponse {}
+
+message AbortRolloutRequest {
+  string rollout_id = 1;
+  string reason = 2;
+}
+
+message AbortRolloutResponse {}
+
+message RollbackRolloutRequest {
+  string rollout_id = 1;
+  string reason = 2;
+}
+
+message RollbackRolloutResponse {}
+
+message GetRolloutRequest {
+  string rollout_id = 1;
+}
+
+message GetRolloutResponse {
+  RolloutMsg rollout = 1;
+}
+
+message ListRolloutsRequest {
+  string status_filter = 1; // Optional status filter
+  int32 limit = 2; // Optional limit
+}
+
+message ListRolloutsResponse {
+  repeated RolloutMsg rollouts = 1;
+}
+
+// ===== Structured messages replacing JSON =====
+
+message TaskSpecMsg {
+  string id = 1;
+  string command = 2;
+  repeated string args = 3;
+  map<string, string> env = 4;
+  repeated string target_agents = 5;
+  string selector = 6; // optional CEL selector
+  uint32 timeout_seconds = 7;
+}
+
+message BatchSizeMsg {
+  oneof kind {
+    double percentage = 1; // 0-100
+    uint32 count = 2;
+  }
+}
+
+message CanaryStrategyMsg { double percentage = 1; uint64 observation_duration_secs = 2; }
+message RollingStrategyMsg { BatchSizeMsg batch_size = 1; uint64 batch_delay_secs = 2; uint32 max_failures = 3; }
+message BlueGreenStrategyMsg { double switch_percentage = 1; uint64 warmup_secs = 2; }
+
+message RolloutConfigMsg {
+  oneof strategy {
+    CanaryStrategyMsg canary = 1;
+    RollingStrategyMsg rolling = 2;
+    BlueGreenStrategyMsg blue_green = 3;
+  }
+  uint64 timeout_seconds = 4;
+  bool auto_advance = 5;
+  string health_check = 6;
+  map<string, string> labels = 7;
+}
+
+message RolloutProgressMsg {
+  uint32 total_nodes = 1;
+  uint32 processed_nodes = 2;
+  uint32 successful_nodes = 3;
+  uint32 failed_nodes = 4;
+  double completion_rate = 5;
+  uint32 current_batch = 6; // 0 if none
+  uint32 total_batches = 7;
+}
+
+message BatchResultMsg {
+  uint32 batch_index = 1;
+  uint32 node_count = 2;
+  uint32 successful_count = 3;
+  uint32 failed_count = 4;
+  uint64 duration_secs = 5;
+  int64 completed_at = 6;
+}
+
+enum RolloutStateEnum {
+  ROLL_CREATED = 0;
+  ROLL_RUNNING_BATCH = 1;
+  ROLL_WAITING_NEXT = 2;
+  ROLL_PAUSED = 3;
+  ROLL_SUCCEEDED = 4;
+  ROLL_FAILED = 5;
+  ROLL_ABORTED = 6;
+  ROLL_ROLLING_BACK = 7;
+}
+
+// Optional state data depending on the enum above
+message RolloutStateDataMsg {
+  uint32 current_batch = 1;
+  int64 batch_completed_at = 2;
+  string reason = 3;
+  string error = 4;
+}
+
+message RolloutMsg {
+  string id = 1;
+  string name = 2;
+  TaskSpecMsg task = 3;
+  string target_selector = 4;
+  RolloutConfigMsg config = 5;
+  RolloutStateEnum state = 6;
+  RolloutStateDataMsg state_data = 7;
+  RolloutProgressMsg progress = 8;
+  repeated BatchResultMsg batch_results = 9;
+  repeated string processed_nodes = 10;
+  map<string, string> current_batch_tasks = 11;
+  int64 current_batch_started_at = 12; // 0 if none
+  repeated string cached_target_nodes = 13;
+  int64 created_at = 14;
+  int64 updated_at = 15;
+  uint64 version = 16;
+}
+
+// Agent config messages
+message ApplyAgentConfigRequest {
+  string selector = 1; // CEL selector
+  bytes config_data = 2; // opaque config bytes (e.g., TOML)
+}
+message ApplyAgentConfigResponse {
+  uint64 applied_agents = 1;
+}
+message GetAgentConfigRequest { string agent_id = 1; string key = 2; }
+message GetAgentConfigResponse { bool found = 1; string value = 2; }
+message SetAgentConfigRequest { string agent_id = 1; string key = 2; string value = 3; }
+message DelAgentConfigRequest { string agent_id = 1; string key = 2; }
+message SetAgentConfigResponse {}
+message DelAgentConfigResponse {}
+
+message ClearAgentConfigsForSelectorRequest { string selector = 1; }
+message ClearAgentConfigsForSelectorResponse { uint64 cleared_agents = 1; uint64 cleared_keys = 2; }
+
+// 新增的 Agent 配置管理消息
+message ListAgentConfigRequest { 
+  string agent_id = 1; 
+  string prefix = 2; // 可选的前缀过滤
+}
+message ListAgentConfigResponse { 
+  repeated string keys = 1; 
+  uint64 total_count = 2;
+}
+
+message ShowAgentConfigRequest { 
+  string agent_id = 1; 
+}
+message ShowAgentConfigResponse { 
+  map<string, string> summary = 1; // 配置摘要信息
+  uint64 total_keys = 2;
+}
+
+message BackupAgentConfigRequest { 
+  string agent_id = 1; 
+  string output_format = 2; // "toml", "json", "yaml"
+}
+message BackupAgentConfigResponse { 
+  bytes config_data = 1; // 序列化的配置数据
+  string format = 2; // 实际使用的格式
+  uint64 key_count = 3;
+}
+
+message RestoreAgentConfigRequest { 
+  string agent_id = 1; 
+  bytes config_data = 2; // 序列化的配置数据
+  string format = 3; // "toml", "json", "yaml"
+  bool overwrite = 4; // 是否覆盖现有配置
+}
+message RestoreAgentConfigResponse { 
+  uint64 restored_keys = 1;
+  uint64 skipped_keys = 2; // 跳过的键数量（如果 overwrite=false）
+}
+
+message ValidateAgentConfigRequest { 
+  string agent_id = 1; 
+  bytes config_data = 2; // 要验证的配置数据
+  string format = 3; // "toml", "json", "yaml"
+}
+message ValidateAgentConfigResponse { 
+  bool valid = 1;
+  repeated string errors = 2; // 验证错误信息
+  repeated string warnings = 3; // 验证警告信息
+}
+
+message DiffAgentConfigRequest { 
+  string agent_id = 1; 
+  bytes from_config = 2; // 源配置数据
+  bytes to_config = 3; // 目标配置数据
+  string format = 4; // "toml", "json", "yaml"
+}
+message DiffAgentConfigResponse { 
+  repeated ConfigDiffItem changes = 1; // 配置变更项
+  uint64 added_count = 2;
+  uint64 modified_count = 3;
+  uint64 deleted_count = 4;
+}
+
+message ConfigDiffItem {
+  string key = 1;
+  string operation = 2; // "added", "modified", "deleted"
+  string old_value = 3; // 旧值（对于 modified 和 deleted）
+  string new_value = 4; // 新值（对于 added 和 modified）
+}

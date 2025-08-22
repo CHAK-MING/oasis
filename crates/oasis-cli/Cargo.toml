@@ -1,0 +1,30 @@
+[package]
+name = "oasis-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "oasis-cli"
+path = "src/main.rs"
+
+[dependencies]
+oasis-core = { path = "../oasis-core" }
+
+# 从 workspace 继承的依赖
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-nats = { workspace = true }
+figment = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+
+# 本地依赖
+indicatif = "0.17"

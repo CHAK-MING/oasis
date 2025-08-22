@@ -1,0 +1,7 @@
+[telemetry]
+log_level = "info"
+log_format = "text"
+log_no_ansi = false
+
+server_url = "http://127.0.0.1:50051"
+

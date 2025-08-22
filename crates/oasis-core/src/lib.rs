@@ -1,0 +1,27 @@
+pub mod agent;
+pub mod backoff;
+pub mod config;
+pub mod constants;
+pub mod dlq;
+pub mod error;
+pub mod patch;
+pub mod rate_limit;
+pub mod selector;
+pub mod shutdown;
+pub mod task;
+pub mod telemetry;
+mod type_defs;
+
+pub use error::{CoreError, Result};
+pub use constants::*;
+
+pub mod types {
+    pub use crate::agent::*;
+    pub use crate::task::*;
+    pub use crate::type_defs::*;
+}
+
+pub mod proto {
+    tonic::include_proto!("oasis");
+}
+

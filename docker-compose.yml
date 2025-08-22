@@ -1,0 +1,13 @@
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-sd", "/data/nats", "-p", "4222", "-m", "8222"]
+    restart: unless-stopped
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data/nats
+
+volumes:
+  nats-data: {}
