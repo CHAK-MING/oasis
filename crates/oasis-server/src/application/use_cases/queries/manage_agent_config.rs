@@ -122,7 +122,9 @@ impl ManageAgentConfigUseCase {
                 for node in &nodes {
                     let mut new_labels = node.labels.labels.clone();
                     new_labels.extend(labels_to_set.clone());
-                    self.node_repo.update_labels(&node.id, new_labels).await?;
+                    self.node_repo
+                        .update_labels(node.id.as_str(), new_labels)
+                        .await?;
                 }
             }
         }
@@ -148,7 +150,7 @@ impl ManageAgentConfigUseCase {
     ) -> Result<u64, CoreError> {
         // 解析并获取匹配的 agent 列表
         let nodes = self.node_repo.find_by_selector(selector).await?;
-        let agent_ids: Vec<String> = nodes.into_iter().map(|n| n.id).collect();
+        let agent_ids: Vec<String> = nodes.into_iter().map(|n| n.id.to_string()).collect();
         self.config_repo.apply_bulk(&agent_ids, flat_kv).await
     }
 
@@ -499,7 +501,7 @@ impl ManageAgentConfigUseCase {
     /// 清空选择器下所有 agent 的全部配置键（不可回滚）
     pub async fn clear_for_selector(&self, selector: &str) -> Result<(u64, u64), CoreError> {
         let nodes = self.node_repo.find_by_selector(selector).await?;
-        let agent_ids: Vec<String> = nodes.into_iter().map(|n| n.id).collect();
+        let agent_ids: Vec<String> = nodes.into_iter().map(|n| n.id.to_string()).collect();
         let mut cleared_agents: u64 = 0;
         let mut cleared_keys: u64 = 0;
         for aid in agent_ids {

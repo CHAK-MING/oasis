@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use oasis_core::config::{CommonConfig, ComponentConfig, ConfigLoadOptions, ConfigSource};
-use oasis_core::error::Result;
+use oasis_core::error::{CoreError, Result};
 use oasis_core::selector::NodeAttributes;
+use oasis_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -27,7 +28,7 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSection {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub max_concurrent_tasks: usize,
 }
 
@@ -52,7 +53,7 @@ impl Default for AgentConfig {
 impl Default for AgentSection {
     fn default() -> Self {
         Self {
-            agent_id: generate_agent_id(),
+            agent_id: AgentConfig::generate_agent_id(),
             max_concurrent_tasks: 8,
         }
     }
@@ -79,28 +80,21 @@ impl Default for SecuritySection {
 impl AgentConfig {
     /// 智能默认值生成
     pub fn with_smart_defaults() -> Self {
-        let agent_id = generate_agent_id();
+        let agent_id = Self::generate_agent_id();
+        let mut attributes = NodeAttributes::new(agent_id.to_string());
+        // 将 environment/region 统一进 labels
+        let env = detect_environment();
+        attributes.labels.insert("environment".to_string(), env);
+
         Self {
             common: CommonConfig::default(),
             agent: AgentSection {
-                agent_id: agent_id.clone(),
+                agent_id,
                 max_concurrent_tasks: 8,
             },
-            executor: ExecutorSection {
-                command_timeout_sec: 300,
-            },
-            security: SecuritySection {
-                enforce_whitelist: false,
-                whitelist_paths: vec![],
-                file_allowed_roots: vec![],
-            },
-            attributes: {
-                let mut attrs = NodeAttributes::new(agent_id);
-                // 将 environment/region 统一进 labels
-                let env = detect_environment();
-                attrs.labels.insert("environment".to_string(), env);
-                attrs
-            },
+            security: SecuritySection::default(),
+            executor: ExecutorSection::default(),
+            attributes,
         }
     }
 
@@ -157,6 +151,15 @@ impl AgentConfig {
     pub fn update_from_kv(&mut self, updates: &HashMap<String, String>) -> Result<()> {
         self.apply_kv_updates(updates)
     }
+
+    /// 生成 Agent ID
+    pub fn generate_agent_id() -> AgentId {
+        let hostname = hostname::get()
+            .unwrap_or_else(|_| std::ffi::OsString::from("unknown"))
+            .to_string_lossy()
+            .to_string();
+        AgentId::new(hostname)
+    }
 }
 
 #[async_trait]
@@ -184,29 +187,26 @@ impl ComponentConfig for AgentConfig {
 
     fn validate_business_rules(&self) -> Result<()> {
         // Agent 特定的业务规则验证
-        if self.agent.agent_id.is_empty() {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "agent_id cannot be empty".to_string(),
-            });
+        if self.agent.agent_id.as_str().is_empty() {
+            return Err(CoreError::config_error("agent_id cannot be empty"));
         }
 
         if self.security.enforce_whitelist && self.security.whitelist_paths.is_empty() {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "whitelist_paths cannot be empty when enforce_whitelist is true"
-                    .to_string(),
-            });
+            return Err(CoreError::config_error(
+                "whitelist_paths cannot be empty when enforce_whitelist is true",
+            ));
         }
 
         if self.agent.max_concurrent_tasks == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "max_concurrent_tasks must be greater than 0".to_string(),
-            });
+            return Err(CoreError::config_error(
+                "max_concurrent_tasks must be greater than 0",
+            ));
         }
 
         if self.executor.command_timeout_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "command_timeout_sec must be greater than 0".to_string(),
-            });
+            return Err(CoreError::config_error(
+                "command_timeout_sec must be greater than 0",
+            ));
         }
 
         Ok(())
@@ -236,7 +236,7 @@ impl ComponentConfig for AgentConfig {
         let mut summary = HashMap::new();
 
         // 基本信息
-        summary.insert("agent_id".to_string(), self.agent.agent_id.clone());
+        summary.insert("agent_id".to_string(), self.agent.agent_id.to_string());
         if let Some(env) = self.attributes.labels.get("environment") {
             summary.insert("environment".to_string(), env.clone());
         }
@@ -292,13 +292,6 @@ impl ComponentConfig for AgentConfig {
     }
 }
 
-fn generate_agent_id() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()))
-}
-
 fn detect_environment() -> String {
     std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("ENV"))
@@ -337,9 +330,7 @@ fn set_nested_value(
     value: serde_json::Value,
 ) -> Result<()> {
     if path_parts.is_empty() {
-        return Err(oasis_core::error::CoreError::Config {
-            message: "Empty path not allowed".to_string(),
-        });
+        return Err(CoreError::config_error("Empty path not allowed"));
     }
 
     let mut current = json;
@@ -351,9 +342,10 @@ fn set_nested_value(
                 obj.insert(part.to_string(), value);
                 break;
             } else {
-                return Err(oasis_core::error::CoreError::Config {
-                    message: format!("Cannot set value at path: {}", path_parts.join(".")),
-                });
+                return Err(CoreError::config_error(format!(
+                    "Cannot set value at path: {}",
+                    path_parts.join(".")
+                )));
             }
         } else {
             // 中间部分，确保对象存在
@@ -366,9 +358,10 @@ fn set_nested_value(
                 }
                 current = obj.get_mut(*part).unwrap();
             } else {
-                return Err(oasis_core::error::CoreError::Config {
-                    message: format!("Invalid path: {}", path_parts.join(".")),
-                });
+                return Err(CoreError::config_error(format!(
+                    "Invalid path: {}",
+                    path_parts.join(".")
+                )));
             }
         }
     }

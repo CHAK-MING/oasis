@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use oasis_core::proto::{ApplyFileRequest, oasis_service_client::OasisServiceClient};
-use oasis_core::selector::CelSelector;
+use oasis_core::proto::{ApplyFileRequest, oasis_service_client::OasisServiceClient, TaskTargetMsg, task_target_msg, AgentIdList};
 
 /// File management commands for distributed file operations
 ///
@@ -17,6 +16,9 @@ use oasis_core::selector::CelSelector;
   
   # Apply configuration with atomic replacement and permissions
   oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --selector 'labels["environment"] == "prod"' --atomic --owner root:root --mode 0644
+  
+  # Apply file to specific agent IDs
+  oasis-cli file apply --src ./config.conf --dest /etc/config.conf --targets agent-1 agent-2 agent-3
   
   # Clear all files from object store
   oasis-cli file clear"#
@@ -43,9 +45,21 @@ pub enum FileArgs {
         #[arg(
             long,
             value_name = "CEL_EXPRESSION",
-            help = "CEL selector expression to target specific agents"
+            help = "CEL selector expression to target specific agents",
+            conflicts_with = "targets"
         )]
-        selector: String,
+        selector: Option<String>,
+        /// Agent IDs to target directly
+        ///
+        /// Specify a list of agent IDs to target directly, bypassing selector resolution.
+        /// This is useful when you know exactly which agents to target.
+        #[arg(
+            long = "target",
+            value_name = "AGENT_IDS",
+            help = "A list of agent IDs to target directly",
+            conflicts_with = "selector"
+        )]
+        targets: Vec<String>,
         /// Destination path on the target agents
         #[arg(
             long,
@@ -104,15 +118,31 @@ pub async fn run_file(
         FileArgs::Apply {
             src,
             selector,
+            targets,
             dest,
             sha256,
             owner,
             mode,
             atomic,
         } => {
-            // 本地校验选择器语法（尽早失败）
-            let _selector = CelSelector::new(selector.clone())
-                .map_err(|e| anyhow::anyhow!("Invalid selector: {}", e))?;
+            if selector.is_none() && targets.is_empty() {
+                return Err(anyhow::anyhow!("必须提供 --selector 或 --targets 参数之一。"));
+            }
+
+            let target_msg = if let Some(s) = selector {
+                TaskTargetMsg {
+                    target: Some(task_target_msg::Target::Selector(s)),
+                }
+            } else {
+                TaskTargetMsg {
+                    target: Some(task_target_msg::Target::AgentIds(AgentIdList {
+                        ids: targets
+                            .into_iter()
+                            .map(|id| oasis_core::proto::AgentId { value: id })
+                            .collect(),
+                    })),
+                }
+            };
 
             // 依据源文件名推断对象存储名称
             let object_name = std::path::Path::new(&src)
@@ -127,11 +157,11 @@ pub async fn run_file(
                     object_name,
                     file_data: data,
                     destination_path: dest,
-                    target_selector: selector,
                     expected_sha256: sha256.unwrap_or_default(),
                     owner: owner.unwrap_or_default(),
                     mode: mode.unwrap_or_default(),
                     atomic,
+                    target: Some(target_msg),
                 })
                 .await?;
             let resp = response.into_inner();

@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use indicatif::{ProgressBar, ProgressStyle};
 use oasis_core::proto::{
-    GetTaskResultRequest, StreamTaskResultsRequest, oasis_service_client::OasisServiceClient,
+    GetTaskResultRequest, StreamTaskResultsRequest, TaskId,
+    oasis_service_client::OasisServiceClient,
 };
 
 #[derive(Subcommand, Debug)]
@@ -35,8 +36,8 @@ pub async fn run_task(
             };
             let resp = client
                 .get_task_result(GetTaskResultRequest {
-                    task_id: id.clone(),
-                    agent_id: String::new(), // 空字符串：不指定特定 agent（返回任意一个结果）
+                    task_id: Some(TaskId { value: id.clone() }),
+                    agent_id: None, // 不指定特定 agent（返回任意一个结果）
                     wait_timeout_ms: wait_ms as i64,
                 })
                 .await?;
@@ -50,7 +51,10 @@ pub async fn run_task(
             }
             println!(
                 "task_id={} agent_id={} exit_code={} duration_ms={}",
-                r.task_id, r.agent_id, r.exit_code, r.duration_ms
+                r.task_id.as_ref().unwrap().value,
+                r.agent_id.as_ref().unwrap().value,
+                r.exit_code,
+                r.duration_ms
             );
             if !r.stdout.is_empty() {
                 println!("stdout:\n{}", r.stdout);
@@ -63,7 +67,7 @@ pub async fn run_task(
             println!("Watching results for task {}... (Ctrl+C to stop)", id);
             let mut stream = client
                 .stream_task_results(StreamTaskResultsRequest {
-                    task_id: id.clone(),
+                    task_id: Some(TaskId { value: id.clone() }),
                 })
                 .await?
                 .into_inner();
@@ -78,7 +82,11 @@ pub async fn run_task(
                 println!("\n===== Task Result =====");
                 println!(
                     "time={}  agent={}  status={}  exit_code={}  duration_ms={}",
-                    item.timestamp, item.agent_id, status, item.exit_code, item.duration_ms
+                    item.timestamp,
+                    item.agent_id.as_ref().unwrap().value,
+                    status,
+                    item.exit_code,
+                    item.duration_ms
                 );
                 if !item.stdout.is_empty() {
                     println!("--- stdout ---\n{}", item.stdout);

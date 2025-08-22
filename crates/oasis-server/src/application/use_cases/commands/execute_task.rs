@@ -36,7 +36,7 @@ impl ExecuteTaskUseCase {
 
         if target_agents.is_empty() {
             return Err(CoreError::Agent {
-                agent_id: "no agents found".to_string(),
+                agent_id: "no agents found".to_string().into(),
                 message: "No agents found for the given selector".to_string(),
             });
         }
@@ -46,17 +46,21 @@ impl ExecuteTaskUseCase {
 
         if online_agents.is_empty() {
             return Err(CoreError::Agent {
-                agent_id: "no online agents".to_string(),
+                agent_id: "no online agents".to_string().into(),
                 message: "No online agents available".to_string(),
             });
         }
 
         // 4. 构造任务规格
-        let agents_vec = online_agents.clone().into_iter().map(|s| s.into()).collect();
+        let agents_vec = online_agents
+            .clone()
+            .into_iter()
+            .map(|s| s.into())
+            .collect();
         let task_spec = TaskSpec::for_agents(uuid::Uuid::new_v4().to_string(), command, agents_vec)
-        .with_args(args)
-        .with_env(env.unwrap_or_default())
-        .with_timeout(timeout_seconds);
+            .with_args(args)
+            .with_env(env.unwrap_or_default())
+            .with_timeout(timeout_seconds);
 
         // 5. 创建任务对象
         let task = Task::from_spec(task_spec);
@@ -90,7 +94,6 @@ impl ExecuteTaskUseCase {
         if command.trim().is_empty() {
             return Err(CoreError::InvalidTask {
                 reason: "Command cannot be empty".to_string(),
-                
             });
         }
 
@@ -98,7 +101,6 @@ impl ExecuteTaskUseCase {
         if timeout_seconds == 0 {
             return Err(CoreError::InvalidTask {
                 reason: "Timeout must be greater than 0".to_string(),
-                
             });
         }
 
@@ -119,7 +121,6 @@ impl ExecuteTaskUseCase {
                         .strip_prefix("agent:")
                         .ok_or_else(|| CoreError::InvalidTask {
                             reason: format!("Invalid target format: {}", target),
-                            
                         })?;
                 resolved_set.insert(agent_id.to_string());
             } else if target == "default" || target.is_empty() {
@@ -150,7 +151,7 @@ impl ExecuteTaskUseCase {
             // 使用更宽松的 TTL 来匹配健康检查服务的逻辑
             // 健康检查服务使用 90 秒的 TTL，这里使用相同的值
             if node.is_online(90) {
-                online_agents.push(node.id);
+                online_agents.push(node.id.to_string());
             } else {
                 tracing::warn!(agent_id = %node.id, "Agent is offline");
             }

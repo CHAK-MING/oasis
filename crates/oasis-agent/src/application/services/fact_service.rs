@@ -44,9 +44,9 @@ impl FactService {
         let facts = self.collector.collect().await?;
 
         // 转换为 AgentFacts 并发布到 KV 存储
-        let agent_facts = self.convert_to_agent_facts(&facts).await;
+        let _agent_facts = self.convert_to_agent_facts(&facts).await;
         self.repository
-            .publish_facts(&self.agent_id, &agent_facts)
+            .publish_facts(&facts)
             .await?;
         info!("Published AgentFacts to KV storage");
 

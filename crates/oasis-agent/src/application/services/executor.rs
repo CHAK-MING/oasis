@@ -1,104 +1,101 @@
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use regex::Regex;
-use std::time::Duration;
+use oasis_core::error::{CoreError, Result};
+use serde::{Deserialize, Serialize};
+use std::process::Stdio;
+use tokio::process::Command;
 
-use crate::infrastructure::system::executor::CommandExecutor;
-
-/// 命令执行的输出结果
-#[derive(Debug, Clone)]
+/// 命令执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub duration_ms: u64,
 }
 
-/// 命令执行的输入参数
-#[derive(Debug, Clone)]
-pub struct ExecutionInput {
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: std::collections::HashMap<String, String>,
-    pub timeout: Duration,
-}
-
-/// 通用的异步执行器接口
+/// 命令执行器接口
 #[async_trait]
 pub trait Executor: Send + Sync {
-    async fn execute(&self, input: ExecutionInput) -> Result<ExecutionOutput>;
+    /// 执行命令
+    async fn execute(&self, command: &str, args: &[String]) -> Result<ExecutionOutput>;
 }
 
-/// 原生执行器适配器：包装现有的 CommandExecutor
-pub struct NativeExecutor {
-    inner: std::sync::Arc<CommandExecutor>,
-}
-
-impl NativeExecutor {
-    pub fn new(inner: std::sync::Arc<CommandExecutor>) -> Self {
-        Self { inner }
-    }
-}
+/// 原生命令执行器
+pub struct NativeExecutor;
 
 #[async_trait]
 impl Executor for NativeExecutor {
-    async fn execute(&self, input: ExecutionInput) -> Result<ExecutionOutput> {
-        // 直接委托给现有执行器（其内部已处理安全策略与超时控制）
-        let (exit_code, stdout, stderr) = self
-            .inner
-            .execute(&input.command, &input.args, &input.env)
-            .await?;
+    async fn execute(&self, command: &str, args: &[String]) -> Result<ExecutionOutput> {
+        let start = std::time::Instant::now();
+        
+        let output = Command::new(command)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| CoreError::TaskExecutionFailed {
+                task_id: oasis_core::types::TaskId::new("unknown"),
+                reason: format!("Command execution failed: {}", e),
+                retry_count: 0,
+            })?;
 
+        let duration = start.elapsed();
+        
         Ok(ExecutionOutput {
-            stdout,
-            stderr,
-            exit_code,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(-1),
+            duration_ms: duration.as_millis() as u64,
         })
     }
 }
 
-/// 策略执行器：基于正则表达式的 allow/deny 控制
-pub struct PolicyExecutor<E: Executor> {
-    inner: E,
-    allowed_patterns: Vec<Regex>,
-    denied_patterns: Vec<Regex>,
+/// 带策略控制的命令执行器
+pub struct PolicyExecutor {
+    allowed_commands: Vec<String>,
+    denied_commands: Vec<String>,
+    inner: Box<dyn Executor>,
 }
 
-impl<E: Executor> PolicyExecutor<E> {
-    pub fn new(inner: E, allowed: Vec<String>, denied: Vec<String>) -> Result<Self> {
-        let allowed_patterns = allowed
-            .into_iter()
-            .map(|p| Regex::new(&p))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let denied_patterns = denied
-            .into_iter()
-            .map(|p| Regex::new(&p))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Self {
+impl PolicyExecutor {
+    pub fn new(
+        allowed_commands: Vec<String>,
+        denied_commands: Vec<String>,
+        inner: Box<dyn Executor>,
+    ) -> Self {
+        Self {
+            allowed_commands,
+            denied_commands,
             inner,
-            allowed_patterns,
-            denied_patterns,
-        })
+        }
+    }
+
+    fn is_command_allowed(&self, command: &str) -> bool {
+        // 检查是否在拒绝列表中
+        if self.denied_commands.iter().any(|c| c == command) {
+            return false;
+        }
+
+        // 如果允许列表为空，则允许所有未被拒绝的命令
+        if self.allowed_commands.is_empty() {
+            return true;
+        }
+
+        // 检查是否在允许列表中
+        self.allowed_commands.iter().any(|c| c == command)
     }
 }
 
 #[async_trait]
-impl<E: Executor> Executor for PolicyExecutor<E> {
-    async fn execute(&self, input: ExecutionInput) -> Result<ExecutionOutput> {
-        let full = if input.args.is_empty() {
-            input.command.clone()
-        } else {
-            format!("{} {}", input.command, input.args.join(" "))
-        };
-
-        if self.denied_patterns.iter().any(|re| re.is_match(&full)) {
-            return Err(anyhow!("Command is explicitly denied by policy"));
-        }
-        if !self.allowed_patterns.is_empty()
-            && !self.allowed_patterns.iter().any(|re| re.is_match(&full))
-        {
-            return Err(anyhow!("Command is not in the allowlist"));
+impl Executor for PolicyExecutor {
+    async fn execute(&self, command: &str, args: &[String]) -> Result<ExecutionOutput> {
+        if !self.is_command_allowed(command) {
+            return Err(CoreError::PermissionDenied {
+                operation: format!("Command '{}' is not allowed by policy", command),
+            });
         }
 
-        self.inner.execute(input).await
+        self.inner.execute(command, args).await
     }
 }

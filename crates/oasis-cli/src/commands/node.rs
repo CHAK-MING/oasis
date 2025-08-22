@@ -1,6 +1,5 @@
 use anyhow::Result;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
-use oasis_core::selector::CelSelector;
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -113,55 +112,19 @@ async fn run_node_list(
     output: String,
     verbose: bool,
 ) -> Result<()> {
+    let request = tonic::Request::new(oasis_core::proto::ListNodesRequest { verbose, selector });
+    let nodes = client.list_nodes(request).await?.into_inner();
+
     let mut rows: Vec<NodeInfoRow> = Vec::new();
-
-    if let Some(selector_expr) = selector {
-        // 本地校验选择器语法
-        let _ = CelSelector::new(selector_expr.clone())
-            .map_err(|e| anyhow::anyhow!("Invalid selector: {}", e))?;
-
-        let request = tonic::Request::new(oasis_core::proto::ResolveSelectorRequest {
-            selector_expression: selector_expr.clone(),
-        });
-        let result = client.resolve_selector(request).await?.into_inner();
-        if !result.error_message.is_empty() {
-            anyhow::bail!("Selector resolution failed: {}", result.error_message);
-        }
-        for agent_id in result.agent_ids {
-            rows.push(fetch_node_row(client, &agent_id).await?);
-        }
-    } else {
-        let request = tonic::Request::new(oasis_core::proto::ListNodesRequest {
-            verbose,
-            selector: String::new(),
-        });
-        let nodes = client.list_nodes(request).await?.into_inner();
-        for node in nodes.nodes {
-            let facts: Value = serde_json::from_str(&node.facts_json)?;
-            let mut row = NodeInfoRow {
-                agent_id: node.agent_id.clone(),
-                facts,
-                labels: node.labels,
-                is_online: node.is_online,
-            };
-            // 回退策略：若 facts 缺失/不完整，直接再次拉取，避免展示不一致
-            let hostname_missing = row
-                .facts
-                .get("hostname")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                == "unknown";
-            let ip_missing = row
-                .facts
-                .get("primary_ip")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                == "unknown";
-            if hostname_missing || ip_missing {
-                row = fetch_node_row(client, &node.agent_id).await?;
-            }
-            rows.push(row);
-        }
+    for node in nodes.nodes {
+        let facts: Value = serde_json::from_str(&node.facts_json)?;
+        let row = NodeInfoRow {
+            agent_id: node.agent_id.as_ref().unwrap().value.clone(),
+            facts,
+            labels: node.labels,
+            is_online: node.is_online,
+        };
+        rows.push(row);
     }
 
     rows.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
@@ -182,21 +145,23 @@ async fn run_node_facts(
     selector: String,
     output: String,
 ) -> Result<()> {
-    let mut rows: Vec<NodeInfoRow> = Vec::new();
-
-    // Validate selector syntax locally
-    let _ = CelSelector::new(selector.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid selector: {}", e))?;
-
-    let req = tonic::Request::new(oasis_core::proto::ResolveSelectorRequest {
-        selector_expression: selector,
+    // 使用高效的 list_nodes 接口，一次性获取所有匹配节点的完整信息
+    let request = tonic::Request::new(oasis_core::proto::ListNodesRequest {
+        verbose: true, // 获取详细信息
+        selector: Some(selector),
     });
-    let result = client.resolve_selector(req).await?.into_inner();
-    if !result.error_message.is_empty() {
-        anyhow::bail!("Selector resolution failed: {}", result.error_message);
-    }
-    for id in result.agent_ids {
-        rows.push(fetch_node_row(client, &id).await?);
+    let nodes = client.list_nodes(request).await?.into_inner();
+
+    let mut rows: Vec<NodeInfoRow> = Vec::new();
+    for node in nodes.nodes {
+        let facts: Value = serde_json::from_str(&node.facts_json)?;
+        let row = NodeInfoRow {
+            agent_id: node.agent_id.as_ref().unwrap().value.clone(),
+            facts,
+            labels: node.labels,
+            is_online: node.is_online,
+        };
+        rows.push(row);
     }
 
     match output.as_str() {
@@ -205,49 +170,6 @@ async fn run_node_facts(
         _ => print_nodes_table(&rows, true),
     }
     Ok(())
-}
-
-async fn fetch_node_row(
-    client: &mut OasisServiceClient<tonic::transport::Channel>,
-    agent_id: &str,
-) -> Result<NodeInfoRow> {
-    let facts_req = tonic::Request::new(oasis_core::proto::GetNodeFactsRequest {
-        agent_id: agent_id.to_string(),
-    });
-    let facts_json = client
-        .get_node_facts(facts_req)
-        .await?
-        .into_inner()
-        .facts_json;
-    let facts: Value = serde_json::from_str(&facts_json)?;
-
-    let labels_req = tonic::Request::new(oasis_core::proto::GetNodeLabelsRequest {
-        agent_id: agent_id.to_string(),
-    });
-    let labels = client
-        .get_node_labels(labels_req)
-        .await?
-        .into_inner()
-        .labels;
-
-    let status_req = tonic::Request::new(oasis_core::proto::CheckAgentsRequest {
-        agent_ids: vec![agent_id.to_string()],
-    });
-    let is_online = client
-        .check_agents(status_req)
-        .await?
-        .into_inner()
-        .statuses
-        .first()
-        .map(|s| s.online)
-        .unwrap_or(false);
-
-    Ok(NodeInfoRow {
-        agent_id: agent_id.to_string(),
-        facts,
-        labels,
-        is_online,
-    })
 }
 
 fn print_nodes_table(nodes: &[NodeInfoRow], verbose: bool) {

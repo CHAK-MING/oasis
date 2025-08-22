@@ -1,42 +1,37 @@
 use super::status::AgentStatus;
 use oasis_core::selector::NodeAttributes;
+use oasis_core::types::AgentId;
+use serde::{Deserialize, Serialize};
 
+/// Agent 核心领域实体
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
-    pub id: String,
-    pub status: AgentStatus,
+    pub id: AgentId,
     pub attributes: NodeAttributes,
+    pub status: AgentStatus,
 }
 
 impl Agent {
-    pub fn new(id: String, attributes: NodeAttributes) -> Self {
+    pub fn new(id: AgentId, attributes: NodeAttributes) -> Self {
         Self {
             id,
-            status: AgentStatus::Initializing,
             attributes,
+            status: AgentStatus::Initializing,
         }
     }
 
-    /// 将 Agent 状态转换为 Running
-    pub fn start(&mut self) {
-        self.status = AgentStatus::Running;
+    pub fn set_status(&mut self, status: AgentStatus) {
+        self.status = status;
     }
 
-    /// 将 Agent 状态转换为 Draining
-    pub fn drain(&mut self) {
-        self.status = AgentStatus::Draining;
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, AgentStatus::Running)
     }
 
-    /// 将 Agent 状态转换为 Shutdown
-    pub fn shutdown(&mut self) {
-        self.status = AgentStatus::Shutdown;
-    }
-
-    /// 检查 Agent 是否可以接受新任务
     pub fn can_accept_tasks(&self) -> bool {
         matches!(self.status, AgentStatus::Running)
     }
 
-    /// 更新 attributes（整体替换）
     pub fn update_attributes(&mut self, new_attributes: NodeAttributes) {
         self.attributes = new_attributes;
     }

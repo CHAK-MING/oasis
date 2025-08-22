@@ -5,7 +5,7 @@ use oasis_agent::{
         heartbeat::HeartbeatService, task_processor::TaskProcessor,
     },
     config::AgentConfig,
-    domain::Agent,
+    domain::{Agent, AgentStatus},
     infrastructure::{
         nats::{client::NatsClient, fact_repository::NatsFactRepository},
         system::{executor::CommandExecutor, fact_collector::SystemMonitor},
@@ -63,7 +63,11 @@ async fn main() -> Result<()> {
 
     // 创建事实收集器与仓库
     let system_monitor = Arc::new(SystemMonitor::new());
-    let fact_repository = Arc::new(NatsFactRepository::new(&nats_client.client));
+    let fact_repository = Arc::new(NatsFactRepository::new(
+        nats_client.client.clone(),
+        "facts".to_string(),
+        "agent.".to_string(),
+    ));
 
     // Agent 标识
     let agent_id = AgentId::from(agent_config.agent.agent_id.clone());
@@ -92,10 +96,10 @@ async fn main() -> Result<()> {
 
     info!("Agent started with id: {}", agent_id);
 
-    // 将 Agent 状态设置为 Running
+    // 启动 Agent
     {
         let mut agent_guard = agent.write().await;
-        agent_guard.start();
+        agent_guard.set_status(AgentStatus::Running);
     }
     info!("Agent status set to Running");
 

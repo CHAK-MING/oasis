@@ -63,7 +63,7 @@ impl TaskProcessor {
 
         // 绑定消费者
         let consumer = loop {
-            match consumer_api.consume_tasks(&agent_id).await {
+            match consumer_api.consume_tasks(agent_id.as_str()).await {
                 Ok(c) => {
                     info!("Successfully created task consumer for agent: {}", agent_id);
                     break c;
@@ -98,7 +98,7 @@ impl TaskProcessor {
             file_handler.clone(),
             publisher.clone(),
             labels_repo.clone(),
-            agent_id.clone(),
+            agent_id.to_string(),
             dlq_js.clone(),
             self.limiters.clone(),
         ));

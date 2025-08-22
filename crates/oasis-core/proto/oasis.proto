@@ -2,6 +2,31 @@ syntax = "proto3";
 
 package oasis;
 
+// ===== 强类型 ID 定义 =====
+message AgentId {
+  string value = 1;
+}
+
+message TaskId {
+  string value = 1;
+}
+
+message RolloutId {
+  string value = 1;
+}
+
+// ===== 统一的任务目标消息 =====
+message TaskTargetMsg {
+  oneof target {
+    AgentIdList agent_ids = 1;
+    string selector = 2;
+  }
+}
+
+message AgentIdList {
+  repeated AgentId ids = 1;
+}
+
 // Oasis 管理服务
 service OasisService {
   rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
@@ -24,8 +49,7 @@ service OasisService {
   rpc GetNodeFacts(GetNodeFactsRequest) returns (GetNodeFactsResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
 
-  // CEL选择器解析
-  rpc ResolveSelector(ResolveSelectorRequest) returns (ResolveSelectorResponse);
+
 
   // 灰度发布管理
   rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
@@ -51,18 +75,17 @@ service OasisService {
 }
 
 message ExecuteTaskRequest {
-
-  repeated string targets = 1;
-  string command = 2;
-  repeated string args = 3;
-  int64 timeout_seconds = 4;
+  string command = 1;
+  repeated string args = 2;
+  int64 timeout_seconds = 3;
   // Optional environment variables for the task execution
-  map<string, string> env = 5;
+  map<string, string> env = 4;
+  TaskTargetMsg target = 5; // 使用统一的目标消息
 }
 
 message ExecuteTaskResponse {
   // 返回任务 ID，用于后续追踪
-  string task_id = 1;
+  TaskId task_id = 1;
 }
 
 message HealthCheckRequest {}
@@ -75,11 +98,11 @@ message HealthCheckResponse {
 }
 
 message CheckAgentsRequest {
-  repeated string agent_ids = 1;
+  repeated AgentId agent_ids = 1;
 }
 
 message AgentStatus {
-  string agent_id = 1;
+  AgentId agent_id = 1;
   bool online = 2;
 }
 
@@ -88,17 +111,17 @@ message CheckAgentsResponse {
 }
 
 message GetTaskResultRequest {
-  string task_id = 1;
+  TaskId task_id = 1;
   // 等待超时（毫秒），为 0 表示不等待
   int64 wait_timeout_ms = 2;
   // 指定查询哪个 agent 的结果，如果为空，则返回第一个成功的结果
-  string agent_id = 3;
+  optional AgentId agent_id = 3; // 标记为 optional
 }
 
 message GetTaskResultResponse {
   bool found = 1;
-  string task_id = 2;
-  string agent_id = 3;
+  TaskId task_id = 2;
+  AgentId agent_id = 3;
   string stdout = 4;
   string stderr = 5;
   int32 exit_code = 6;
@@ -107,12 +130,12 @@ message GetTaskResultResponse {
 }
 
 message StreamTaskResultsRequest {
-  string task_id = 1;
+  TaskId task_id = 1;
 }
 
 message StreamTaskResultsResponse {
-  string task_id = 1;
-  string agent_id = 2;
+  TaskId task_id = 1;
+  AgentId agent_id = 2;
   string stdout = 3;
   string stderr = 4;
   int32 exit_code = 5;
@@ -122,36 +145,23 @@ message StreamTaskResultsResponse {
 
 
 
-
-// CEL选择器解析消息
-message ResolveSelectorRequest {
-  string selector_expression = 1;
-}
-
-message ResolveSelectorResponse {
-  repeated string agent_ids = 1;
-  int32 total_nodes = 2;
-  int32 matched_nodes = 3;
-  string error_message = 4;
-}
-
 // 文件管理消息
 message ApplyFileRequest {
   string object_name = 1;    
   bytes file_data = 2;           
   string destination_path = 3;   
-  string target_selector = 4;    
-  string expected_sha256 = 5;   
-  string owner = 6;            
-  string mode = 7;              
-  bool atomic = 8;         
+  string expected_sha256 = 4;   
+  string owner = 5;            
+  string mode = 6;              
+  bool atomic = 7;
+  TaskTargetMsg target = 8; // 使用统一的目标消息
 }
 
 message ApplyFileResponse {
   bool success = 1;
   string message = 2;
-  repeated string applied_nodes = 3;
-  repeated string failed_nodes = 4;
+  repeated AgentId applied_nodes = 3; // 改为 AgentId
+  repeated AgentId failed_nodes = 4;  // 改为 AgentId
 }
 
 message ClearFilesRequest {}
@@ -160,7 +170,7 @@ message ClearFilesResponse { uint64 deleted_count = 1; }
 // Removed: SetNodeLabels/DeleteNodeLabels (unused by CLI)
 
 message GetNodeLabelsRequest {
-  string agent_id = 1;
+  AgentId agent_id = 1;
 }
 
 message GetNodeLabelsResponse {
@@ -168,7 +178,7 @@ message GetNodeLabelsResponse {
 }
 
 message GetNodeFactsRequest {
-  string agent_id = 1;
+  AgentId agent_id = 1;
 }
 
 message GetNodeFactsResponse {
@@ -177,11 +187,11 @@ message GetNodeFactsResponse {
 
 message ListNodesRequest {
   bool verbose = 1;
-  string selector = 2; // Optional selector expression
+  optional string selector = 2; // 标记为 optional
 }
 
 message NodeInfo {
-  string agent_id = 1;
+  AgentId agent_id = 1;
   bool is_online = 2;
   string facts_json = 3; // JSON serialized AgentFacts
   map<string, string> labels = 4;
@@ -195,51 +205,51 @@ message ListNodesResponse {
 
 message CreateRolloutRequest {
   string name = 1;
-  string target_selector = 2;
-  TaskSpecMsg task = 3;
-  RolloutConfigMsg config = 4;
-  map<string, string> labels = 5;
+  TaskSpecMsg task = 2;
+  RolloutConfigMsg config = 3;
+  map<string, string> labels = 4;
+  TaskTargetMsg target = 5; // 使用统一的目标消息
 }
 
 message CreateRolloutResponse {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
 }
 
 message StartRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
 }
 
 message StartRolloutResponse {}
 
 message PauseRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
   string reason = 2;
 }
 
 message PauseRolloutResponse {}
 
 message ResumeRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
 }
 
 message ResumeRolloutResponse {}
 
 message AbortRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
   string reason = 2;
 }
 
 message AbortRolloutResponse {}
 
 message RollbackRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
   string reason = 2;
 }
 
 message RollbackRolloutResponse {}
 
 message GetRolloutRequest {
-  string rollout_id = 1;
+  RolloutId rollout_id = 1;
 }
 
 message GetRolloutResponse {
@@ -258,13 +268,12 @@ message ListRolloutsResponse {
 // ===== Structured messages replacing JSON =====
 
 message TaskSpecMsg {
-  string id = 1;
+  TaskId id = 1;
   string command = 2;
   repeated string args = 3;
   map<string, string> env = 4;
-  repeated string target_agents = 5;
-  string selector = 6; // optional CEL selector
-  uint32 timeout_seconds = 7;
+  uint32 timeout_seconds = 5;
+  TaskTargetMsg target = 6; // 使用统一的目标消息
 }
 
 message BatchSizeMsg {
@@ -329,19 +338,19 @@ message RolloutStateDataMsg {
 }
 
 message RolloutMsg {
-  string id = 1;
+  RolloutId id = 1;
   string name = 2;
   TaskSpecMsg task = 3;
-  string target_selector = 4;
+  TaskTargetMsg target = 4; // 使用统一的目标消息
   RolloutConfigMsg config = 5;
   RolloutStateEnum state = 6;
   RolloutStateDataMsg state_data = 7;
   RolloutProgressMsg progress = 8;
   repeated BatchResultMsg batch_results = 9;
-  repeated string processed_nodes = 10;
-  map<string, string> current_batch_tasks = 11;
+  repeated AgentId processed_nodes = 10;
+  map<string, TaskId> current_batch_tasks = 11; // 注意：key 是 AgentId 的字符串表示
   int64 current_batch_started_at = 12; // 0 if none
-  repeated string cached_target_nodes = 13;
+  repeated AgentId cached_target_nodes = 13;
   int64 created_at = 14;
   int64 updated_at = 15;
   uint64 version = 16;
@@ -355,10 +364,10 @@ message ApplyAgentConfigRequest {
 message ApplyAgentConfigResponse {
   uint64 applied_agents = 1;
 }
-message GetAgentConfigRequest { string agent_id = 1; string key = 2; }
+message GetAgentConfigRequest { AgentId agent_id = 1; string key = 2; }
 message GetAgentConfigResponse { bool found = 1; string value = 2; }
-message SetAgentConfigRequest { string agent_id = 1; string key = 2; string value = 3; }
-message DelAgentConfigRequest { string agent_id = 1; string key = 2; }
+message SetAgentConfigRequest { AgentId agent_id = 1; string key = 2; string value = 3; }
+message DelAgentConfigRequest { AgentId agent_id = 1; string key = 2; }
 message SetAgentConfigResponse {}
 message DelAgentConfigResponse {}
 
@@ -367,7 +376,7 @@ message ClearAgentConfigsForSelectorResponse { uint64 cleared_agents = 1; uint64
 
 // 新增的 Agent 配置管理消息
 message ListAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
   string prefix = 2; // 可选的前缀过滤
 }
 message ListAgentConfigResponse { 
@@ -376,7 +385,7 @@ message ListAgentConfigResponse {
 }
 
 message ShowAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
 }
 message ShowAgentConfigResponse { 
   map<string, string> summary = 1; // 配置摘要信息
@@ -384,7 +393,7 @@ message ShowAgentConfigResponse {
 }
 
 message BackupAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
   string output_format = 2; // "toml", "json", "yaml"
 }
 message BackupAgentConfigResponse { 
@@ -394,7 +403,7 @@ message BackupAgentConfigResponse {
 }
 
 message RestoreAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
   bytes config_data = 2; // 序列化的配置数据
   string format = 3; // "toml", "json", "yaml"
   bool overwrite = 4; // 是否覆盖现有配置
@@ -405,7 +414,7 @@ message RestoreAgentConfigResponse {
 }
 
 message ValidateAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
   bytes config_data = 2; // 要验证的配置数据
   string format = 3; // "toml", "json", "yaml"
 }
@@ -416,7 +425,7 @@ message ValidateAgentConfigResponse {
 }
 
 message DiffAgentConfigRequest { 
-  string agent_id = 1; 
+  AgentId agent_id = 1; 
   bytes from_config = 2; // 源配置数据
   bytes to_config = 3; // 目标配置数据
   string format = 4; // "toml", "json", "yaml"

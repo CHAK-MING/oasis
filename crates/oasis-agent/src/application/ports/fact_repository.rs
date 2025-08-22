@@ -1,7 +1,11 @@
-use anyhow::Result;
-use oasis_core::{agent::AgentFacts, types::AgentId};
+use async_trait::async_trait;
+use oasis_core::error::Result;
 
-#[async_trait::async_trait]
+use crate::domain::models::SystemFacts;
+
+/// 系统信息发布接口
+#[async_trait]
 pub trait FactRepositoryPort: Send + Sync {
-    async fn publish_facts(&self, agent_id: &AgentId, facts: &AgentFacts) -> Result<()>;
+    /// 发布系统信息
+    async fn publish_facts(&self, facts: &SystemFacts) -> Result<()>;
 }

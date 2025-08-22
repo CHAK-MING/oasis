@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::error::{CoreError, Result};
+use crate::type_defs::AgentId;
 
 /// 编译后的程序缓存
 static PROGRAM_CACHE: Lazy<DashMap<String, Arc<Program>>> = Lazy::new(DashMap::new);
@@ -33,7 +34,7 @@ pub fn cache_stats() -> (usize, usize, usize) {
 /// 节点属性
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAttributes {
-    pub id: String,
+    pub id: AgentId,
     pub labels: HashMap<String, String>,
     pub groups: Vec<String>,
     pub version: String,
@@ -41,9 +42,9 @@ pub struct NodeAttributes {
 }
 
 impl NodeAttributes {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: impl Into<AgentId>) -> Self {
         Self {
-            id,
+            id: id.into(),
             labels: HashMap::new(),
             groups: Vec::new(),
             version: "1.0.0".to_string(),
@@ -56,8 +57,8 @@ impl NodeAttributes {
         let mut variables = HashMap::new();
 
         // 基本属性
-        variables.insert("id".to_string(), self.id.as_str().into());
-        variables.insert("agent_id".to_string(), self.id.as_str().into());
+        variables.insert("id".to_string(), self.id.as_ref().into());
+        variables.insert("agent_id".to_string(), self.id.as_ref().into());
         variables.insert("version".to_string(), self.version.as_str().into());
 
         // 标签映射
@@ -170,7 +171,7 @@ impl CelSelector {
     }
 
     /// 批量评估
-    pub fn filter_nodes(&self, nodes: &[NodeAttributes]) -> Result<Vec<String>> {
+    pub fn filter_nodes(&self, nodes: &[NodeAttributes]) -> Result<Vec<AgentId>> {
         let mut matched = Vec::new();
 
         for node in nodes {
@@ -234,21 +235,21 @@ impl SelectorBuilder {
 
 /// 选择器引擎 trait
 pub trait SelectorEngine: Send + Sync {
-    fn resolve(&self, expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<String>>;
+    fn resolve(&self, expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<AgentId>>;
 }
 
 /// 默认选择器引擎实现
 pub struct DefaultSelectorEngine;
 
 impl SelectorEngine for DefaultSelectorEngine {
-    fn resolve(&self, expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<String>> {
+    fn resolve(&self, expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<AgentId>> {
         let selector = CelSelector::new(expression.to_string())?;
         selector.filter_nodes(nodes)
     }
 }
 
 /// 便捷函数：解析选择器
-pub fn resolve_selector(expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<String>> {
+pub fn resolve_selector(expression: &str, nodes: &[NodeAttributes]) -> Result<Vec<AgentId>> {
     let engine = DefaultSelectorEngine;
     engine.resolve(expression, nodes)
 }

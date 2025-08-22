@@ -1,4 +1,5 @@
 use oasis_core::selector::NodeAttributes;
+use oasis_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -7,7 +8,6 @@ use std::collections::HashMap;
 pub struct NodeHeartbeat {
     pub timestamp: i64,
     pub version: String,
-    pub environment: String,
 }
 
 /// 节点标签
@@ -35,7 +35,7 @@ pub enum NodeStatus {
 /// 节点聚合根 - 核心业务实体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    pub id: String,
+    pub id: AgentId,
     pub heartbeat: NodeHeartbeat,
     pub labels: NodeLabels,
     pub facts: NodeFacts,
@@ -71,7 +71,7 @@ impl Node {
 
     /// 从部分数据构造 NodeAttributes，适用于特定场景。
     pub fn attributes_from_parts(
-        id: &str,
+        id: &AgentId,
         labels: Option<&HashMap<String, String>>,
         facts: Option<&HashMap<String, String>>,
         version: Option<&str>,
@@ -80,7 +80,7 @@ impl Node {
         let groups: Vec<String> = Vec::new();
 
         NodeAttributes {
-            id: id.to_string(),
+            id: id.clone(),
             labels: labels_map,
             groups,
             version: version.unwrap_or("").to_string(),

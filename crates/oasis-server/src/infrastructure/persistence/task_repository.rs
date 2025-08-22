@@ -250,7 +250,7 @@ impl TaskRepository for NatsTaskRepository {
                 message: e.to_string(),
             })?;
 
-        Ok(task.id)
+        Ok(task.id.to_string())
     }
 
     async fn get(&self, id: &str) -> Result<Task, CoreError> {
@@ -269,7 +269,6 @@ impl TaskRepository for NatsTaskRepository {
             }
             None => Err(CoreError::InvalidTask {
                 reason: "Task not found".to_string(),
-                
             }),
         }
     }
@@ -301,14 +300,12 @@ impl TaskRepository for NatsTaskRepository {
                         })?
                         .ok_or(CoreError::InvalidTask {
                             reason: "Task not found".to_string(),
-                            
                         })?;
 
-                    let mut task: Task = serde_json::from_slice(&entry).map_err(|e| {
-                        CoreError::Serialization {
+                    let mut task: Task =
+                        serde_json::from_slice(&entry).map_err(|e| CoreError::Serialization {
                             message: e.to_string(),
-                        }
-                    })?;
+                        })?;
 
                     // 使用 Task::apply_status 执行状态迁移校验
                     task.apply_status(status)?;
@@ -397,8 +394,8 @@ impl TaskRepository for NatsTaskRepository {
                     {
                         // 将 TaskExecution 转换为 TaskResult
                         let task_result = TaskResult {
-                            task_id: task_execution.task_id.as_str().to_string(),
-                            agent_id: task_execution.agent_id.as_str().to_string(),
+                            task_id: task_execution.task_id.clone(),
+                            agent_id: task_execution.agent_id.clone(),
                             status: match task_execution.exit_code {
                                 Some(0) => crate::domain::models::task::TaskStatus::Completed {
                                     exit_code: 0,
@@ -476,8 +473,8 @@ impl TaskRepository for NatsTaskRepository {
                                 {
                                     // 将 TaskExecution 转换为 TaskResult
                                     let task_result = TaskResult {
-                                        task_id: task_execution.task_id.as_str().to_string(),
-                                        agent_id: task_execution.agent_id.as_str().to_string(),
+                                        task_id: task_execution.task_id.clone(),
+                                        agent_id: task_execution.agent_id.clone(),
                                         status: match task_execution.exit_code {
                                             Some(0) => {
                                                 crate::domain::models::task::TaskStatus::Completed {
@@ -565,8 +562,8 @@ impl TaskRepository for NatsTaskRepository {
                 );
                 // 将 TaskExecution 转换为 TaskResult
                 let task_result = TaskResult {
-                    task_id: task_execution.task_id.as_str().to_string(),
-                    agent_id: task_execution.agent_id.as_str().to_string(),
+                    task_id: task_execution.task_id.clone(),
+                    agent_id: task_execution.agent_id.clone(),
                     status: match task_execution.exit_code {
                         Some(0) => {
                             crate::domain::models::task::TaskStatus::Completed { exit_code: 0 }
@@ -644,10 +641,9 @@ impl TaskRepository for NatsTaskRepository {
         // 根据目标节点发布任务（幂等 + 去重 + Ack 确认 + 轻量重试）
         for agent_id in &task.target_agents() {
             let subject = format!("tasks.exec.agent.{}", agent_id);
-            let data =
-                serde_json::to_vec(&task_spec).map_err(|e| CoreError::Serialization {
-                    message: e.to_string(),
-                })?;
+            let data = serde_json::to_vec(&task_spec).map_err(|e| CoreError::Serialization {
+                message: e.to_string(),
+            })?;
 
             // 设置 Nats-Msg-Id = <task_id>@<subject>，确保同一任务在不同 subject 上不会误去重
             let mut headers = HeaderMap::new();
@@ -694,7 +690,7 @@ impl TaskRepository for NatsTaskRepository {
 
         tracing::info!(task_id = %task_id, "Task published to JetStream");
 
-        Ok(task_id)
+        Ok(task_id.to_string())
     }
 }
 
@@ -724,8 +720,8 @@ impl ResultConsumer for NatsResultConsumer {
                     {
                         // 将 TaskExecution 转换为 TaskResult
                         let task_result = TaskResult {
-                            task_id: task_execution.task_id.as_str().to_string(),
-                            agent_id: task_execution.agent_id.as_str().to_string(),
+                            task_id: task_execution.task_id.clone(),
+                            agent_id: task_execution.agent_id.clone(),
                             status: match task_execution.exit_code {
                                 Some(0) => crate::domain::models::task::TaskStatus::Completed {
                                     exit_code: 0,

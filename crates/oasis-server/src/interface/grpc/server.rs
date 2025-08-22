@@ -9,9 +9,9 @@ use oasis_core::proto::{
     AbortRolloutRequest, AbortRolloutResponse, CheckAgentsRequest, CheckAgentsResponse,
     CreateRolloutRequest, CreateRolloutResponse, ExecuteTaskRequest, ExecuteTaskResponse,
     GetNodeFactsResponse, GetTaskResultRequest, GetTaskResultResponse, HealthCheckRequest,
-    HealthCheckResponse, PauseRolloutRequest, PauseRolloutResponse, ResolveSelectorRequest,
-    ResolveSelectorResponse, ResumeRolloutRequest, ResumeRolloutResponse, RollbackRolloutRequest,
-    RollbackRolloutResponse, StartRolloutRequest, StartRolloutResponse,
+    HealthCheckResponse, PauseRolloutRequest, PauseRolloutResponse, ResumeRolloutRequest,
+    ResumeRolloutResponse, RollbackRolloutRequest, RollbackRolloutResponse, StartRolloutRequest,
+    StartRolloutResponse,
 };
 use oasis_core::types::TaskSpec;
 
@@ -85,46 +85,77 @@ impl OasisServer {
 }
 
 // ===== Converters between domain and proto messages =====
+use oasis_core::proto::task_target_msg::Target as ProtoTaskTarget;
+use oasis_core::task::TaskTarget;
+
 fn from_proto_task_spec(msg: &oasis_core::proto::TaskSpecMsg) -> TaskSpec {
-    let id: oasis_core::types::TaskId = if msg.id.is_empty() {
+    let id: oasis_core::types::TaskId = if let Some(task_id) = &msg.id {
+        if task_id.value.is_empty() {
+            uuid::Uuid::new_v4().to_string().into()
+        } else {
+            task_id.value.clone().into()
+        }
+    } else {
         uuid::Uuid::new_v4().to_string().into()
-    } else {
-        msg.id.clone().into()
     };
-    let mut spec = if !msg.selector.is_empty() {
-        TaskSpec::with_selector(id, msg.command.clone(), msg.selector.clone())
-    } else {
-        let agents = msg
-            .target_agents
-            .iter()
-            .cloned()
-            .map(|s| s.into())
-            .collect();
-        TaskSpec::for_agents(id, msg.command.clone(), agents)
+
+    // 从 TaskTargetMsg oneof 字段中解析出 TaskTarget
+    let target = match msg.target.as_ref().and_then(|t| t.target.as_ref()) {
+        Some(ProtoTaskTarget::AgentIds(agents)) => TaskTarget::Agents(
+            agents
+                .ids
+                .iter()
+                .map(|id| id.value.clone().into())
+                .collect(),
+        ),
+        Some(ProtoTaskTarget::Selector(s)) => TaskTarget::Selector(s.clone()),
+        None => TaskTarget::Agents(Vec::new()), // or handle as an error
     };
-    spec = spec
-        .with_args(msg.args.clone())
-        .with_env(msg.env.clone())
-        .with_timeout(msg.timeout_seconds);
+
+    let mut spec = TaskSpec {
+        id,
+        command: msg.command.clone(),
+        args: msg.args.clone(),
+        env: msg.env.clone(),
+        target,
+        timeout_seconds: msg.timeout_seconds,
+    };
+
     spec
 }
 
 fn to_proto_task_spec(task: &TaskSpec) -> oasis_core::proto::TaskSpecMsg {
-    let (agents, selector) = match task.target {
-        oasis_core::task::TaskTarget::Agents(ref v) => (
-            v.iter().map(|a| a.as_str().to_string()).collect(),
-            String::new(),
-        ),
-        oasis_core::task::TaskTarget::Selector(ref s) => (Vec::new(), s.clone()),
-        oasis_core::task::TaskTarget::AllAgents => (Vec::new(), String::from("true")),
+    use oasis_core::proto::{
+        AgentIdList, TaskTargetMsg, task_target_msg::Target as ProtoTaskTarget,
     };
+
+    let target_msg = match &task.target {
+        TaskTarget::Agents(v) => TaskTargetMsg {
+            target: Some(ProtoTaskTarget::AgentIds(AgentIdList {
+                ids: v
+                    .iter()
+                    .map(|id| oasis_core::proto::AgentId {
+                        value: id.to_string(),
+                    })
+                    .collect(),
+            })),
+        },
+        TaskTarget::Selector(s) => TaskTargetMsg {
+            target: Some(ProtoTaskTarget::Selector(s.clone())),
+        },
+        TaskTarget::AllAgents => TaskTargetMsg {
+            target: Some(ProtoTaskTarget::Selector("true".to_string())),
+        },
+    };
+
     oasis_core::proto::TaskSpecMsg {
-        id: task.id.as_str().to_string(),
+        id: Some(oasis_core::proto::TaskId {
+            value: task.id.to_string(),
+        }),
         command: task.command.clone(),
         args: task.args.clone(),
         env: task.env.clone(),
-        target_agents: agents,
-        selector,
+        target: Some(target_msg),
         timeout_seconds: task.timeout_seconds,
     }
 }
@@ -357,20 +388,47 @@ fn to_proto_state(
 
 fn to_proto_rollout(r: &crate::domain::models::rollout::Rollout) -> oasis_core::proto::RolloutMsg {
     let (state, state_data) = to_proto_state(r);
+
+    // 构建 TaskTargetMsg - 使用 target_selector 字段
+    let target_msg = oasis_core::proto::TaskTargetMsg {
+        target: Some(oasis_core::proto::task_target_msg::Target::Selector(
+            r.target_selector.clone(),
+        )),
+    };
+
     oasis_core::proto::RolloutMsg {
-        id: r.id.clone(),
+        id: Some(oasis_core::proto::RolloutId {
+            value: r.id.clone(),
+        }),
         name: r.name.clone(),
         task: Some(to_proto_task_spec(&r.task)),
-        target_selector: r.target_selector.clone(),
+        target: Some(target_msg),
         config: Some(to_proto_rollout_config(&r.config)),
         state: state as i32,
         state_data: Some(state_data),
         progress: Some(to_proto_progress(&r.progress)),
         batch_results: r.batch_results.iter().map(to_proto_batch_result).collect(),
-        processed_nodes: r.processed_nodes.iter().cloned().collect(),
-        current_batch_tasks: r.current_batch_tasks.clone(),
+        processed_nodes: r
+            .processed_nodes
+            .iter()
+            .map(|id| oasis_core::proto::AgentId { value: id.clone() })
+            .collect(),
+        current_batch_tasks: r
+            .current_batch_tasks
+            .iter()
+            .map(|(k, v)| (k.clone(), oasis_core::proto::TaskId { value: v.clone() }))
+            .collect(),
         current_batch_started_at: r.current_batch_started_at.unwrap_or(0),
-        cached_target_nodes: r.cached_target_nodes.clone().unwrap_or_default(),
+        cached_target_nodes: r
+            .cached_target_nodes
+            .as_ref()
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .map(|id| oasis_core::proto::AgentId { value: id.clone() })
+                    .collect()
+            })
+            .unwrap_or_default(),
         created_at: r.created_at,
         updated_at: r.updated_at,
         version: r.version,
@@ -429,18 +487,33 @@ impl oasis_service_server::OasisService for OasisServer {
         if req.command.trim().is_empty() {
             return Err(Status::invalid_argument("Command cannot be empty"));
         }
-        if req.targets.is_empty() {
-            return Err(Status::invalid_argument("Targets cannot be empty"));
+        if req.target.is_none() {
+            return Err(Status::invalid_argument("Target cannot be empty"));
         }
         if req.timeout_seconds <= 0 {
             return Err(Status::invalid_argument("Timeout must be greater than 0"));
         }
 
+        // 从 TaskTargetMsg 中解析目标信息
+        let targets = match req.target.as_ref().and_then(|t| t.target.as_ref()) {
+            Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => {
+                // 解析选择器获取目标节点
+                self.manage_nodes_use_case
+                    .resolve_selector(s)
+                    .await
+                    .map_err(map_core_error)?
+            }
+            Some(oasis_core::proto::task_target_msg::Target::AgentIds(agents)) => {
+                agents.ids.iter().map(|id| id.value.clone()).collect()
+            }
+            None => return Err(Status::invalid_argument("Invalid target specification")),
+        };
+
         // 调用 Application 层的用例
         let task_id = self
             .execute_task_use_case
             .execute(
-                req.targets,
+                targets,
                 req.command,
                 req.args,
                 req.timeout_seconds as u32,
@@ -452,7 +525,9 @@ impl oasis_service_server::OasisService for OasisServer {
         // 记录 task_id 到追踪 span 中
         tracing::Span::current().record("task_id", &task_id);
 
-        Ok(Response::new(ExecuteTaskResponse { task_id }))
+        Ok(Response::new(ExecuteTaskResponse {
+            task_id: Some(oasis_core::proto::TaskId { value: task_id }),
+        }))
     }
 
     #[instrument(skip_all)]
@@ -461,19 +536,17 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<GetTaskResultRequest>,
     ) -> Result<Response<GetTaskResultResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("task_id", &req.task_id);
+        if let Some(task_id) = &req.task_id {
+            tracing::Span::current().record("task_id", &task_id.value);
+        }
 
-        let task_id = req.task_id.clone();
-        let agent_id = if req.agent_id.is_empty() {
-            None
-        } else {
-            Some(req.agent_id.clone())
-        };
+        let task_id = req.task_id.as_ref().unwrap().value.clone();
+        let agent_id = req.agent_id.as_ref().map(|id| id.value.as_str());
         let wait_timeout_ms = req.wait_timeout_ms;
 
         let get_result_closure = || async {
             self.execute_task_use_case
-                .get_task_result(&task_id, agent_id.as_deref())
+                .get_task_result(&task_id, agent_id)
                 .await
                 .map_err(map_core_error)
         };
@@ -484,8 +557,12 @@ impl oasis_service_server::OasisService for OasisServer {
                     found: true,
                     timestamp: task_result.timestamp,
                     duration_ms: task_result.duration_ms,
-                    task_id: task_result.task_id.clone(),
-                    agent_id: task_result.agent_id.clone(),
+                    task_id: Some(oasis_core::proto::TaskId {
+                        value: task_result.task_id.to_string(),
+                    }),
+                    agent_id: Some(oasis_core::proto::AgentId {
+                        value: task_result.agent_id.to_string(),
+                    }),
                     exit_code: match task_result.status {
                         crate::domain::models::task::TaskStatus::Completed { exit_code } => {
                             exit_code
@@ -500,7 +577,9 @@ impl oasis_service_server::OasisService for OasisServer {
         let not_found_response = || -> GetTaskResultResponse {
             GetTaskResultResponse {
                 found: false,
-                task_id: task_id.clone(),
+                task_id: Some(oasis_core::proto::TaskId {
+                    value: task_id.clone(),
+                }),
                 agent_id: req.agent_id.clone(),
                 ..Default::default()
             }
@@ -540,38 +619,24 @@ impl oasis_service_server::OasisService for OasisServer {
         let req = request.into_inner();
 
         // 调用 Application 层的用例检查代理状态
+        let agent_ids: Vec<String> = req.agent_ids.iter().map(|id| id.value.clone()).collect();
         let statuses = self
             .manage_nodes_use_case
-            .check_agents(req.agent_ids)
+            .check_agents(agent_ids)
             .await
             .map_err(map_core_error)?;
 
-        Ok(Response::new(CheckAgentsResponse { statuses }))
-    }
-
-    #[instrument(skip_all)]
-    // list_online_agents removed (not in proto)
-    #[instrument(skip_all)]
-    async fn resolve_selector(
-        &self,
-        request: Request<ResolveSelectorRequest>,
-    ) -> Result<Response<ResolveSelectorResponse>, Status> {
-        let req = request.into_inner();
-
-        // 调用 Application 层的用例解析选择器
-        let agent_ids = self
-            .manage_nodes_use_case
-            .resolve_selector(&req.selector_expression)
-            .await
-            .map_err(map_core_error)?;
-        let total_nodes = agent_ids.len() as i32;
-        let matched_nodes = agent_ids.len() as i32;
-
-        Ok(Response::new(ResolveSelectorResponse {
-            agent_ids,
-            total_nodes,
-            matched_nodes,
-            error_message: "".to_string(),
+        let proto_statuses: Vec<oasis_core::proto::AgentStatus> = statuses
+            .into_iter()
+            .map(|status| oasis_core::proto::AgentStatus {
+                agent_id: Some(oasis_core::proto::AgentId {
+                    value: status.agent_id.as_ref().unwrap().value.clone(),
+                }),
+                online: status.online,
+            })
+            .collect();
+        Ok(Response::new(CheckAgentsResponse {
+            statuses: proto_statuses,
         }))
     }
 
@@ -592,8 +657,8 @@ impl oasis_service_server::OasisService for OasisServer {
         if req.destination_path.trim().is_empty() {
             return Err(Status::invalid_argument("Destination path cannot be empty"));
         }
-        if req.target_selector.trim().is_empty() {
-            return Err(Status::invalid_argument("Target selector cannot be empty"));
+        if req.target.is_none() {
+            return Err(Status::invalid_argument("Target cannot be empty"));
         }
         if req.file_data.is_empty() {
             return Err(Status::invalid_argument("File data cannot be empty"));
@@ -606,16 +671,26 @@ impl oasis_service_server::OasisService for OasisServer {
             .map_err(map_core_error)?;
 
         // 1. 解析选择器获取目标节点
+        let target_selector = match req.target.as_ref().and_then(|t| t.target.as_ref()) {
+            Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => s.clone(),
+            Some(oasis_core::proto::task_target_msg::Target::AgentIds(_)) => {
+                return Err(Status::invalid_argument(
+                    "Agent list targets not supported for file apply",
+                ));
+            }
+            None => return Err(Status::invalid_argument("Invalid target specification")),
+        };
+
         let response = self
             .manage_nodes_use_case
-            .resolve_selector(&req.target_selector)
+            .resolve_selector(&target_selector)
             .await
             .map_err(map_core_error)?;
 
         if response.is_empty() {
             return Ok(Response::new(oasis_core::proto::ApplyFileResponse {
                 success: false,
-                message: format!("No nodes matched selector: {}", req.target_selector),
+                message: format!("No nodes matched selector: {}", target_selector),
                 applied_nodes: Vec::new(),
                 failed_nodes: Vec::new(),
             }));
@@ -648,7 +723,10 @@ impl oasis_service_server::OasisService for OasisServer {
         Ok(Response::new(oasis_core::proto::ApplyFileResponse {
             success: true,
             message: format!("File apply task created: {}", task_id),
-            applied_nodes: response,
+            applied_nodes: response
+                .iter()
+                .map(|id| oasis_core::proto::AgentId { value: id.clone() })
+                .collect(),
             failed_nodes: Vec::new(),
         }))
     }
@@ -679,8 +757,8 @@ impl oasis_service_server::OasisService for OasisServer {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("Rollout name cannot be empty"));
         }
-        if req.target_selector.trim().is_empty() {
-            return Err(Status::invalid_argument("Target selector cannot be empty"));
+        if req.target.is_none() {
+            return Err(Status::invalid_argument("Target cannot be empty"));
         }
         // 使用结构化 proto 构造 TaskSpec 与 RolloutConfig
         let task = match req.task.as_ref() {
@@ -715,16 +793,28 @@ impl oasis_service_server::OasisService for OasisServer {
             config.labels.extend(req.labels);
         }
 
+        let target_selector = match req.target.as_ref().and_then(|t| t.target.as_ref()) {
+            Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => s.clone(),
+            Some(oasis_core::proto::task_target_msg::Target::AgentIds(_)) => {
+                return Err(Status::invalid_argument(
+                    "Agent list targets not supported for rollout",
+                ));
+            }
+            None => return Err(Status::invalid_argument("Invalid target specification")),
+        };
+
         let rollout_id = self
             .rollout_deploy_use_case
-            .create_rollout(&req.name, task, &req.target_selector, config)
+            .create_rollout(&req.name, task, &target_selector, config)
             .await
             .map_err(map_core_error)?;
 
         // 记录 rollout_id 到追踪 span 中
         tracing::Span::current().record("rollout_id", &rollout_id);
 
-        Ok(Response::new(CreateRolloutResponse { rollout_id }))
+        Ok(Response::new(CreateRolloutResponse {
+            rollout_id: Some(oasis_core::proto::RolloutId { value: rollout_id }),
+        }))
     }
 
     #[instrument(skip_all)]
@@ -733,11 +823,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<StartRolloutRequest>,
     ) -> Result<Response<StartRolloutResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("rollout_id", &req.rollout_id);
+        if let Some(rollout_id) = &req.rollout_id {
+            tracing::Span::current().record("rollout_id", &rollout_id.value);
+        }
 
         // 调用 Application 层的用例启动灰度发布
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         self.rollout_deploy_use_case
-            .start_rollout(&req.rollout_id)
+            .start_rollout(rollout_id)
             .await
             .map_err(map_core_error)?;
 
@@ -750,11 +843,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<PauseRolloutRequest>,
     ) -> Result<Response<PauseRolloutResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("rollout_id", &req.rollout_id);
+        if let Some(rollout_id) = &req.rollout_id {
+            tracing::Span::current().record("rollout_id", &rollout_id.value);
+        }
 
         // 调用 Application 层的用例暂停灰度发布
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         self.rollout_deploy_use_case
-            .pause_rollout(&req.rollout_id, &req.reason)
+            .pause_rollout(rollout_id, &req.reason)
             .await
             .map_err(map_core_error)?;
 
@@ -767,11 +863,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<ResumeRolloutRequest>,
     ) -> Result<Response<ResumeRolloutResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("rollout_id", &req.rollout_id);
+        if let Some(rollout_id) = &req.rollout_id {
+            tracing::Span::current().record("rollout_id", &rollout_id.value);
+        }
 
         // 调用 Application 层的用例恢复灰度发布
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         self.rollout_deploy_use_case
-            .resume_rollout(&req.rollout_id)
+            .resume_rollout(rollout_id)
             .await
             .map_err(map_core_error)?;
 
@@ -784,11 +883,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<AbortRolloutRequest>,
     ) -> Result<Response<AbortRolloutResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("rollout_id", &req.rollout_id);
+        if let Some(rollout_id) = &req.rollout_id {
+            tracing::Span::current().record("rollout_id", &rollout_id.value);
+        }
 
         // 调用 Application 层的用例中止灰度发布
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         self.rollout_deploy_use_case
-            .abort_rollout(&req.rollout_id, &req.reason)
+            .abort_rollout(rollout_id, &req.reason)
             .await
             .map_err(map_core_error)?;
 
@@ -801,11 +903,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<RollbackRolloutRequest>,
     ) -> Result<Response<RollbackRolloutResponse>, Status> {
         let req = request.into_inner();
-        tracing::Span::current().record("rollout_id", &req.rollout_id);
+        if let Some(rollout_id) = &req.rollout_id {
+            tracing::Span::current().record("rollout_id", &rollout_id.value);
+        }
 
         // 调用 Application 层的用例回滚灰度发布
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         self.rollout_deploy_use_case
-            .rollback_rollout(&req.rollout_id, &req.reason)
+            .rollback_rollout(rollout_id, &req.reason)
             .await
             .map_err(map_core_error)?;
 
@@ -820,12 +925,12 @@ impl oasis_service_server::OasisService for OasisServer {
         let req = request.into_inner();
 
         // 1. 请求验证
-        if req.task_id.trim().is_empty() {
+        if req.task_id.is_none() || req.task_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Task ID cannot be empty"));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let task_id = req.task_id.clone();
+        let task_id = req.task_id.as_ref().unwrap().value.clone();
         let shutdown_token = self.shutdown_token.clone();
         let stream_use_case = Arc::new(StreamTaskResultsUseCase::new(
             self.context.task_repo.clone(),
@@ -878,8 +983,8 @@ impl oasis_service_server::OasisService for OasisServer {
 
                                     let agent_id = task_result.agent_id.clone();
                                     let resp = oasis_core::proto::StreamTaskResultsResponse {
-                                        task_id: task_result.task_id,
-                                        agent_id: task_result.agent_id,
+                                        task_id: Some(oasis_core::proto::TaskId { value: task_result.task_id.to_string() }),
+                                        agent_id: Some(oasis_core::proto::AgentId { value: task_result.agent_id.to_string() }),
                                         stdout: task_result.stdout,
                                         stderr: task_result.stderr,
                                         exit_code: match task_result.status {
@@ -965,14 +1070,15 @@ impl oasis_service_server::OasisService for OasisServer {
     ) -> Result<Response<oasis_core::proto::GetNodeLabelsResponse>, Status> {
         let req = request.into_inner();
 
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
         // 调用 Application 层的用例获取节点标签
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let labels = self
             .manage_nodes_use_case
-            .get_node_labels(&req.agent_id)
+            .get_node_labels(agent_id)
             .await
             .map_err(map_core_error)?;
 
@@ -989,9 +1095,10 @@ impl oasis_service_server::OasisService for OasisServer {
         let req = request.into_inner();
 
         // 调用 Application 层的用例获取节点事实
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let facts = self
             .manage_nodes_use_case
-            .get_node_facts(&req.agent_id)
+            .get_node_facts(agent_id)
             .await
             .map_err(map_core_error)?;
 
@@ -1008,13 +1115,10 @@ impl oasis_service_server::OasisService for OasisServer {
         let req = request.into_inner();
 
         // 调用 Application 层的用例列出节点
+        let selector = req.selector.as_ref().map(|s| s.as_str());
         let nodes = self
             .manage_nodes_use_case
-            .list_nodes(if req.selector.trim().is_empty() {
-                None
-            } else {
-                Some(&req.selector)
-            })
+            .list_nodes(selector)
             .await
             .map_err(map_core_error)?;
 
@@ -1023,7 +1127,9 @@ impl oasis_service_server::OasisService for OasisServer {
         let node_infos: Vec<oasis_core::proto::NodeInfo> = nodes
             .into_iter()
             .map(|node| oasis_core::proto::NodeInfo {
-                agent_id: node.id.clone(),
+                agent_id: Some(oasis_core::proto::AgentId {
+                    value: node.id.to_string(),
+                }),
                 is_online: node.is_online(ttl_sec),
                 facts_json: node.facts.facts.clone(),
                 labels: node.labels.labels.clone(),
@@ -1043,9 +1149,10 @@ impl oasis_service_server::OasisService for OasisServer {
         let req = request.into_inner();
 
         // 调用 Application 层的用例获取 rollout
+        let rollout_id = req.rollout_id.as_ref().unwrap().value.as_str();
         let rollout = self
             .rollout_deploy_use_case
-            .get_rollout(&req.rollout_id)
+            .get_rollout(rollout_id)
             .await
             .map_err(map_core_error)?;
 
@@ -1117,14 +1224,18 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::GetAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::GetAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() || req.key.trim().is_empty() {
+        if req.agent_id.is_none()
+            || req.agent_id.as_ref().unwrap().value.trim().is_empty()
+            || req.key.trim().is_empty()
+        {
             return Err(Status::invalid_argument("Agent ID and key cannot be empty"));
         }
 
         // 调用 Application 层的用例获取配置
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let value = self
             .manage_agent_config_use_case
-            .get(&req.agent_id, &req.key)
+            .get(agent_id, &req.key)
             .await
             .map_err(map_core_error)?;
 
@@ -1140,12 +1251,16 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::SetAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::SetAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() || req.key.trim().is_empty() {
+        if req.agent_id.is_none()
+            || req.agent_id.as_ref().unwrap().value.trim().is_empty()
+            || req.key.trim().is_empty()
+        {
             return Err(Status::invalid_argument("Agent ID and key cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         self.manage_agent_config_use_case
-            .set(&req.agent_id, &req.key, &req.value)
+            .set(agent_id, &req.key, &req.value)
             .await
             .map_err(map_core_error)?;
 
@@ -1158,12 +1273,16 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::DelAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::DelAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() || req.key.trim().is_empty() {
+        if req.agent_id.is_none()
+            || req.agent_id.as_ref().unwrap().value.trim().is_empty()
+            || req.key.trim().is_empty()
+        {
             return Err(Status::invalid_argument("Agent ID and key cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         self.manage_agent_config_use_case
-            .del(&req.agent_id, &req.key)
+            .del(agent_id, &req.key)
             .await
             .map_err(map_core_error)?;
 
@@ -1176,14 +1295,15 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::ListAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::ListAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let keys = self
             .manage_agent_config_use_case
             .list_keys(
-                &req.agent_id,
+                agent_id,
                 if req.prefix.is_empty() {
                     None
                 } else {
@@ -1206,13 +1326,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::ShowAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::ShowAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let summary = self
             .manage_agent_config_use_case
-            .get_summary(&req.agent_id)
+            .get_summary(agent_id)
             .await
             .map_err(map_core_error)?;
 
@@ -1233,13 +1354,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::BackupAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::BackupAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let (data, format) = self
             .manage_agent_config_use_case
-            .backup_config(&req.agent_id, &req.output_format)
+            .backup_config(agent_id, &req.output_format)
             .await
             .map_err(map_core_error)?;
 
@@ -1283,13 +1405,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::RestoreAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::RestoreAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let (restored, skipped) = self
             .manage_agent_config_use_case
-            .restore_config(&req.agent_id, &req.config_data, &req.format, req.overwrite)
+            .restore_config(agent_id, &req.config_data, &req.format, req.overwrite)
             .await
             .map_err(map_core_error)?;
 
@@ -1307,13 +1430,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::ValidateAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::ValidateAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let (valid, errors, warnings) = self
             .manage_agent_config_use_case
-            .validate_config(&req.agent_id, &req.config_data, &req.format)
+            .validate_config(agent_id, &req.config_data, &req.format)
             .await
             .map_err(map_core_error)?;
 
@@ -1332,13 +1456,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<oasis_core::proto::DiffAgentConfigRequest>,
     ) -> Result<Response<oasis_core::proto::DiffAgentConfigResponse>, Status> {
         let req = request.into_inner();
-        if req.agent_id.trim().is_empty() {
+        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
             return Err(Status::invalid_argument("Agent ID cannot be empty"));
         }
 
+        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
         let changes = self
             .manage_agent_config_use_case
-            .diff_config(&req.agent_id, &req.from_config, &req.to_config, &req.format)
+            .diff_config(agent_id, &req.from_config, &req.to_config, &req.format)
             .await
             .map_err(map_core_error)?;
 

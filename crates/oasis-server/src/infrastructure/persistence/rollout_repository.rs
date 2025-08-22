@@ -71,7 +71,7 @@ impl RolloutRepository for NatsRolloutRepository {
         })?;
 
         let entry_data = entry.ok_or_else(|| CoreError::Agent {
-            agent_id: id.to_string(),
+            agent_id: id.to_string().into(),
             message: "Rollout not found".to_string(),
         })?;
 
@@ -101,7 +101,6 @@ impl RolloutRepository for NatsRolloutRepository {
         } else {
             return Err(CoreError::InvalidTask {
                 reason: "Rollout not found".to_string(),
-                
             });
         };
 
@@ -112,7 +111,6 @@ impl RolloutRepository for NatsRolloutRepository {
                     "Rollout version conflict: current={}, new={}",
                     current_version, rollout.version
                 ),
-                
             });
         }
 

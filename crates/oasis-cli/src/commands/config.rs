@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
+use oasis_core::proto::AgentId;
 use tracing::info;
 
 /// Configuration management commands for distributed agent configuration
@@ -306,7 +307,7 @@ async fn handle_set_command(
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
     let request = oasis_core::proto::SetAgentConfigRequest {
-        agent_id,
+        agent_id: Some(AgentId { value: agent_id }),
         key,
         value,
     };
@@ -334,7 +335,10 @@ async fn handle_get_command(
 
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
-    let request = oasis_core::proto::GetAgentConfigRequest { agent_id, key };
+    let request = oasis_core::proto::GetAgentConfigRequest {
+        agent_id: Some(AgentId { value: agent_id }),
+        key,
+    };
 
     let response = client
         .get_agent_config(request)
@@ -364,7 +368,10 @@ async fn handle_delete_command(
 
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
-    let request = oasis_core::proto::DelAgentConfigRequest { agent_id, key };
+    let request = oasis_core::proto::DelAgentConfigRequest {
+        agent_id: Some(AgentId { value: agent_id }),
+        key,
+    };
 
     client
         .del_agent_config(request)
@@ -390,7 +397,7 @@ async fn handle_list_command(
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
     let request = oasis_core::proto::ListAgentConfigRequest {
-        agent_id,
+        agent_id: Some(AgentId { value: agent_id }),
         prefix: prefix.unwrap_or_default(),
     };
 
@@ -420,7 +427,9 @@ async fn handle_show_command(
 
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
-    let request = oasis_core::proto::ShowAgentConfigRequest { agent_id };
+    let request = oasis_core::proto::ShowAgentConfigRequest {
+        agent_id: Some(AgentId { value: agent_id }),
+    };
 
     let response = client
         .show_agent_config(request)
@@ -453,7 +462,7 @@ async fn handle_backup_command(
     let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!("Agent ID required for agent config"))?;
 
     let request = oasis_core::proto::BackupAgentConfigRequest {
-        agent_id,
+        agent_id: Some(AgentId { value: agent_id }),
         output_format: "toml".to_string(), // 默认使用 TOML 格式
     };
 
@@ -496,7 +505,7 @@ async fn handle_restore_command(
         .map_err(|e| anyhow::anyhow!("Failed to read backup file: {}", e))?;
 
     let request = oasis_core::proto::RestoreAgentConfigRequest {
-        agent_id,
+        agent_id: Some(AgentId { value: agent_id }),
         config_data,
         format: "toml".to_string(), // 默认使用 TOML 格式
         overwrite: true,            // 默认覆盖现有配置
@@ -536,7 +545,9 @@ async fn handle_validate_command(
     };
 
     let request = oasis_core::proto::ValidateAgentConfigRequest {
-        agent_id: "dummy".to_string(), // 验证时不关心具体的 agent_id
+        agent_id: Some(AgentId {
+            value: "dummy".to_string(),
+        }), // 验证时不关心具体的 agent_id
         config_data,
         format: "toml".to_string(), // 默认使用 TOML 格式
     };
@@ -586,7 +597,9 @@ async fn handle_diff_command(
         .map_err(|e| anyhow::anyhow!("Failed to read to file: {}", e))?;
 
     let request = oasis_core::proto::DiffAgentConfigRequest {
-        agent_id: "dummy".to_string(), // diff 时不关心具体的 agent_id
+        agent_id: Some(AgentId {
+            value: "dummy".to_string(),
+        }), // diff 时不关心具体的 agent_id
         from_config: from_data,
         to_config: to_data,
         format: "toml".to_string(), // 默认使用 TOML 格式

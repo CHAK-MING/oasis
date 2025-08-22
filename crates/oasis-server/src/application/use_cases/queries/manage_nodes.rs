@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use oasis_core::error::CoreError;
 use oasis_core::selector::NodeAttributes;
+use oasis_core::types::AgentId;
 
 use crate::application::ports::repositories::NodeRepository;
 use crate::domain::models::node::{Node, NodeFacts};
@@ -43,7 +44,7 @@ impl ManageNodesUseCase {
                     .await?;
                 let target_id_set: std::collections::HashSet<_> = target_ids.into_iter().collect();
 
-                nodes.retain(|node| target_id_set.contains(&node.id));
+                nodes.retain(|node| target_id_set.contains(node.id.as_str()));
             }
         }
 
@@ -89,15 +90,15 @@ impl ManageNodesUseCase {
 
         let mut statuses = Vec::new();
         for id in agent_ids {
-            if let Some(node) = node_map.get(&id) {
+            if let Some(node) = node_map.get(&AgentId::from(id.clone())) {
                 statuses.push(oasis_core::proto::AgentStatus {
-                    agent_id: id,
+                    agent_id: Some(oasis_core::proto::AgentId { value: id }),
                     online: node.is_online(30),
                 });
             } else {
                 // 节点不存在或不在线
                 statuses.push(oasis_core::proto::AgentStatus {
-                    agent_id: id,
+                    agent_id: Some(oasis_core::proto::AgentId { value: id }),
                     online: false,
                 });
             }

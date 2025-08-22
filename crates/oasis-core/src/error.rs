@@ -1,5 +1,6 @@
 //! 统一错误处理系统
 
+use crate::type_defs::{AgentId, TaskId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,17 +17,17 @@ pub enum CoreError {
 
     #[error("Task execution failed: {task_id} - {reason}")]
     TaskExecutionFailed {
-        task_id: String,
+        task_id: TaskId,
         reason: String,
         retry_count: u32,
     },
 
     #[error("Task timeout: {task_id}")]
-    TaskTimeout { task_id: String },
+    TaskTimeout { task_id: TaskId },
 
     // === Agent 相关错误 ===
     #[error("Agent error: {agent_id} - {message}")]
-    Agent { agent_id: String, message: String },
+    Agent { agent_id: AgentId, message: String },
 
     // === 网络和连接错误 ===
     #[error("Network error: {message}")]
@@ -73,7 +74,7 @@ impl CoreError {
     }
 
     /// 从通用错误创建分类错误
-    pub fn from_anyhow(error: anyhow::Error, task_id: Option<String>) -> Self {
+    pub fn from_anyhow(error: anyhow::Error, task_id: Option<TaskId>) -> Self {
         match task_id {
             Some(tid) => CoreError::TaskExecutionFailed {
                 task_id: tid,
@@ -83,6 +84,58 @@ impl CoreError {
             None => CoreError::Internal {
                 message: error.to_string(),
             },
+        }
+    }
+
+    /// 创建 Agent 未找到错误
+    pub fn agent_not_found(agent_id: impl Into<AgentId>) -> Self {
+        CoreError::Agent {
+            agent_id: agent_id.into(),
+            message: "Agent not found".to_string(),
+        }
+    }
+
+    /// 创建 Agent 离线错误
+    pub fn agent_offline(agent_id: impl Into<AgentId>) -> Self {
+        CoreError::Agent {
+            agent_id: agent_id.into(),
+            message: "Agent offline".to_string(),
+        }
+    }
+
+    /// 创建任务无效错误
+    pub fn invalid_task(reason: impl Into<String>) -> Self {
+        CoreError::InvalidTask {
+            reason: reason.into(),
+        }
+    }
+
+    /// 创建配置错误
+    pub fn config_error(message: impl Into<String>) -> Self {
+        CoreError::Config {
+            message: message.into(),
+        }
+    }
+
+    /// 创建内部错误
+    pub fn internal(message: impl Into<String>) -> Self {
+        CoreError::Internal {
+            message: message.into(),
+        }
+    }
+
+    /// 创建文件错误（带上下文）
+    pub fn file_error(path: impl Into<String>, message: impl Into<String>) -> Self {
+        CoreError::File {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+
+    /// 创建连接错误（带上下文）
+    pub fn connection_error(endpoint: impl Into<String>) -> Self {
+        CoreError::Connection {
+            endpoint: endpoint.into(),
         }
     }
 }
@@ -175,46 +228,6 @@ impl From<anyhow::Error> for CoreError {
     fn from(err: anyhow::Error) -> Self {
         CoreError::Internal {
             message: err.to_string(),
-        }
-    }
-}
-
-// === 便捷错误构造函数 ===
-impl CoreError {
-    /// 创建 Agent 未找到错误
-    pub fn agent_not_found(agent_id: impl Into<String>) -> Self {
-        CoreError::Agent {
-            agent_id: agent_id.into(),
-            message: "Agent not found".to_string(),
-        }
-    }
-
-    /// 创建 Agent 离线错误
-    pub fn agent_offline(agent_id: impl Into<String>) -> Self {
-        CoreError::Agent {
-            agent_id: agent_id.into(),
-            message: "Agent offline".to_string(),
-        }
-    }
-
-    /// 创建任务无效错误
-    pub fn invalid_task(reason: impl Into<String>) -> Self {
-        CoreError::InvalidTask {
-            reason: reason.into(),
-        }
-    }
-
-    /// 创建配置错误
-    pub fn config_error(message: impl Into<String>) -> Self {
-        CoreError::Config {
-            message: message.into(),
-        }
-    }
-
-    /// 创建内部错误
-    pub fn internal(message: impl Into<String>) -> Self {
-        CoreError::Internal {
-            message: message.into(),
         }
     }
 }

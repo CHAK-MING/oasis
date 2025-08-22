@@ -1,10 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use oasis_core::proto::{
-    ExecuteTaskRequest, ResolveSelectorRequest, oasis_service_client::OasisServiceClient,
+    oasis_service_client::OasisServiceClient, task_target_msg, AgentIdList, ExecuteTaskRequest,
+    TaskTargetMsg,
 };
-use oasis_core::selector::CelSelector;
-use oasis_core::target_spec_agent;
+use std::collections::HashMap;
 
 /// Execute shell commands on target agents using CEL selectors
 ///
@@ -26,7 +26,10 @@ use oasis_core::target_spec_agent;
   oasis-cli exec --selector 'agent_id == "agent-1"' --env DEBUG=true --env LOG_LEVEL=info -- /usr/bin/echo $DEBUG
   
   # Execute on all agents (use with caution)
-  oasis-cli exec --selector 'true' -- /usr/bin/uptime"#
+  oasis-cli exec --selector 'true' -- /usr/bin/uptime
+  
+  # Execute on specific agent IDs
+  oasis-cli exec --targets agent-1 agent-2 agent-3 -- /usr/bin/uptime"#
 )]
 pub struct ExecArgs {
     /// CEL selector expression to target specific agents
@@ -36,8 +39,15 @@ pub struct ExecArgs {
     /// - Labels: labels["role"] == "web"
     /// - Facts: facts.os_name == "Ubuntu"
     /// - Complex expressions: labels["environment"] == "prod" && "frontend" in groups
-    #[arg(long, help = "CEL selector expression to target specific agents")]
-    pub selector: String,
+    #[arg(long, help = "CEL selector expression to target specific agents", conflicts_with = "targets")]
+    pub selector: Option<String>,
+
+    /// Agent IDs to target directly
+    ///
+    /// Specify a list of agent IDs to target directly, bypassing selector resolution.
+    /// This is useful when you know exactly which agents to target.
+    #[arg(long = "target", help = "A list of agent IDs to target directly", conflicts_with = "selector")]
+    pub targets: Vec<String>,
 
     /// Environment variables to pass to the command
     ///
@@ -68,75 +78,57 @@ pub async fn run_exec(
     mut client: OasisServiceClient<tonic::transport::Channel>,
     args: ExecArgs,
 ) -> Result<()> {
-    let ExecArgs {
-        mut command,
-        selector,
-        env,
-    } = args;
-    let cmd = command.remove(0);
-    let mut targets = Vec::new();
-
-    // CLI 侧：选择器语法验证（本地即时反馈，无需网络调用）
-    let _selector =
-        CelSelector::new(selector.clone()).map_err(|e| anyhow::anyhow!("选择器语法错误: {}", e))?;
-
-    // 服务端：解析选择器并匹配节点（需要依赖实时节点信息）
-    tracing::info!(selector = %selector, "Resolving CEL selector");
-
-    let response = client
-        .resolve_selector(ResolveSelectorRequest {
-            selector_expression: selector.clone(),
-        })
-        .await?;
-    let result = response.into_inner();
-
-    if !result.error_message.is_empty() {
-        anyhow::bail!("节点匹配失败: {}", result.error_message);
+    if args.selector.is_none() && args.targets.is_empty() {
+        return Err(anyhow!("必须提供 --selector 或 --targets 参数之一。"));
+    }
+    if args.command.is_empty() {
+        return Err(anyhow!("必须在 -- 后提供要执行的命令。"));
     }
 
-    tracing::info!(
-        selector = %selector,
-        total_nodes = result.total_nodes,
-        matched_nodes = result.matched_nodes,
-        "CEL selector resolved successfully"
-    );
+    let (cmd, command_args) = args.command.split_first().unwrap();
 
-    for agent_id in result.agent_ids {
-        targets.push(target_spec_agent(&agent_id));
-    }
+    let target_msg = if let Some(selector) = args.selector {
+        TaskTargetMsg {
+            target: Some(task_target_msg::Target::Selector(selector)),
+        }
+    } else {
+        TaskTargetMsg {
+            target: Some(task_target_msg::Target::AgentIds(AgentIdList {
+                ids: args
+                    .targets
+                    .into_iter()
+                    .map(|id| oasis_core::proto::AgentId { value: id })
+                    .collect(),
+            })),
+        }
+    };
 
-    // 若选择器无任何匹配节点，则拒绝提交，避免误投到默认队列
-    if targets.is_empty() {
-        anyhow::bail!("No nodes matched selector: {}", selector);
-    }
-
-    // 解析环境变量 KEY=VALUE 列表
-    let mut env_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for kv in env {
+    let mut env_map: HashMap<String, String> = HashMap::new();
+    for kv in args.env {
         if let Some((k, v)) = kv.split_once('=') {
             env_map.insert(k.to_string(), v.to_string());
         } else {
-            anyhow::bail!("Invalid env format: '{}'. Expected KEY=VALUE", kv);
+            return Err(anyhow!("无效的环境变量格式: '{}'。期望格式为 KEY=VALUE", kv));
         }
     }
 
-    let response = client
-        .execute_task(ExecuteTaskRequest {
-            targets: targets.clone(),
-            command: cmd,
-            args: command,
-            timeout_seconds: 300,
-            env: env_map,
-        })
-        .await?;
-    let task_id = &response.get_ref().task_id;
 
-    println!("Task submitted: {}", task_id);
-    tracing::info!(
-        task_id = %task_id,
-        targets = ?targets,
-        "task submitted with routing targets"
-    );
+
+    let request = tonic::Request::new(ExecuteTaskRequest {
+        command: cmd.to_string(),
+        args: command_args.to_vec(),
+        timeout_seconds: 300,
+        env: env_map,
+        target: Some(target_msg),
+    });
+
+    let response = client.execute_task(request).await?.into_inner();
+
+    if let Some(task_id) = response.task_id {
+        println!("任务提交成功。任务 ID: {}", task_id.value);
+    } else {
+        return Err(anyhow!("服务端未返回任务 ID。"));
+    }
 
     Ok(())
 }

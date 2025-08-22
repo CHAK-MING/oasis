@@ -167,7 +167,6 @@ impl NatsNodeRepository {
                         crate::domain::models::node::NodeHeartbeat {
                             timestamp: core_heartbeat.last_seen,
                             version: format!("{}.0.0", core_heartbeat.sequence),
-                            environment: "default".to_string(),
                         },
                     );
                 }
@@ -294,12 +293,12 @@ impl NodeRepository for NatsNodeRepository {
                 NodeHeartbeat {
                     timestamp: core_heartbeat.last_seen,
                     version: format!("{}.0.0", core_heartbeat.sequence), // 使用序列号作为版本
-                    environment: "default".to_string(), // 暂时使用默认环境，后续可从配置或标签获取
+                                                                         // 暂时使用默认环境，后续可从配置或标签获取
                 }
             }
             Ok(None) | Err(_) => {
                 return Err(CoreError::Agent {
-                    agent_id: id.to_string(),
+                    agent_id: id.to_string().into(),
                     message: "Agent not found".to_string(),
                 });
             }
@@ -367,7 +366,7 @@ impl NodeRepository for NatsNodeRepository {
         let overall_version = 1;
 
         Ok(Node {
-            id: id.to_string(),
+            id: id.to_string().into(),
             heartbeat,
             labels,
             facts,
@@ -419,7 +418,6 @@ impl NodeRepository for NatsNodeRepository {
                 crate::domain::models::node::NodeHeartbeat {
                     timestamp: 0,
                     version: "0.0.0".to_string(),
-                    environment: "default".to_string(),
                 }
             });
             let labels = labels_results.get(agent_id).cloned().unwrap_or_else(|| {
@@ -436,7 +434,7 @@ impl NodeRepository for NatsNodeRepository {
             });
 
             nodes.push(Node {
-                id: agent_id.clone(),
+                id: agent_id.clone().into(),
                 heartbeat,
                 labels,
                 facts,
@@ -486,7 +484,7 @@ impl NodeRepository for NatsNodeRepository {
         let key = oasis_core::kv_key_labels(id);
 
         let core_labels = AgentLabels {
-            agent_id: id.into(),
+            agent_id: id.to_string().into(),
             labels,
             updated_at: chrono::Utc::now().timestamp(),
             updated_by: "oasis-server".to_string(),

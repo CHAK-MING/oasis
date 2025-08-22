@@ -40,7 +40,7 @@ impl SelectorEngine for CelSelectorEngine {
         let mut matched_ids = Vec::new();
         for node in nodes {
             match selector.matches(node) {
-                Ok(true) => matched_ids.push(node.id.clone()),
+                Ok(true) => matched_ids.push(node.id.as_str().to_string()),
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(expression = %expression, node_id = %node.id, error = %e, "Selector evaluation failed");

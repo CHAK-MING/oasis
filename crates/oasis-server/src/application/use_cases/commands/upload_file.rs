@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::application::ports::repositories::{FileRepository, TaskRepository};
 use crate::domain::models::file::{FileApplyConfig, FileUploadResult};
 use crate::domain::models::task::Task;
-use oasis_core::types::AgentId;
 use oasis_core::task::TaskSpec;
+use oasis_core::types::AgentId;
 use oasis_core::types::TaskId;
 
 /// 文件上传用例
@@ -32,7 +32,6 @@ impl UploadFileUseCase {
         if object_name.is_empty() {
             return Err(CoreError::InvalidTask {
                 reason: "Object name cannot be empty".to_string(),
-                
             });
         }
 
@@ -40,7 +39,6 @@ impl UploadFileUseCase {
         if file_data.is_empty() {
             return Err(CoreError::InvalidTask {
                 reason: "File data cannot be empty".to_string(),
-                
             });
         }
 
@@ -60,7 +58,7 @@ impl UploadFileUseCase {
         // 2. 验证目标节点
         if target_nodes.is_empty() {
             return Err(CoreError::Agent {
-                agent_id: "no target nodes specified".to_string(),
+                agent_id: "no target nodes specified".to_string().into(),
                 message: "No target nodes specified".to_string(),
             });
         }
@@ -75,7 +73,6 @@ impl UploadFileUseCase {
         } else {
             return Err(CoreError::InvalidTask {
                 reason: format!("File '{}' not found in object store", config.object_name),
-                
             });
         };
 
@@ -95,7 +92,11 @@ impl UploadFileUseCase {
         let task_spec = TaskSpec::for_agents(
             TaskId::new(uuid::Uuid::new_v4().to_string()),
             oasis_core::constants::CMD_FILE_APPLY.to_string(),
-            target_nodes.clone().into_iter().map(AgentId::from).collect(),
+            target_nodes
+                .clone()
+                .into_iter()
+                .map(AgentId::from)
+                .collect(),
         )
         .with_args(vec![msg])
         .with_timeout(300);

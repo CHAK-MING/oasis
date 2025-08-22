@@ -4,26 +4,31 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use oasis_core::proto::{
-    AbortRolloutRequest, CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest,
-    PauseRolloutRequest, ResolveSelectorRequest, ResumeRolloutRequest, RollbackRolloutRequest,
-    StartRolloutRequest, oasis_service_client::OasisServiceClient,
+    AbortRolloutRequest, AgentIdList, CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest,
+    PauseRolloutRequest, ResumeRolloutRequest, RollbackRolloutRequest, RolloutId,
+    StartRolloutRequest, TaskId, TaskTargetMsg, oasis_service_client::OasisServiceClient,
+    task_target_msg,
 };
-use oasis_core::selector::CelSelector;
 use std::collections::HashMap;
 use tonic::transport::Channel;
+
 async fn resolve_rollout_id(
     client: &mut OasisServiceClient<Channel>,
     name_or_id: &str,
-) -> Result<String> {
+) -> Result<RolloutId> {
     // 优先按 ID 直接获取
     if client
         .get_rollout(GetRolloutRequest {
-            rollout_id: name_or_id.to_string(),
+            rollout_id: Some(RolloutId {
+                value: name_or_id.to_string(),
+            }),
         })
         .await
         .is_ok()
     {
-        return Ok(name_or_id.to_string());
+        return Ok(RolloutId {
+            value: name_or_id.to_string(),
+        });
     }
 
     // 回退：列举后按名称匹配
@@ -36,7 +41,9 @@ async fn resolve_rollout_id(
         .into_inner()
         .rollouts;
     if let Some(r) = list.into_iter().find(|r| r.name == name_or_id) {
-        return Ok(r.id);
+        return Ok(r.id.unwrap_or_else(|| RolloutId {
+            value: String::new(),
+        }));
     }
     anyhow::bail!("Rollout not found by id or name: {}", name_or_id)
 }
@@ -72,8 +79,16 @@ pub struct StartArgs {
     pub strategy: String,
 
     /// Target selector (CEL)
-    #[arg(long, value_name = "<CEL>")]
-    pub selector: String,
+    #[arg(long, value_name = "<CEL>", conflicts_with = "targets")]
+    pub selector: Option<String>,
+
+    /// Agent IDs to target directly
+    #[arg(
+        long = "target",
+        help = "A list of agent IDs to target directly",
+        conflicts_with = "selector"
+    )]
+    pub targets: Vec<String>,
 
     /// Task definition file
     #[arg(short, long)]
@@ -206,26 +221,11 @@ pub async fn run_rollout(
 async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
     println!("Starting rollout: {}", args.name);
 
-    // 本地校验选择器语法
-    let _selector = CelSelector::new(args.selector.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid selector: {}", e))?;
-    println!("Selector validated: {}", args.selector);
-
-    // 服务端解析选择器，获取最终目标集
-    let response = client
-        .resolve_selector(ResolveSelectorRequest {
-            selector_expression: args.selector.clone(),
-        })
-        .await?;
-    let result = response.into_inner();
-    if !result.error_message.is_empty() {
-        anyhow::bail!("Selector resolution failed: {}", result.error_message);
+    if args.selector.is_none() && args.targets.is_empty() {
+        return Err(anyhow::anyhow!(
+            "必须提供 --selector 或 --targets 参数之一。"
+        ));
     }
-
-    println!("Targets:");
-    println!("  total: {}", result.total_nodes);
-    println!("  matched: {}", result.matched_nodes);
-    println!("  ids: {:?}", result.agent_ids);
 
     // 读取任务脚本/定义
     let task_content = tokio::fs::read_to_string(&args.task_file)
@@ -245,15 +245,33 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
         }
     }
 
+    // 构造目标消息
+    let target_msg = if let Some(s) = &args.selector {
+        TaskTargetMsg {
+            target: Some(task_target_msg::Target::Selector(s.clone())),
+        }
+    } else {
+        TaskTargetMsg {
+            target: Some(task_target_msg::Target::AgentIds(AgentIdList {
+                ids: args
+                    .targets
+                    .iter()
+                    .map(|id| oasis_core::proto::AgentId { value: id.clone() })
+                    .collect(),
+            })),
+        }
+    };
+
     // 构造 TaskSpec 消息
     let task_msg = oasis_core::proto::TaskSpecMsg {
-        id: String::new(),
+        id: Some(TaskId {
+            value: String::new(),
+        }),
         command: "sh".to_string(),
         args: vec!["-c".to_string(), task_content],
         env: HashMap::new(),
-        target_agents: vec![],
-        selector: String::new(),
         timeout_seconds: args.timeout as u32,
+        target: Some(target_msg),
     };
 
     // 构造 RolloutConfig 消息并创建灰度
@@ -311,23 +329,42 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
     let create_response = client
         .create_rollout(CreateRolloutRequest {
             name: args.name.clone(),
-            target_selector: args.selector,
             task: Some(task_msg),
             config: Some(config_msg),
             labels,
+            target: Some(if let Some(s) = &args.selector {
+                TaskTargetMsg {
+                    target: Some(task_target_msg::Target::Selector(s.clone())),
+                }
+            } else {
+                TaskTargetMsg {
+                    target: Some(task_target_msg::Target::AgentIds(AgentIdList {
+                        ids: args
+                            .targets
+                            .iter()
+                            .map(|id| oasis_core::proto::AgentId { value: id.clone() })
+                            .collect(),
+                    })),
+                }
+            }),
         })
         .await?;
-    let rollout_id = create_response.into_inner().rollout_id;
+    let rollout_id = create_response
+        .into_inner()
+        .rollout_id
+        .unwrap_or_else(|| RolloutId {
+            value: String::new(),
+        });
 
-    println!("Created rollout: {}", rollout_id);
+    println!("Created rollout: {}", rollout_id.value);
 
     // 启动灰度
     let _start_response = client
         .start_rollout(StartRolloutRequest {
-            rollout_id: rollout_id.clone(),
+            rollout_id: Some(rollout_id.clone()),
         })
         .await?;
-    println!("Rollout started: {}", rollout_id);
+    println!("Rollout started: {}", rollout_id.value);
 
     Ok(())
 }
@@ -339,7 +376,9 @@ async fn show_rollout_status(
     println!("Rollout status: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
     match client
-        .get_rollout(GetRolloutRequest { rollout_id: rid })
+        .get_rollout(GetRolloutRequest {
+            rollout_id: Some(rid),
+        })
         .await
     {
         Ok(response) => {
@@ -347,7 +386,7 @@ async fn show_rollout_status(
                 .into_inner()
                 .rollout
                 .ok_or_else(|| anyhow::anyhow!("not found"))?;
-            println!("id: {}", r.id);
+            println!("id: {}", r.id.as_ref().unwrap().value);
             println!("status: {:?}", r.state);
             if let Some(p) = r.progress {
                 println!("progress: {}/{} nodes", p.processed_nodes, p.total_nodes);
@@ -369,7 +408,7 @@ async fn pause_rollout(args: PauseArgs, mut client: OasisServiceClient<Channel>)
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
     let _response = client
         .pause_rollout(PauseRolloutRequest {
-            rollout_id: rid,
+            rollout_id: Some(rid),
             reason: args.reason.unwrap_or_else(|| "user".to_string()),
         })
         .await?;
@@ -381,7 +420,9 @@ async fn resume_rollout(args: ResumeArgs, mut client: OasisServiceClient<Channel
     println!("Resuming rollout: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
     let _response = client
-        .resume_rollout(ResumeRolloutRequest { rollout_id: rid })
+        .resume_rollout(ResumeRolloutRequest {
+            rollout_id: Some(rid),
+        })
         .await?;
     println!("Resumed");
     Ok(())
@@ -392,7 +433,7 @@ async fn abort_rollout(args: AbortArgs, mut client: OasisServiceClient<Channel>)
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
     let _response = client
         .abort_rollout(AbortRolloutRequest {
-            rollout_id: rid,
+            rollout_id: Some(rid),
             reason: args.reason.unwrap_or_else(|| "user".to_string()),
         })
         .await?;
@@ -408,7 +449,7 @@ async fn rollback_rollout(
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
     let _response = client
         .rollback_rollout(RollbackRolloutRequest {
-            rollout_id: rid,
+            rollout_id: Some(rid),
             reason: args.reason.unwrap_or_else(|| "user".to_string()),
         })
         .await?;
@@ -433,7 +474,12 @@ async fn list_rollouts(args: ListArgs, mut client: OasisServiceClient<Channel>) 
             } else {
                 println!("found {} rollouts:", rollouts.len());
                 for r in rollouts {
-                    println!("  {} - {} ({:?})", r.id, r.name, r.state);
+                    println!(
+                        "  {} - {} ({:?})",
+                        r.id.as_ref().unwrap().value,
+                        r.name,
+                        r.state
+                    );
                     if let Some(p) = r.progress.clone() {
                         if args.verbose {
                             println!("    progress: {}/{}", p.processed_nodes, p.total_nodes);
