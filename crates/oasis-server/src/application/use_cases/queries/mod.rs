@@ -1,3 +1,4 @@
+pub mod config_format_handler;
 pub mod manage_agent_config;
 pub mod manage_nodes;
 pub mod stream_task_results;

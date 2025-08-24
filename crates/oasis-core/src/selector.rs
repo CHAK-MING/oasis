@@ -1,34 +1,102 @@
 //! CEL 选择器 - 基于 CEL 表达式的节点选择器
 
 use cel::{Context, Program, Value};
-use dashmap::DashMap;
+use moka::sync::Cache;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tracing::debug;
 
 use crate::error::{CoreError, Result};
 use crate::type_defs::AgentId;
 
-/// 编译后的程序缓存
-static PROGRAM_CACHE: Lazy<DashMap<String, Arc<Program>>> = Lazy::new(DashMap::new);
-const CACHE_MAX_SIZE: usize = 512;
-
-/// 缓存统计
+/// 缓存统计信息
 #[derive(Debug, Default)]
-struct CacheStats {
-    hits: usize,
-    misses: usize,
+pub struct CacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
 }
 
-static CACHE_STATS: Lazy<std::sync::Mutex<CacheStats>> =
-    Lazy::new(|| std::sync::Mutex::new(CacheStats::default()));
+impl CacheStats {
+    pub fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_eviction(&self) {
+        self.evictions.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn get_stats(&self) -> (u64, u64, u64) {
+        (
+            self.hits.load(Ordering::Acquire),
+            self.misses.load(Ordering::Acquire),
+            self.evictions.load(Ordering::Acquire),
+        )
+    }
+}
+
+/// 缓存统计实例
+static CACHE_STATS: Lazy<CacheStats> = Lazy::new(CacheStats::default);
+
+/// 编译后的程序缓存
+static PROGRAM_CACHE: Lazy<Cache<String, Arc<Program>>> = Lazy::new(|| {
+    // 创建淘汰监听器来记录淘汰事件
+    let listener = |_k: Arc<String>, _v: Arc<Program>, cause| {
+        use moka::notification::RemovalCause;
+
+        // 记录因容量限制导致的淘汰
+        if cause == RemovalCause::Size {
+            CACHE_STATS.record_eviction();
+        }
+    };
+
+    Cache::builder()
+        .max_capacity(512)
+        .time_to_live(Duration::from_secs(3600)) // 1小时过期
+        .time_to_idle(Duration::from_secs(1800)) // 30分钟空闲过期
+        .eviction_listener(listener)
+        .build()
+});
+
+/// 编译 CEL 程序（带缓存和统计）
+fn compile_cel_program(expression: &str) -> Result<Arc<Program>> {
+    // 使用 entry API 来准确记录命中/未命中
+    let entry = PROGRAM_CACHE
+        .entry(expression.to_string())
+        .or_try_insert_with(|| {
+            Program::compile(expression)
+                .map_err(|e| CoreError::Config {
+                    message: format!("Invalid CEL expression '{}': {:?}", expression, e),
+                })
+                .map(Arc::new)
+        })
+        .map_err(|e| (*e).clone())?;
+
+    if entry.is_fresh() {
+        // 条目刚刚插入到缓存中
+        CACHE_STATS.record_miss();
+    } else {
+        // 条目已经在缓存中
+        CACHE_STATS.record_hit();
+    }
+
+    Ok(entry.into_value())
+}
 
 /// 获取缓存统计
+/// 返回 (条目数量, 命中次数, 未命中次数)
 pub fn cache_stats() -> (usize, usize, usize) {
-    let stats = CACHE_STATS.lock().unwrap_or_else(|e| e.into_inner());
-    (PROGRAM_CACHE.len(), stats.hits, stats.misses)
+    let cache = &*PROGRAM_CACHE;
+    let (hits, misses, _evictions) = CACHE_STATS.get_stats();
+    (cache.entry_count() as usize, hits as usize, misses as usize)
 }
 
 /// 节点属性
@@ -86,42 +154,12 @@ pub struct CelSelector {
 
 impl CelSelector {
     pub fn new(expression: String) -> Result<Self> {
-        // 检查缓存
-        if let Some(program) = PROGRAM_CACHE.get(&expression) {
-            if let Ok(mut stats) = CACHE_STATS.lock() {
-                stats.hits += 1;
-            }
-            return Ok(Self {
-                expression,
-                program: program.clone(),
-            });
-        }
-
-        // 缓存未命中，编译新程序
-        let program = Program::compile(&expression).map_err(|e| CoreError::Config {
-            message: format!("Invalid CEL expression '{}': {:?}", expression, e),
-        })?;
-
-        let program_arc = Arc::new(program);
-
-        // 缓存管理
-        if PROGRAM_CACHE.len() >= CACHE_MAX_SIZE {
-            if let Some(entry) = PROGRAM_CACHE.iter().next() {
-                let key = entry.key().clone();
-                drop(entry);
-                PROGRAM_CACHE.remove(&key);
-            }
-        }
-
-        PROGRAM_CACHE.insert(expression.clone(), program_arc.clone());
-
-        if let Ok(mut stats) = CACHE_STATS.lock() {
-            stats.misses += 1;
-        }
+        // 使用缓存的编译函数
+        let program = compile_cel_program(&expression)?;
 
         Ok(Self {
             expression,
-            program: program_arc,
+            program,
         })
     }
 

@@ -1,10 +1,11 @@
 //! 灰度发布命令
 //! 覆盖灰度的发起、监控、控制与回滚全流程。
 
+use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use oasis_core::proto::{
-    AbortRolloutRequest, AgentIdList, CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest,
+    AbortRolloutRequest, CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest,
     PauseRolloutRequest, ResumeRolloutRequest, RollbackRolloutRequest, RolloutId,
     StartRolloutRequest, TaskId, TaskTargetMsg, oasis_service_client::OasisServiceClient,
     task_target_msg,
@@ -78,17 +79,14 @@ pub struct StartArgs {
     #[arg(short, long, default_value = "canary")]
     pub strategy: String,
 
-    /// Target selector (CEL)
-    #[arg(long, value_name = "<CEL>", conflicts_with = "targets")]
-    pub selector: Option<String>,
-
-    /// Agent IDs to target directly
+    /// Target specification (CEL selector or comma-separated agent IDs)
     #[arg(
-        long = "target",
-        help = "A list of agent IDs to target directly",
-        conflicts_with = "selector"
+        long,
+        short = 't',
+        value_name = "<TARGET>",
+        help = "Target specification (CEL selector or agent IDs)"
     )]
-    pub targets: Vec<String>,
+    pub target: String,
 
     /// Task definition file
     #[arg(short, long)]
@@ -221,10 +219,8 @@ pub async fn run_rollout(
 async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
     println!("Starting rollout: {}", args.name);
 
-    if args.selector.is_none() && args.targets.is_empty() {
-        return Err(anyhow::anyhow!(
-            "必须提供 --selector 或 --targets 参数之一。"
-        ));
+    if args.target.is_empty() {
+        return Err(anyhow::anyhow!("必须提供 --target 参数。"));
     }
 
     // 读取任务脚本/定义
@@ -245,21 +241,12 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
         }
     }
 
-    // 构造目标消息
-    let target_msg = if let Some(s) = &args.selector {
-        TaskTargetMsg {
-            target: Some(task_target_msg::Target::Selector(s.clone())),
-        }
-    } else {
-        TaskTargetMsg {
-            target: Some(task_target_msg::Target::AgentIds(AgentIdList {
-                ids: args
-                    .targets
-                    .iter()
-                    .map(|id| oasis_core::proto::AgentId { value: id.clone() })
-                    .collect(),
-            })),
-        }
+    // 使用智能解析器统一处理目标
+    let target_selector = TargetSelector::parse(&args.target);
+    let target_msg = TaskTargetMsg {
+        target: Some(task_target_msg::Target::Selector(
+            target_selector.expression().to_string(),
+        )),
     };
 
     // 构造 TaskSpec 消息
@@ -332,20 +319,10 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
             task: Some(task_msg),
             config: Some(config_msg),
             labels,
-            target: Some(if let Some(s) = &args.selector {
-                TaskTargetMsg {
-                    target: Some(task_target_msg::Target::Selector(s.clone())),
-                }
-            } else {
-                TaskTargetMsg {
-                    target: Some(task_target_msg::Target::AgentIds(AgentIdList {
-                        ids: args
-                            .targets
-                            .iter()
-                            .map(|id| oasis_core::proto::AgentId { value: id.clone() })
-                            .collect(),
-                    })),
-                }
+            target: Some(TaskTargetMsg {
+                target: Some(task_target_msg::Target::Selector(
+                    target_selector.expression().to_string(),
+                )),
             }),
         })
         .await?;
@@ -458,7 +435,7 @@ async fn rollback_rollout(
 }
 
 async fn list_rollouts(args: ListArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Listing rollouts"); // 保持输出英文以与其他 CLI 文本一致
+    println!("Listing rollouts");
 
     match client
         .list_rollouts(ListRolloutsRequest {

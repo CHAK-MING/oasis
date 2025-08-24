@@ -18,13 +18,8 @@ message RolloutId {
 // ===== 统一的任务目标消息 =====
 message TaskTargetMsg {
   oneof target {
-    AgentIdList agent_ids = 1;
     string selector = 2;
   }
-}
-
-message AgentIdList {
-  repeated AgentId ids = 1;
 }
 
 // Oasis 管理服务

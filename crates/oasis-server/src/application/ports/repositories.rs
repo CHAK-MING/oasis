@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use oasis_core::error::CoreError;
 
 use crate::domain::models::{
-    file::{FileApplyConfig, FileApplyResult, FileInfo, FileUploadResult},
+    file::{FileInfo, FileUploadResult},
     node::Node,
     rollout::Rollout,
     task::{Task, TaskResult},
@@ -27,13 +27,6 @@ pub trait NodeRepository: Send + Sync {
         labels: std::collections::HashMap<String, String>,
     ) -> Result<(), CoreError>;
 
-    /// 更新节点信息
-    async fn update_facts(
-        &self,
-        id: &str,
-        facts: crate::domain::models::node::NodeFacts,
-    ) -> Result<(), CoreError>;
-
     /// 批量获取节点详情，优化 N+1 查询问题
     async fn get_nodes_batch(&self, agent_ids: &[String]) -> Result<Vec<Node>, CoreError>;
 }
@@ -41,21 +34,8 @@ pub trait NodeRepository: Send + Sync {
 /// 任务仓储接口
 #[async_trait]
 pub trait TaskRepository: Send + Sync {
-    /// 创建任务
+    /// 创建任务（可选：用于调试/审计）
     async fn create(&self, task: Task) -> Result<String, CoreError>;
-
-    /// 根据ID获取任务
-    async fn get(&self, id: &str) -> Result<Task, CoreError>;
-
-    /// 更新任务状态
-    async fn update_status(
-        &self,
-        id: &str,
-        status: crate::domain::models::task::TaskStatus,
-    ) -> Result<(), CoreError>;
-
-    /// 保存任务结果
-    async fn save_result(&self, result: TaskResult) -> Result<(), CoreError>;
 
     /// 获取任务结果
     async fn get_result(
@@ -88,10 +68,6 @@ pub trait TaskRepository: Send + Sync {
 pub trait ResultConsumer: Send + Sync {
     /// 获取下一个任务结果
     async fn next_result(&mut self) -> Result<Option<TaskResult>, CoreError>;
-
-    /// 处理任务结果
-    #[allow(dead_code)]
-    async fn handle_result(&self, result: TaskResult) -> Result<(), CoreError>;
 }
 
 /// 灰度发布仓储接口
@@ -109,9 +85,6 @@ pub trait RolloutRepository: Send + Sync {
     /// 列出所有发布
     async fn list(&self) -> Result<Vec<Rollout>, CoreError>;
 
-    /// 删除发布
-    async fn delete(&self, id: &str) -> Result<(), CoreError>;
-
     /// 获取所有活动的灰度发布（需要自动化处理）
     async fn list_active(&self) -> Result<Vec<Rollout>, CoreError>;
 }
@@ -124,16 +97,6 @@ pub trait FileRepository: Send + Sync {
 
     /// 获取文件信息
     async fn get_info(&self, name: &str) -> Result<Option<FileInfo>, CoreError>;
-
-    /// 删除文件
-    async fn delete(&self, name: &str) -> Result<(), CoreError>;
-
-    /// 应用文件到节点（若保留分发能力）
-    async fn apply(
-        &self,
-        config: FileApplyConfig,
-        target_nodes: Vec<String>,
-    ) -> Result<FileApplyResult, CoreError>;
 
     /// 清空对象存储
     async fn clear_all(&self) -> Result<u64, CoreError>;
@@ -171,6 +134,5 @@ pub trait AgentConfigRepository: Send + Sync {
         agent_id: &str,
     ) -> Result<std::collections::HashMap<String, String>, CoreError>;
 
-    /// 清空某个 agent 的所有配置键，返回删除的键数量
-    async fn clear_for_agent(&self, agent_id: &str) -> Result<u64, CoreError>;
+    // 批量清空能力由明确的用例/RPC驱动时再暴露
 }

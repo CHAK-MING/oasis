@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::application::context::ApplicationContextBuilder;
 use crate::application::services::RolloutManager;
+use crate::infrastructure::di_container::InfrastructureDiContainer;
 
-/// gRPC 服务工厂
+/// gRPC 服务工厂 - 只负责组装服务，不创建具体实现
 pub struct GrpcServiceFactory;
 
 impl GrpcServiceFactory {
@@ -23,44 +23,9 @@ impl GrpcServiceFactory {
             heartbeat_ttl_sec
         );
 
-        // 在 Interface 层装配基础设施实现
-        let node_repo = Arc::new(crate::infrastructure::persistence::NatsNodeRepository::new(
-            jetstream.clone(),
-            heartbeat_ttl_sec,
-        ))
-            as Arc<dyn crate::application::ports::repositories::NodeRepository>;
-        let task_repo = Arc::new(crate::infrastructure::persistence::NatsTaskRepository::new(
-            jetstream.clone(),
-        ))
-            as Arc<dyn crate::application::ports::repositories::TaskRepository>;
-        let rollout_repo = Arc::new(
-            crate::infrastructure::persistence::NatsRolloutRepository::new(jetstream.clone()),
-        )
-            as Arc<dyn crate::application::ports::repositories::RolloutRepository>;
-        let file_repo = Arc::new(crate::infrastructure::persistence::NatsFileRepository::new(
-            jetstream.clone(),
-        ))
-            as Arc<dyn crate::application::ports::repositories::FileRepository>;
-
-        let agent_config_repo = Arc::new(
-            crate::infrastructure::persistence::agent_config_repository::NatsAgentConfigRepository::new(
-                jetstream.clone(),
-            ),
-        ) as Arc<dyn crate::application::ports::repositories::AgentConfigRepository>;
-
-        let selector_engine =
-            Arc::new(crate::domain::services::selector_engine::CelSelectorEngine::new())
-                as Arc<dyn crate::domain::services::SelectorEngine>;
-
-        // 使用 ApplicationContextBuilder 注入抽象依赖
-        let context = ApplicationContextBuilder::new()
-            .with_node_repo(node_repo)
-            .with_task_repo(task_repo)
-            .with_rollout_repo(rollout_repo)
-            .with_file_repo(file_repo)
-            .with_agent_config_repo(agent_config_repo)
-            .with_selector_engine(selector_engine)
-            .build()?;
+        // 使用基础设施DI容器创建应用程序上下文
+        let di_container = InfrastructureDiContainer::new(jetstream.clone(), heartbeat_ttl_sec);
+        let context = di_container.create_application_context()?;
 
         let server = crate::interface::grpc::server::OasisServer::new(
             context.clone(),

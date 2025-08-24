@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use oasis_core::error::CoreError;
@@ -25,6 +26,35 @@ impl RolloutDeployUseCase {
             node_repo,
             selector_engine,
         }
+    }
+
+    /// 更高层的创建入口：封装验证与标签合并等业务规则
+    pub async fn create_rollout_from_payload(
+        &self,
+        mut payload: CreateRolloutPayload,
+    ) -> Result<String, CoreError> {
+        if payload.name.trim().is_empty() {
+            return Err(CoreError::Config {
+                message: "Rollout name cannot be empty".to_string(),
+            });
+        }
+        if payload.target_selector.trim().is_empty() {
+            return Err(CoreError::Config {
+                message: "Target selector cannot be empty".to_string(),
+            });
+        }
+
+        if !payload.labels.is_empty() {
+            payload.config.labels.extend(payload.labels);
+        }
+
+        self.create_rollout(
+            &payload.name,
+            payload.task,
+            &payload.target_selector,
+            payload.config,
+        )
+        .await
     }
 
     pub async fn create_rollout(
@@ -89,7 +119,14 @@ impl RolloutDeployUseCase {
     }
 
     pub async fn get_rollout(&self, id: &str) -> Result<Option<Rollout>, CoreError> {
-        Ok(Some(self.rollout_repo.get(id).await?))
+        match self.rollout_repo.get(id).await {
+            Ok(rollout) => Ok(Some(rollout)),
+            Err(CoreError::Agent {
+                agent_id: _,
+                message,
+            }) if message.contains("Rollout not found") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn list_rollouts(&self) -> Result<Vec<Rollout>, CoreError> {
@@ -97,4 +134,11 @@ impl RolloutDeployUseCase {
     }
 }
 
-
+/// 用例输入负载：从接口层组装后传入业务层
+pub struct CreateRolloutPayload {
+    pub name: String,
+    pub task: TaskSpec,
+    pub target_selector: String,
+    pub config: RolloutConfig,
+    pub labels: HashMap<String, String>,
+}

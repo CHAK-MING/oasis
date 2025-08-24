@@ -1,6 +1,9 @@
+use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::Parser;
-use oasis_core::proto::{ApplyFileRequest, oasis_service_client::OasisServiceClient, TaskTargetMsg, task_target_msg, AgentIdList};
+use oasis_core::proto::{
+    ApplyFileRequest, TaskTargetMsg, oasis_service_client::OasisServiceClient, task_target_msg,
+};
 
 /// File management commands for distributed file operations
 ///
@@ -12,13 +15,13 @@ use oasis_core::proto::{ApplyFileRequest, oasis_service_client::OasisServiceClie
     about = "Distribute files to agents and manage object store",
     after_help = r#"Examples:
   # Apply nginx configuration to web servers
-  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --selector 'labels["role"] == "web"'
+  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
   
   # Apply configuration with atomic replacement and permissions
-  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --selector 'labels["environment"] == "prod"' --atomic --owner root:root --mode 0644
+  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --atomic --owner root:root --mode 0644
   
   # Apply file to specific agent IDs
-  oasis-cli file apply --src ./config.conf --dest /etc/config.conf --targets agent-1 agent-2 agent-3
+  oasis-cli file apply --src ./config.conf --dest /etc/config.conf --target agent-1,agent-2,agent-3
   
   # Clear all files from object store
   oasis-cli file clear"#
@@ -36,30 +39,20 @@ pub enum FileArgs {
             help = "Path to the local file to distribute"
         )]
         src: String,
-        /// CEL selector expression to target specific agents
+        /// Target specification (CEL selector or comma-separated agent IDs)
         ///
-        /// Examples:
-        ///   'labels["role"] == "web"'
-        ///   'labels["environment"] == "production"'
-        ///   'agent_id == "agent-1"'
+        /// Smart parsing supports multiple formats:
+        /// - Single agent: agent-1 -> agent_id == "agent-1"
+        /// - Multiple agents: agent-1,agent-2 -> agent_id in ["agent-1", "agent-2"]
+        /// - All agents: true -> true
+        /// - CEL expressions: labels["role"] == "web" -> labels["role"] == "web"
         #[arg(
             long,
-            value_name = "CEL_EXPRESSION",
-            help = "CEL selector expression to target specific agents",
-            conflicts_with = "targets"
+            short = 't',
+            value_name = "TARGET",
+            help = "Target specification (CEL selector or agent IDs)"
         )]
-        selector: Option<String>,
-        /// Agent IDs to target directly
-        ///
-        /// Specify a list of agent IDs to target directly, bypassing selector resolution.
-        /// This is useful when you know exactly which agents to target.
-        #[arg(
-            long = "target",
-            value_name = "AGENT_IDS",
-            help = "A list of agent IDs to target directly",
-            conflicts_with = "selector"
-        )]
-        targets: Vec<String>,
+        target: String,
         /// Destination path on the target agents
         #[arg(
             long,
@@ -117,31 +110,23 @@ pub async fn run_file(
     match args {
         FileArgs::Apply {
             src,
-            selector,
-            targets,
+            target,
             dest,
             sha256,
             owner,
             mode,
             atomic,
         } => {
-            if selector.is_none() && targets.is_empty() {
-                return Err(anyhow::anyhow!("必须提供 --selector 或 --targets 参数之一。"));
+            if target.is_empty() {
+                return Err(anyhow::anyhow!("必须提供 --target 参数。"));
             }
 
-            let target_msg = if let Some(s) = selector {
-                TaskTargetMsg {
-                    target: Some(task_target_msg::Target::Selector(s)),
-                }
-            } else {
-                TaskTargetMsg {
-                    target: Some(task_target_msg::Target::AgentIds(AgentIdList {
-                        ids: targets
-                            .into_iter()
-                            .map(|id| oasis_core::proto::AgentId { value: id })
-                            .collect(),
-                    })),
-                }
+            // 使用智能解析器统一处理目标
+            let target_selector = TargetSelector::parse(&target);
+            let target_msg = TaskTargetMsg {
+                target: Some(task_target_msg::Target::Selector(
+                    target_selector.expression().to_string(),
+                )),
             };
 
             // 依据源文件名推断对象存储名称

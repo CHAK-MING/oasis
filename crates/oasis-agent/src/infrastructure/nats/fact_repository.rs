@@ -2,21 +2,21 @@ use async_trait::async_trait;
 use oasis_core::error::{CoreError, Result};
 
 use crate::application::ports::fact_repository::FactRepositoryPort;
-use crate::domain::models::SystemFacts;
+use oasis_core::types::AgentFacts;
 
 /// NATS KV 事实仓库实现
 pub struct NatsFactRepository {
     client: async_nats::Client,
     bucket: String,
-    prefix: String,
+    key: String,
 }
 
 impl NatsFactRepository {
-    pub fn new(client: async_nats::Client, bucket: String, prefix: String) -> Self {
+    pub fn new(client: async_nats::Client, bucket: String, key: String) -> Self {
         Self {
             client,
             bucket,
-            prefix,
+            key,
         }
     }
 
@@ -32,18 +32,19 @@ impl NatsFactRepository {
 
 #[async_trait]
 impl FactRepositoryPort for NatsFactRepository {
-    async fn publish_facts(&self, facts: &SystemFacts) -> Result<()> {
+    async fn publish_agent_facts(&self, facts: &AgentFacts) -> Result<()> {
         let store = self.get_kv_store().await?;
-        let key = format!("{}{}", self.prefix, "facts");
-        let value = serde_json::to_vec(facts)
-            .map_err(|e| CoreError::Serialization {
-                message: format!("Failed to serialize facts: {}", e),
-            })?;
+        let key = self.key.clone();
 
-        store.put(&key, value.into())
+        let value = rmp_serde::to_vec_named(facts).map_err(|e| CoreError::Serialization {
+            message: format!("Failed to serialize AgentFacts: {}", e),
+        })?;
+
+        store
+            .put(&key, value.into())
             .await
             .map_err(|e| CoreError::Nats {
-                message: format!("Failed to publish facts: {}", e),
+                message: format!("Failed to publish AgentFacts: {}", e),
             })?;
 
         Ok(())

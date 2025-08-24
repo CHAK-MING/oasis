@@ -2,11 +2,12 @@
 # agent_id = "my-unique-agent-id"
 
 [nats]
-url = "nats://localhost:4222"
-# creds_file = "/path/to/nats.creds"
-# tls_ca_file = "/path/to/ca.pem"
-# tls_cert_file = "/path/to/client.pem"
-# tls_key_file = "/path/to/client.key"
+url = "tls://localhost:4443"
+# NATS 连接配置(证书)
+creds_file = "certs/nats.creds"
+tls_ca_file = "certs/nats-ca.pem"
+tls_cert_file = "certs/nats-client.pem"
+tls_key_file = "certs/nats-client-key.pem"
 
 [executor]
 command_timeout_sec = 300

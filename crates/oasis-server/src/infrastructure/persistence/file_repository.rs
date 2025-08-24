@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use crate::application::ports::repositories::FileRepository;
-use crate::domain::models::file::{FileApplyConfig, FileApplyResult, FileInfo, FileUploadResult};
+use crate::domain::models::file::{FileInfo, FileUploadResult};
+use crate::infrastructure::persistence::utils as persist;
 
 const OS_META_PREFIX: &str = "__meta"; // sidecar metadata objects to avoid large downloads
 
@@ -53,35 +54,45 @@ impl NatsFileRepository {
                 self.jetstream
                     .create_object_store(cfg)
                     .await
-                    .map_err(|e| CoreError::Nats {
-                        message: e.to_string(),
-                    })
+                    .map_err(persist::map_nats_err)
             }
         }
     }
 
     /// 确保文件元数据 KV Store 存在
     async fn ensure_metadata_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        match self.jetstream.get_key_value("file-metadata").await {
-            Ok(store) => Ok(store),
-            Err(_) => {
-                let cfg = async_nats::jetstream::kv::Config {
-                    bucket: "file-metadata".to_string(),
-                    description: "File metadata storage".to_string(),
-                    max_bytes: 1024 * 1024 * 1024, // 1GB
-                    max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
-                    storage: async_nats::jetstream::stream::StorageType::File,
-                    num_replicas: 1,
-                    ..Default::default()
-                };
-                self.jetstream
-                    .create_key_value(cfg)
-                    .await
-                    .map_err(|e| CoreError::Nats {
-                        message: e.to_string(),
-                    })
-            }
+        persist::ensure_kv(&self.jetstream, "file-metadata", "File metadata storage").await
+    }
+
+    // 内部辅助删除方法
+    pub async fn _delete_internal(&self, name: &str) -> Result<(), CoreError> {
+        let store = self.ensure_object_store().await?;
+        let metadata_store = self.ensure_metadata_store().await?;
+
+        // 删除对象存储中的文件
+        if let Err(e) = store.delete(name).await {
+            return Err(CoreError::Nats {
+                message: e.to_string(),
+            });
         }
+
+        // 删除对象存储中的 sidecar 元数据
+        let meta_object_name = format!("{}/{}.json", OS_META_PREFIX, name);
+        if let Err(e) = store.delete(&meta_object_name).await {
+            tracing::warn!(
+                file = %name,
+                sidecar = %meta_object_name,
+                error = %e,
+                "Failed to delete object-store metadata sidecar"
+            );
+        }
+
+        // 删除 KV Store 中的元数据
+        if let Err(e) = metadata_store.delete(name).await {
+            tracing::warn!("Failed to delete metadata for file '{}': {}", name, e);
+        }
+
+        Ok(())
     }
 }
 
@@ -99,9 +110,7 @@ impl FileRepository for NatsFileRepository {
         store
             .put(name, &mut reader)
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
+            .map_err(persist::map_nats_err)?;
 
         // 存储文件元数据到 KV Store
         let metadata = FileMetadata {
@@ -119,9 +128,7 @@ impl FileRepository for NatsFileRepository {
         metadata_store
             .put(name, metadata_json.into())
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
+            .map_err(persist::map_nats_err)?;
 
         // 额外写入对象存储的元数据 sidecar，避免 KV 缺失时需要下载大文件
         // 路径示例："__meta/<name>.json"
@@ -199,9 +206,7 @@ impl FileRepository for NatsFileRepository {
                     object
                         .read_to_end(&mut data)
                         .await
-                        .map_err(|e| CoreError::Nats {
-                            message: e.to_string(),
-                        })?;
+                        .map_err(persist::map_nats_err)?;
 
                     let checksum = Sha256::digest(&data);
                     let checksum_hex = format!("{:x}", checksum);
@@ -218,60 +223,12 @@ impl FileRepository for NatsFileRepository {
         }
     }
 
-    async fn apply(
-        &self,
-        config: FileApplyConfig,
-        target_nodes: Vec<String>,
-    ) -> Result<FileApplyResult, CoreError> {
-        // 这里只记录操作，由 Agent 端拉取并应用
-        Ok(FileApplyResult {
-            object_name: config.object_name,
-            destination_path: config.destination_path,
-            applied_nodes: target_nodes.clone(),
-            failed_nodes: Vec::new(),
-            total_nodes: target_nodes.len(),
-            completed_at: chrono::Utc::now().timestamp(),
-        })
-    }
-
-    async fn delete(&self, name: &str) -> Result<(), CoreError> {
-        let store = self.ensure_object_store().await?;
-        let metadata_store = self.ensure_metadata_store().await?;
-
-        // 删除对象存储中的文件
-        if let Err(e) = store.delete(name).await {
-            return Err(CoreError::Nats {
-                message: e.to_string(),
-            });
-        }
-
-        // 删除对象存储中的 sidecar 元数据
-        let meta_object_name = format!("{}/{}.json", OS_META_PREFIX, name);
-        if let Err(e) = store.delete(&meta_object_name).await {
-            tracing::warn!(
-                file = %name,
-                sidecar = %meta_object_name,
-                error = %e,
-                "Failed to delete object-store metadata sidecar"
-            );
-        }
-
-        // 删除 KV Store 中的元数据
-        if let Err(e) = metadata_store.delete(name).await {
-            tracing::warn!("Failed to delete metadata for file '{}': {}", name, e);
-        }
-
-        Ok(())
-    }
-
     async fn clear_all(&self) -> Result<u64, CoreError> {
         let store = self.ensure_object_store().await?;
         let metadata_store = self.ensure_metadata_store().await?;
 
         let mut deleted: u64 = 0;
-        let mut iter = store.list().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        let mut iter = store.list().await.map_err(persist::map_nats_err)?;
 
         while let Some(res) = iter.next().await {
             match res {
@@ -294,12 +251,7 @@ impl FileRepository for NatsFileRepository {
         }
 
         // 清理可能残留的元数据（文件已删除但元数据还在的情况）
-        let mut metadata_iter = metadata_store
-            .keys()
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
+        let mut metadata_iter = metadata_store.keys().await.map_err(persist::map_nats_err)?;
 
         while let Some(key) = metadata_iter.next().await {
             if let Ok(key) = key {

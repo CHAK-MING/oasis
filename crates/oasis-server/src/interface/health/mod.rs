@@ -46,10 +46,7 @@ impl HealthService {
         self.online_agents.read().await.len()
     }
 
-    /// 获取在线 Agent 列表
-    pub async fn get_online_agents(&self) -> HashMap<String, NodeAttributes> {
-        self.online_agents.read().await.clone()
-    }
+    // 已移除：获取在线 Agent 列表（当前未对外提供）
 
     /// 更新 Agent 状态
     pub async fn update_agent_status(&self, agent_id: &str, is_online: bool) {
@@ -185,14 +182,4 @@ async fn check_nats(jetstream: &Context, _heartbeat_ttl_sec: u64) -> Result<(), 
     Ok(())
 }
 
-/// 检查 Agent 健康状态
-async fn check_agents(node_repo: &dyn NodeRepository) -> Result<usize, CoreError> {
-    // 获取在线节点列表
-    let online_agents = node_repo.list_online().await?;
-    let online_count = online_agents.len();
-
-    // 记录在线节点数量
-    tracing::debug!("Found {} online agents", online_count);
-
-    Ok(online_count)
-}
+// 已移除：自由函数 check_agents（当前走 use case 流程）

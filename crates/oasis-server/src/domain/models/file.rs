@@ -1,19 +1,7 @@
 use oasis_core::error::CoreError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-/// File apply result summary (reserved for aggregated query APIs)
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileApplyResult {
-    pub object_name: String,
-    pub destination_path: String,
-    pub applied_nodes: Vec<String>,
-    pub failed_nodes: Vec<String>,
-    pub total_nodes: usize,
-    pub completed_at: i64,
-}
-
+/// File metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
     pub name: String,
@@ -23,14 +11,6 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    pub fn new(name: String, size: u64, checksum: String, content_type: String) -> Self {
-        Self {
-            name,
-            size,
-            checksum,
-            content_type,
-        }
-    }
     pub fn validate_sha256(&self, expected: &str) -> Result<(), CoreError> {
         let exp = expected.to_lowercase();
         if self.checksum.to_lowercase() != exp {
@@ -100,9 +80,4 @@ impl FileApplyConfig {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileRepositoryMetadata {
-    pub objects: HashMap<String, FileInfo>,
 }

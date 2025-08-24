@@ -429,11 +429,6 @@ impl LeaderElectionService {
         Ok(())
     }
 
-    /// Check if this instance is the current leader
-    pub async fn is_leader(&self) -> bool {
-        let is_leader_guard = self.is_leader.read().await;
-        *is_leader_guard
-    }
 
     /// Stop being the leader (for graceful shutdown)
     pub async fn stop_leadership(&self) -> Result<(), CoreError> {

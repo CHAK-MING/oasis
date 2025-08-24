@@ -4,6 +4,7 @@ use oasis_core::constants::{JS_KV_CONFIG, kv_config_key};
 use oasis_core::error::CoreError;
 
 use crate::application::ports::repositories::AgentConfigRepository as AgentConfigRepositoryPort;
+use crate::infrastructure::persistence::utils as persist;
 
 pub struct NatsAgentConfigRepository {
     jetstream: async_nats::jetstream::Context,
@@ -15,20 +16,7 @@ impl NatsAgentConfigRepository {
     }
 
     async fn ensure_kv(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        match self.jetstream.get_key_value(JS_KV_CONFIG).await {
-            Ok(kv) => Ok(kv),
-            Err(_) => self
-                .jetstream
-                .create_key_value(async_nats::jetstream::kv::Config {
-                    bucket: JS_KV_CONFIG.to_string(),
-                    history: 10,
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| CoreError::Nats {
-                    message: e.to_string(),
-                }),
-        }
+        persist::ensure_kv(&self.jetstream, JS_KV_CONFIG, "OASIS-CONFIG store").await
     }
 }
 
@@ -45,9 +33,7 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
                 let key = kv_config_key(agent, k);
                 kv.put(&key, v.clone().into_bytes().into())
                     .await
-                    .map_err(|e| CoreError::Nats {
-                        message: e.to_string(),
-                    })?;
+                    .map_err(persist::map_nats_err)?;
             }
         }
         Ok(agent_ids.len() as u64)
@@ -59,9 +45,7 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
         match kv.get(&key).await {
             Ok(Some(bytes)) => Ok(String::from_utf8(bytes.to_vec()).ok()),
             Ok(None) => Ok(None),
-            Err(e) => Err(CoreError::Nats {
-                message: e.to_string(),
-            }),
+            Err(e) => Err(persist::map_nats_err(e)),
         }
     }
 
@@ -70,18 +54,14 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
         let key = kv_config_key(agent_id, key);
         kv.put(&key, value.as_bytes().to_vec().into())
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
+            .map_err(persist::map_nats_err)?;
         Ok(())
     }
 
     async fn del(&self, agent_id: &str, key: &str) -> Result<(), CoreError> {
         let kv = self.ensure_kv().await?;
         let key = kv_config_key(agent_id, key);
-        kv.delete(&key).await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        kv.delete(&key).await.map_err(persist::map_nats_err)?;
         Ok(())
     }
 
@@ -92,13 +72,9 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
     ) -> Result<Vec<String>, CoreError> {
         let kv = self.ensure_kv().await?;
         let agent_prefix = format!("{}.{agent_id}.", KV_CONFIG_AGENT_KEY_PREFIX);
-        let keys = kv.keys().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        let keys = kv.keys().await.map_err(persist::map_nats_err)?;
         use futures::TryStreamExt;
-        let all: Vec<String> = keys.try_collect().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        let all: Vec<String> = keys.try_collect().await.map_err(persist::map_nats_err)?;
 
         let filtered_keys: Vec<String> = all
             .into_iter()
@@ -127,21 +103,34 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
     ) -> Result<std::collections::HashMap<String, String>, CoreError> {
         let kv = self.ensure_kv().await?;
         let agent_prefix = format!("{}.{agent_id}.", KV_CONFIG_AGENT_KEY_PREFIX);
-        let keys = kv.keys().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        let keys = kv.keys().await.map_err(persist::map_nats_err)?;
         use futures::TryStreamExt;
-        let all: Vec<String> = keys.try_collect().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
+        let all: Vec<String> = keys.try_collect().await.map_err(persist::map_nats_err)?;
+
+        // 并发拉取每个 key，避免 N+1 串行
+        use futures::{StreamExt as _, stream};
+        let fetches = all
+            .into_iter()
+            .filter(|k| k.starts_with(&agent_prefix))
+            .map(|k| {
+                let kv = kv.clone();
+                async move {
+                    let value_opt = match kv.get(&k).await {
+                        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).ok(),
+                        _ => None,
+                    };
+                    (k, value_opt)
+                }
+            });
+
+        let results: Vec<(String, Option<String>)> =
+            stream::iter(fetches).buffer_unordered(16).collect().await;
 
         let mut config = std::collections::HashMap::new();
-        for k in all.into_iter().filter(|k| k.starts_with(&agent_prefix)) {
+        for (k, value_opt) in results {
             if let Some(key_part) = k.strip_prefix(&agent_prefix) {
-                if let Ok(Some(bytes)) = kv.get(&k).await {
-                    if let Ok(value) = String::from_utf8(bytes.to_vec()) {
-                        config.insert(key_part.to_string(), value);
-                    }
+                if let Some(value) = value_opt {
+                    config.insert(key_part.to_string(), value);
                 }
             }
         }
@@ -149,24 +138,5 @@ impl AgentConfigRepositoryPort for NatsAgentConfigRepository {
         Ok(config)
     }
 
-    async fn clear_for_agent(&self, agent_id: &str) -> Result<u64, CoreError> {
-        let kv = self.ensure_kv().await?;
-        // 列出所有键并筛选本 agent 前缀
-        let prefix = format!("{}.{agent_id}.", KV_CONFIG_AGENT_KEY_PREFIX);
-        let mut deleted: u64 = 0;
-        let keys = kv.keys().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
-        use futures::TryStreamExt;
-        let all: Vec<String> = keys.try_collect().await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })?;
-        for k in all.into_iter().filter(|k| k.starts_with(&prefix)) {
-            kv.purge(&k).await.map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
-            deleted += 1;
-        }
-        Ok(deleted)
-    }
+    // 批量清空能力暂停暴露；如需恢复请通过用例/RPC明确驱动
 }

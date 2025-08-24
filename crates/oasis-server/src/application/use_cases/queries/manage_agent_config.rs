@@ -1,20 +1,12 @@
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::use_cases::queries::config_format_handler::{
+    ConfigFormat, ConfigSerializer,
+};
 use oasis_core::error::CoreError;
 
 use crate::application::ports::repositories::{AgentConfigRepository, NodeRepository};
-
-// 使用 serde 映射 TOML 配置文件的结构
-#[derive(Deserialize)]
-struct AgentConfig {
-    #[serde(default)]
-    labels: HashMap<String, toml::Value>,
-
-    #[serde(flatten)]
-    runtime_config: HashMap<String, toml::Value>,
-}
 
 pub struct ManageAgentConfigUseCase {
     node_repo: Arc<dyn NodeRepository>,
@@ -32,93 +24,30 @@ impl ManageAgentConfigUseCase {
         }
     }
 
-    /// 将 TOML 值扁平化为 key-value 映射
-    pub fn flatten_toml_value(
-        prefix: String,
-        value: &toml::Value,
-        result: &mut HashMap<String, String>,
-    ) {
-        match value {
-            toml::Value::String(s) => {
-                result.insert(prefix, s.clone());
-            }
-            toml::Value::Integer(i) => {
-                result.insert(prefix, i.to_string());
-            }
-            toml::Value::Float(f) => {
-                result.insert(prefix, f.to_string());
-            }
-            toml::Value::Boolean(b) => {
-                result.insert(prefix, b.to_string());
-            }
-            toml::Value::Datetime(dt) => {
-                result.insert(prefix, dt.to_string());
-            }
-            toml::Value::Array(arr) => {
-                if arr.iter().all(|v| v.is_str()) {
-                    let joined = arr
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    result.insert(prefix, joined);
-                } else {
-                    for (i, item) in arr.iter().enumerate() {
-                        let key = format!("{}.{}", prefix, i);
-                        Self::flatten_toml_value(key, item, result);
-                    }
-                }
-            }
-            toml::Value::Table(table) => {
-                for (k, v) in table {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{}.{}", prefix, k)
-                    };
-                    Self::flatten_toml_value(key, v, result);
-                }
-            }
-        }
-    }
-
     /// 将 TOML 配置应用到匹配到的节点
     pub async fn apply_toml_config(
         &self,
         selector: &str,
         toml_data: &[u8],
     ) -> Result<u64, CoreError> {
-        let toml_str = std::str::from_utf8(toml_data).map_err(|e| CoreError::Internal {
-            message: format!("Config bytes not valid UTF-8: {}", e),
-        })?;
+        // 统一使用 ConfigSerializer 扁平化
+        let flat = ConfigSerializer::deserialize(toml_data, &ConfigFormat::Toml)?;
 
-        let config: AgentConfig = toml::from_str(toml_str).map_err(|e| CoreError::Config {
-            message: format!("Invalid config (TOML expected): {}", e),
-        })?;
+        // 拆分 labels.* 与 runtime kv
+        let mut labels_to_set: HashMap<String, String> = HashMap::new();
+        let mut runtime_kv: HashMap<String, String> = HashMap::new();
+        for (k, v) in flat.into_iter() {
+            if let Some(rest) = k.strip_prefix("labels.") {
+                labels_to_set.insert(rest.to_string(), v);
+            } else {
+                runtime_kv.insert(k, v);
+            }
+        }
 
-        // 1. Handle [labels] section
-        if !config.labels.is_empty() {
+        // 应用标签
+        if !labels_to_set.is_empty() {
             let nodes = self.node_repo.find_by_selector(selector).await?;
             if !nodes.is_empty() {
-                let mut labels_to_set = HashMap::new();
-                for (k, v) in config.labels {
-                    // Convert TOML value to a simple string for labels
-                    let value_str = match v {
-                        toml::Value::String(s) => s,
-                        toml::Value::Integer(i) => i.to_string(),
-                        toml::Value::Float(f) => f.to_string(),
-                        toml::Value::Boolean(b) => b.to_string(),
-                        toml::Value::Datetime(dt) => dt.to_string(),
-                        toml::Value::Array(arr) => arr
-                            .iter()
-                            .map(|val| val.to_string().trim_matches('"').to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        toml::Value::Table(_) => continue, // Skip tables in labels
-                    };
-                    labels_to_set.insert(k, value_str);
-                }
-
                 for node in &nodes {
                     let mut new_labels = node.labels.labels.clone();
                     new_labels.extend(labels_to_set.clone());
@@ -129,18 +58,11 @@ impl ManageAgentConfigUseCase {
             }
         }
 
-        // 2. Flatten and apply the rest of the runtime configuration
-        let mut flat_runtime_config = HashMap::new();
-        for (key, value) in config.runtime_config {
-            Self::flatten_toml_value(key, &value, &mut flat_runtime_config);
-        }
-
-        if flat_runtime_config.is_empty() {
-            // If only labels were updated, we can return the count of affected nodes.
+        // 应用运行时配置
+        if runtime_kv.is_empty() {
             return Ok(self.node_repo.find_by_selector(selector).await?.len() as u64);
         }
-
-        self.apply_config(selector, &flat_runtime_config).await
+        self.apply_config(selector, &runtime_kv).await
     }
 
     pub async fn apply_config(
@@ -210,57 +132,8 @@ impl ManageAgentConfigUseCase {
     ) -> Result<(Vec<u8>, String), CoreError> {
         let config = self.config_repo.get_all(agent_id).await?;
 
-        let (data, actual_format) = match format.to_lowercase().as_str() {
-            "toml" => {
-                let mut toml_table = toml::Table::new();
-                for (key, value) in config {
-                    let mut current = &mut toml_table;
-                    let parts: Vec<&str> = key.split('.').collect();
-
-                    for (i, part) in parts.iter().enumerate() {
-                        if i == parts.len() - 1 {
-                            // 最后一个部分，设置值
-                            current.insert(part.to_string(), toml::Value::String(value.clone()));
-                        } else {
-                            // 中间部分，创建嵌套表
-                            current = current
-                                .entry(part.to_string())
-                                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                                .as_table_mut()
-                                .ok_or_else(|| CoreError::Internal {
-                                    message: "Failed to create TOML table".to_string(),
-                                })?;
-                        }
-                    }
-                }
-                let toml_str = toml::to_string(&toml_table).map_err(|e| CoreError::Internal {
-                    message: format!("Failed to serialize TOML: {}", e),
-                })?;
-                (toml_str.into_bytes(), "toml".to_string())
-            }
-            "json" => {
-                let json_value =
-                    serde_json::to_value(&config).map_err(|e| CoreError::Internal {
-                        message: format!("Failed to serialize JSON: {}", e),
-                    })?;
-                let json_str =
-                    serde_json::to_string_pretty(&json_value).map_err(|e| CoreError::Internal {
-                        message: format!("Failed to format JSON: {}", e),
-                    })?;
-                (json_str.into_bytes(), "json".to_string())
-            }
-            "yaml" => {
-                let yaml_str = serde_yaml::to_string(&config).map_err(|e| CoreError::Internal {
-                    message: format!("Failed to serialize YAML: {}", e),
-                })?;
-                (yaml_str.into_bytes(), "yaml".to_string())
-            }
-            _ => {
-                return Err(CoreError::Config {
-                    message: format!("Unsupported format: {}", format),
-                });
-            }
-        };
+        let config_format = ConfigFormat::from_str(format)?;
+        let (data, actual_format) = ConfigSerializer::serialize(&config, &config_format)?;
 
         Ok((data, actual_format))
     }
@@ -273,43 +146,9 @@ impl ManageAgentConfigUseCase {
         format: &str,
         overwrite: bool,
     ) -> Result<(u64, u64), CoreError> {
-        let config: std::collections::HashMap<String, String> = match format.to_lowercase().as_str()
-        {
-            "toml" => {
-                let toml_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                let toml_value: toml::Value =
-                    toml::from_str(toml_str).map_err(|e| CoreError::Config {
-                        message: format!("Invalid TOML: {}", e),
-                    })?;
-
-                let mut config = std::collections::HashMap::new();
-                Self::flatten_toml_value("".to_string(), &toml_value, &mut config);
-                config
-            }
-            "json" => {
-                let json_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                serde_json::from_str(json_str).map_err(|e| CoreError::Config {
-                    message: format!("Invalid JSON: {}", e),
-                })?
-            }
-            "yaml" => {
-                let yaml_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                serde_yaml::from_str(yaml_str).map_err(|e| CoreError::Config {
-                    message: format!("Invalid YAML: {}", e),
-                })?
-            }
-            _ => {
-                return Err(CoreError::Config {
-                    message: format!("Unsupported format: {}", format),
-                });
-            }
-        };
+        // 使用统一的格式处理器
+        let config_format = ConfigFormat::from_str(format)?;
+        let config = ConfigSerializer::deserialize(data, &config_format)?;
 
         let mut restored = 0;
         let mut skipped = 0;
@@ -340,56 +179,28 @@ impl ManageAgentConfigUseCase {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
-        // 尝试解析配置
-        let _config: std::collections::HashMap<String, String> =
-            match format.to_lowercase().as_str() {
-                "toml" => {
-                    let toml_str = std::str::from_utf8(data).map_err(|e| {
-                        errors.push(format!("Invalid UTF-8: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid UTF-8: {}", e),
-                        }
-                    })?;
-                    toml::from_str(toml_str).map_err(|e| {
-                        errors.push(format!("Invalid TOML: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid TOML: {}", e),
-                        }
-                    })?
-                }
-                "json" => {
-                    let json_str = std::str::from_utf8(data).map_err(|e| {
-                        errors.push(format!("Invalid UTF-8: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid UTF-8: {}", e),
-                        }
-                    })?;
-                    serde_json::from_str(json_str).map_err(|e| {
-                        errors.push(format!("Invalid JSON: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid JSON: {}", e),
-                        }
-                    })?
-                }
-                "yaml" => {
-                    let yaml_str = std::str::from_utf8(data).map_err(|e| {
-                        errors.push(format!("Invalid UTF-8: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid UTF-8: {}", e),
-                        }
-                    })?;
-                    serde_yaml::from_str(yaml_str).map_err(|e| {
-                        errors.push(format!("Invalid YAML: {}", e));
-                        CoreError::Config {
-                            message: format!("Invalid YAML: {}", e),
-                        }
-                    })?
-                }
-                _ => {
-                    errors.push(format!("Unsupported format: {}", format));
+        // 使用统一的格式处理器 - 消除重复代码！
+        let config_format = match ConfigFormat::from_str(format) {
+            Ok(fmt) => fmt,
+            Err(_) => {
+                errors.push(format!("Unsupported format: {}", format));
+                return Ok((false, errors, warnings));
+            }
+        };
+
+        // 使用统一验证器
+        let _validation_result = match ConfigSerializer::validate(data, &config_format) {
+            Ok(warnings_from_validation) => {
+                warnings.extend(warnings_from_validation);
+            }
+            Err((is_valid, errors_from_validation, warnings_from_validation)) => {
+                errors.extend(errors_from_validation);
+                warnings.extend(warnings_from_validation);
+                if !is_valid {
                     return Ok((false, errors, warnings));
                 }
-            };
+            }
+        };
 
         // 检查 agent 是否存在
         let nodes = self
@@ -406,7 +217,6 @@ impl ManageAgentConfigUseCase {
     /// 比较配置差异
     pub async fn diff_config(
         &self,
-        agent_id: &str,
         from_data: &[u8],
         to_data: &[u8],
         format: &str,
@@ -456,63 +266,16 @@ impl ManageAgentConfigUseCase {
         Ok(changes)
     }
 
-    /// 解析配置数据
+    /// 解析配置数据 - 使用统一的格式处理器
     fn parse_config_data(
         &self,
         data: &[u8],
         format: &str,
     ) -> Result<std::collections::HashMap<String, String>, CoreError> {
-        match format.to_lowercase().as_str() {
-            "toml" => {
-                let toml_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                let toml_value: toml::Value =
-                    toml::from_str(toml_str).map_err(|e| CoreError::Config {
-                        message: format!("Invalid TOML: {}", e),
-                    })?;
-
-                let mut config = std::collections::HashMap::new();
-                Self::flatten_toml_value("".to_string(), &toml_value, &mut config);
-                Ok(config)
-            }
-            "json" => {
-                let json_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                serde_json::from_str(json_str).map_err(|e| CoreError::Config {
-                    message: format!("Invalid JSON: {}", e),
-                })
-            }
-            "yaml" => {
-                let yaml_str = std::str::from_utf8(data).map_err(|e| CoreError::Internal {
-                    message: format!("Invalid UTF-8: {}", e),
-                })?;
-                serde_yaml::from_str(yaml_str).map_err(|e| CoreError::Config {
-                    message: format!("Invalid YAML: {}", e),
-                })
-            }
-            _ => Err(CoreError::Config {
-                message: format!("Unsupported format: {}", format),
-            }),
-        }
+        let config_format = ConfigFormat::from_str(format)?;
+        ConfigSerializer::deserialize(data, &config_format)
     }
 
-    /// 清空选择器下所有 agent 的全部配置键（不可回滚）
-    pub async fn clear_for_selector(&self, selector: &str) -> Result<(u64, u64), CoreError> {
-        let nodes = self.node_repo.find_by_selector(selector).await?;
-        let agent_ids: Vec<String> = nodes.into_iter().map(|n| n.id.to_string()).collect();
-        let mut cleared_agents: u64 = 0;
-        let mut cleared_keys: u64 = 0;
-        for aid in agent_ids {
-            let count = self.config_repo.clear_for_agent(&aid).await?;
-            if count > 0 {
-                cleared_agents += 1;
-                cleared_keys += count;
-            }
-        }
-        Ok((cleared_agents, cleared_keys))
-    }
 }
 
 /// 配置差异项

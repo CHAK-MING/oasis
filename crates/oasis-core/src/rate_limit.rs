@@ -91,36 +91,32 @@ impl CancellableRateLimiter {
             return Ok(());
         }
 
-        // 构建等待 future
         let wait_future = self.limiter.until_ready();
 
-        // 根据配置选择等待策略
         match (self.max_wait_time, cancellation_token) {
             (Some(max_wait), Some(token)) => {
+                let timeout_fut = tokio::time::sleep(max_wait);
+                tokio::pin!(timeout_fut);
                 tokio::select! {
                     _ = wait_future => Ok(()),
-                    _ = tokio::time::sleep(max_wait) => {
+                    _ = &mut timeout_fut => {
                         warn!(operation = operation_name, "Rate limit timeout");
-                        Err(CoreError::Internal {
-                            message: format!("Rate limit timeout for {}", operation_name),
-                        })
+                        Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
                     }
                     _ = token.cancelled() => {
                         debug!(operation = operation_name, "Rate limit cancelled");
-                        Err(CoreError::Internal {
-                            message: format!("Rate limit cancelled for {}", operation_name),
-                        })
+                        Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
                     }
                 }
             }
             (Some(max_wait), None) => {
+                let timeout_fut = tokio::time::sleep(max_wait);
+                tokio::pin!(timeout_fut);
                 tokio::select! {
                     _ = wait_future => Ok(()),
-                    _ = tokio::time::sleep(max_wait) => {
+                    _ = &mut timeout_fut => {
                         warn!(operation = operation_name, "Rate limit timeout");
-                        Err(CoreError::Internal {
-                            message: format!("Rate limit timeout for {}", operation_name),
-                        })
+                        Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
                     }
                 }
             }
@@ -129,9 +125,7 @@ impl CancellableRateLimiter {
                     _ = wait_future => Ok(()),
                     _ = token.cancelled() => {
                         debug!(operation = operation_name, "Rate limit cancelled");
-                        Err(CoreError::Internal {
-                            message: format!("Rate limit cancelled for {}", operation_name),
-                        })
+                        Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
                     }
                 }
             }

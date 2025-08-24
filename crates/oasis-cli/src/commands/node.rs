@@ -1,3 +1,4 @@
+use crate::common::target::TargetSelector;
 use anyhow::Result;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 
@@ -15,18 +16,9 @@ pub enum NodeCommands {
     /// Displays a list of all nodes in the cluster, including their status,
     /// basic facts, and labels. Can be filtered using CEL selectors.
     Ls {
-        /// CEL selector expression to filter nodes
-        ///
-        /// Examples:
-        ///   'labels["environment"] == "production"'
-        ///   'labels["role"] == "web"'
-        ///   'facts.os_name == "Ubuntu"'
-        #[arg(
-            long,
-            value_name = "CEL_EXPRESSION",
-            help = "CEL selector expression to filter nodes"
-        )]
-        selector: Option<String>,
+        /// Target specification (CEL selector or comma-separated agent IDs)
+        #[arg(long = "target", short = 't', value_name = "<TARGET>")]
+        target: Option<String>,
         /// Output format for displaying results
         ///
         /// Available formats:
@@ -54,18 +46,9 @@ pub enum NodeCommands {
     /// Shows comprehensive system information for nodes that match the CEL selector.
     /// Facts include hardware details, OS information, network configuration, and more.
     Facts {
-        /// CEL selector expression to target specific nodes
-        ///
-        /// Examples:
-        ///   'agent_id == "agent-1"'
-        ///   'labels["environment"] == "production"'
-        ///   'facts.cpu_count >= 8'
-        #[arg(
-            long,
-            value_name = "CEL_EXPRESSION",
-            help = "CEL selector expression to target specific nodes"
-        )]
-        selector: String,
+        /// Target specification (CEL selector or comma-separated agent IDs)
+        #[arg(long = "target", short = 't', value_name = "<TARGET>")]
+        target: String,
         /// Output format for displaying facts
         ///
         /// Available formats:
@@ -96,22 +79,21 @@ pub async fn run_node(
 ) -> Result<()> {
     match cmd {
         NodeCommands::Ls {
-            selector,
+            target,
             output,
             verbose,
-        } => run_node_list(&mut client, selector, output, verbose).await,
-        NodeCommands::Facts { selector, output } => {
-            run_node_facts(&mut client, selector, output).await
-        }
+        } => run_node_list(&mut client, target, output, verbose).await,
+        NodeCommands::Facts { target, output } => run_node_facts(&mut client, target, output).await,
     }
 }
 
 async fn run_node_list(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
-    selector: Option<String>,
+    target: Option<String>,
     output: String,
     verbose: bool,
 ) -> Result<()> {
+    let selector = target.map(|t| TargetSelector::parse(&t).expression().to_string());
     let request = tonic::Request::new(oasis_core::proto::ListNodesRequest { verbose, selector });
     let nodes = client.list_nodes(request).await?.into_inner();
 
@@ -142,9 +124,10 @@ async fn run_node_list(
 
 async fn run_node_facts(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
-    selector: String,
+    target: String,
     output: String,
 ) -> Result<()> {
+    let selector = TargetSelector::parse(&target).expression().to_string();
     // 使用高效的 list_nodes 接口，一次性获取所有匹配节点的完整信息
     let request = tonic::Request::new(oasis_core::proto::ListNodesRequest {
         verbose: true, // 获取详细信息

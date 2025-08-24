@@ -48,15 +48,13 @@ impl Node {
     /// 业务规则：检查是否在线
     pub fn is_online(&self, ttl_sec: u64) -> bool {
         let now = chrono::Utc::now().timestamp();
-        (now - self.heartbeat.timestamp) < ttl_sec as i64
+        now - self.heartbeat.timestamp <= ttl_sec as i64
     }
 
-    /// 将 Node 转换为 NodeAttributes 以供选择器引擎使用。
+    /// 将 Node 转换为选择器可用的属性结构
     pub fn to_attributes(&self) -> NodeAttributes {
-        // 统一：environment/region 仅存在于 labels；groups 独立字段
-        let groups = self.groups.clone();
+        let groups: Vec<String> = self.groups.clone();
 
-        // 自定义事实是 agent 报告的所有其他事实。
         let custom_facts: HashMap<String, String> =
             serde_json::from_str(&self.facts.facts).unwrap_or_default();
 
@@ -66,25 +64,6 @@ impl Node {
             groups,
             version: self.heartbeat.version.clone(),
             custom: custom_facts,
-        }
-    }
-
-    /// 从部分数据构造 NodeAttributes，适用于特定场景。
-    pub fn attributes_from_parts(
-        id: &AgentId,
-        labels: Option<&HashMap<String, String>>,
-        facts: Option<&HashMap<String, String>>,
-        version: Option<&str>,
-    ) -> NodeAttributes {
-        let labels_map = labels.cloned().unwrap_or_default();
-        let groups: Vec<String> = Vec::new();
-
-        NodeAttributes {
-            id: id.clone(),
-            labels: labels_map,
-            groups,
-            version: version.unwrap_or("").to_string(),
-            custom: facts.cloned().unwrap_or_default(),
         }
     }
 }

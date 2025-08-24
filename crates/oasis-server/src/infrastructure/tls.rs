@@ -25,11 +25,6 @@ impl TlsService {
 
     /// Load certificates from files
     pub async fn load_certificates(&self) -> Result<(), CoreError> {
-        if !self.config.enabled {
-            tracing::info!("TLS is disabled");
-            return Ok(());
-        }
-
         tracing::info!("Loading TLS certificates...");
 
         // Load server certificate and private key
@@ -42,15 +37,11 @@ impl TlsService {
         // Create TLS configuration
         let mut tls_config = ServerTlsConfig::new().identity(identity);
 
-        // Load CA certificate for client verification if required
-        if self.config.require_client_cert {
-            let ca_cert_data = self.load_certificate(&self.config.ca_cert)?;
-            let ca_cert = tonic::transport::Certificate::from_pem(ca_cert_data);
-            tls_config = tls_config.client_ca_root(ca_cert);
-            tracing::info!("mTLS enabled - client certificates required");
-        } else {
-            tracing::info!("TLS enabled - client certificates optional");
-        }
+        // Load CA certificate for client verification
+        let ca_cert_data = self.load_certificate(&self.config.ca_cert)?;
+        let ca_cert = tonic::transport::Certificate::from_pem(ca_cert_data);
+        tls_config = tls_config.client_ca_root(ca_cert);
+        tracing::info!("mTLS enabled - client certificates required");
 
         // Store the TLS configuration
         {
@@ -62,10 +53,9 @@ impl TlsService {
         Ok(())
     }
 
-    /// Get the current TLS configuration
-    pub async fn get_tls_config(&self) -> Option<ServerTlsConfig> {
-        let tls_config_guard = self.tls_config.read().await;
-        tls_config_guard.clone()
+    /// Get TLS reload receiver for monitoring certificate changes
+    pub fn get_reload_receiver(&self) -> broadcast::Receiver<()> {
+        self.reload_notifier.subscribe()
     }
 
     /// Reload certificates (for hot reload)
@@ -79,6 +69,12 @@ impl TlsService {
         }
 
         Ok(())
+    }
+
+    /// Get current ServerTlsConfig clone if available
+    pub async fn get_server_tls_config(&self) -> Option<ServerTlsConfig> {
+        let guard = self.tls_config.read().await;
+        guard.clone()
     }
 
     /// Load certificate from file
@@ -111,7 +107,7 @@ impl TlsService {
 
     /// Start certificate monitoring for hot reload
     pub async fn start_certificate_monitoring(&self) -> Result<(), CoreError> {
-        if !self.config.enabled || self.config.cert_check_interval_sec == 0 {
+        if self.config.cert_check_interval_sec == 0 {
             return Ok(());
         }
 

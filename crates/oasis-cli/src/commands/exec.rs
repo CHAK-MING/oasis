@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use crate::common::target::TargetSelector;
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use oasis_core::proto::{
-    oasis_service_client::OasisServiceClient, task_target_msg, AgentIdList, ExecuteTaskRequest,
-    TaskTargetMsg,
+    ExecuteTaskRequest, TaskTargetMsg, oasis_service_client::OasisServiceClient, task_target_msg,
 };
 use std::collections::HashMap;
 
@@ -17,37 +17,34 @@ use std::collections::HashMap;
     about = "Execute shell commands on target agents using CEL selectors",
     after_help = r#"Examples:
   # Execute uptime on production frontend servers
-  oasis-cli exec --selector 'labels["environment"] == "prod" && "frontend" in groups' -- /usr/bin/uptime
+  oasis-cli exec --target 'labels["environment"] == "prod" && "frontend" in groups' -- /usr/bin/uptime
   
-  # Run ps aux on all web servers
-  oasis-cli exec --selector 'labels["role"] == "web"' -- /usr/bin/ps aux
+  # Run ps aux on all web servers  
+  oasis-cli exec --target 'labels["role"] == "web"' -- /usr/bin/ps aux
   
-  # Execute with environment variables
-  oasis-cli exec --selector 'agent_id == "agent-1"' --env DEBUG=true --env LOG_LEVEL=info -- /usr/bin/echo $DEBUG
+  # Execute with environment variables on specific agent
+  oasis-cli exec --target agent-1 --env DEBUG=true --env LOG_LEVEL=info -- /usr/bin/echo $DEBUG
   
   # Execute on all agents (use with caution)
-  oasis-cli exec --selector 'true' -- /usr/bin/uptime
+  oasis-cli exec --target true -- /usr/bin/uptime
   
-  # Execute on specific agent IDs
-  oasis-cli exec --targets agent-1 agent-2 agent-3 -- /usr/bin/uptime"#
+  # Execute on multiple specific agent IDs
+  oasis-cli exec --target agent-1,agent-2,agent-3 -- /usr/bin/uptime"#
 )]
 pub struct ExecArgs {
-    /// CEL selector expression to target specific agents
+    /// Target specification (CEL selector or comma-separated agent IDs)
     ///
-    /// The selector uses CEL (Common Expression Language) syntax to match agents based on:
-    /// - Agent ID: agent_id == "agent-1"
-    /// - Labels: labels["role"] == "web"
-    /// - Facts: facts.os_name == "Ubuntu"
-    /// - Complex expressions: labels["environment"] == "prod" && "frontend" in groups
-    #[arg(long, help = "CEL selector expression to target specific agents", conflicts_with = "targets")]
-    pub selector: Option<String>,
-
-    /// Agent IDs to target directly
-    ///
-    /// Specify a list of agent IDs to target directly, bypassing selector resolution.
-    /// This is useful when you know exactly which agents to target.
-    #[arg(long = "target", help = "A list of agent IDs to target directly", conflicts_with = "selector")]
-    pub targets: Vec<String>,
+    /// Smart parsing supports multiple formats:
+    /// - Single agent: agent-1 -> agent_id == "agent-1"
+    /// - Multiple agents: agent-1,agent-2 -> agent_id in ["agent-1", "agent-2"]
+    /// - All agents: true -> true
+    /// - CEL expressions: labels["role"] == "web" -> labels["role"] == "web"
+    #[arg(
+        long,
+        short = 't',
+        help = "Target specification (CEL selector or agent IDs)"
+    )]
+    pub target: String,
 
     /// Environment variables to pass to the command
     ///
@@ -78,29 +75,24 @@ pub async fn run_exec(
     mut client: OasisServiceClient<tonic::transport::Channel>,
     args: ExecArgs,
 ) -> Result<()> {
-    if args.selector.is_none() && args.targets.is_empty() {
-        return Err(anyhow!("必须提供 --selector 或 --targets 参数之一。"));
+    if args.target.is_empty() {
+        return Err(anyhow!("必须提供 --target 参数。"));
     }
     if args.command.is_empty() {
         return Err(anyhow!("必须在 -- 后提供要执行的命令。"));
     }
 
-    let (cmd, command_args) = args.command.split_first().unwrap();
+    let (cmd, command_args) = args
+        .command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("Command cannot be empty"))?;
 
-    let target_msg = if let Some(selector) = args.selector {
-        TaskTargetMsg {
-            target: Some(task_target_msg::Target::Selector(selector)),
-        }
-    } else {
-        TaskTargetMsg {
-            target: Some(task_target_msg::Target::AgentIds(AgentIdList {
-                ids: args
-                    .targets
-                    .into_iter()
-                    .map(|id| oasis_core::proto::AgentId { value: id })
-                    .collect(),
-            })),
-        }
+    // 使用智能解析器统一处理目标
+    let target_selector = TargetSelector::parse(&args.target);
+    let target_msg = TaskTargetMsg {
+        target: Some(task_target_msg::Target::Selector(
+            target_selector.expression().to_string(),
+        )),
     };
 
     let mut env_map: HashMap<String, String> = HashMap::new();
@@ -108,11 +100,12 @@ pub async fn run_exec(
         if let Some((k, v)) = kv.split_once('=') {
             env_map.insert(k.to_string(), v.to_string());
         } else {
-            return Err(anyhow!("无效的环境变量格式: '{}'。期望格式为 KEY=VALUE", kv));
+            return Err(anyhow!(
+                "无效的环境变量格式: '{}'。期望格式为 KEY=VALUE",
+                kv
+            ));
         }
     }
-
-
 
     let request = tonic::Request::new(ExecuteTaskRequest {
         command: cmd.to_string(),

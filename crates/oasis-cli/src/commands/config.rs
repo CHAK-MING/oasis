@@ -1,3 +1,4 @@
+use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::Subcommand;
 use oasis_core::proto::AgentId;
@@ -6,7 +7,7 @@ use tracing::info;
 /// Configuration management commands for distributed agent configuration
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommands {
-    /// Apply configuration file to target agents using CEL selectors
+    /// Apply configuration file to target agents
     ///
     /// This command distributes configuration files to agents that match the specified CEL selector.
     /// The configuration is validated before application and can be applied atomically across multiple agents.
@@ -14,14 +15,9 @@ pub enum ConfigCommands {
         /// Path to the configuration file (TOML format)
         #[arg(long, value_name = "PATH")]
         src: String,
-        /// CEL selector expression to target specific agents
-        ///
-        /// Examples:
-        ///   'agent_id == "agent-1"'
-        ///   'labels["environment"] == "production"'
-        ///   'labels["role"] == "web" && facts.os_name == "Ubuntu"'
-        #[arg(long, value_name = "CEL_EXPRESSION")]
-        selector: String,
+        /// Target specification (CEL selector or comma-separated agent IDs)
+        #[arg(long = "target", short = 't', value_name = "<TARGET>")]
+        target: String,
         /// Skip configuration validation before applying
         #[arg(long)]
         no_validate: bool,
@@ -194,9 +190,9 @@ async fn handle_config_command_via_grpc(
     match cmd {
         ConfigCommands::Apply {
             src,
-            selector,
+            target,
             no_validate,
-        } => handle_apply_command(&mut client, src, selector, no_validate).await,
+        } => handle_apply_command(&mut client, src, target, no_validate).await,
 
         ConfigCommands::Set {
             key,
@@ -259,7 +255,7 @@ async fn handle_apply_command(
         tonic::transport::Channel,
     >,
     src: String,
-    selector: String,
+    target: String,
     no_validate: bool,
 ) -> Result<()> {
     // 读取配置文件
@@ -275,7 +271,7 @@ async fn handle_apply_command(
     }
 
     let request = oasis_core::proto::ApplyAgentConfigRequest {
-        selector,
+        selector: TargetSelector::parse(&target).expression().to_string(),
         config_data: config_content.into_bytes(),
     };
 

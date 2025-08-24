@@ -5,6 +5,7 @@ use oasis_core::{error::CoreError, types::TaskExecution};
 
 use crate::application::ports::repositories::{ResultConsumer, TaskRepository};
 use crate::domain::models::task::{Task, TaskResult};
+use crate::infrastructure::persistence::utils as persist;
 
 /// 任务仓储实现 - 基于JetStream
 pub struct NatsTaskRepository {
@@ -240,113 +241,13 @@ impl TaskRepository for NatsTaskRepository {
         let kv = self.ensure_task_kv_store().await?;
         let key = format!("task:{}", task.id);
 
-        let task_data = serde_json::to_vec(&task).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })?;
+        let task_data = persist::to_json_vec(&task)?;
 
         kv.put(&key, task_data.into())
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
+            .map_err(persist::map_nats_err)?;
 
         Ok(task.id.to_string())
-    }
-
-    async fn get(&self, id: &str) -> Result<Task, CoreError> {
-        let kv = self.ensure_task_kv_store().await?;
-        let key = format!("task:{}", id);
-
-        match kv.get(&key).await.map_err(|e| CoreError::Nats {
-            message: e.to_string(),
-        })? {
-            Some(entry) => {
-                let task: Task =
-                    serde_json::from_slice(&entry).map_err(|e| CoreError::Serialization {
-                        message: e.to_string(),
-                    })?;
-                Ok(task)
-            }
-            None => Err(CoreError::InvalidTask {
-                reason: "Task not found".to_string(),
-            }),
-        }
-    }
-
-    async fn update_status(
-        &self,
-        id: &str,
-        status: crate::domain::models::task::TaskStatus,
-    ) -> Result<(), CoreError> {
-        let key = format!("task:{}", id);
-
-        // 使用统一的 backoff 重试机制，避免手写指数退避
-        let backoff_cfg = oasis_core::backoff::kv_operations_backoff();
-        oasis_core::backoff::execute_with_backoff(
-            || {
-                let key = key.clone();
-                let status = status.clone();
-                async move {
-                    // 每次尝试都重新获取 KV 以避免连接抖动带来的影响
-                    // 注意：这里的错误会作为可重试错误返回，由 backoff 统一处理
-                    let kv = self.ensure_task_kv_store().await?;
-
-                    // 获取当前任务
-                    let entry = kv
-                        .get(&key)
-                        .await
-                        .map_err(|e| CoreError::Nats {
-                            message: e.to_string(),
-                        })?
-                        .ok_or(CoreError::InvalidTask {
-                            reason: "Task not found".to_string(),
-                        })?;
-
-                    let mut task: Task =
-                        serde_json::from_slice(&entry).map_err(|e| CoreError::Serialization {
-                            message: e.to_string(),
-                        })?;
-
-                    // 使用 Task::apply_status 执行状态迁移校验
-                    task.apply_status(status)?;
-
-                    let task_data =
-                        serde_json::to_vec(&task).map_err(|e| CoreError::Serialization {
-                            message: e.to_string(),
-                        })?;
-
-                    kv.put(&key, task_data.into())
-                        .await
-                        .map_err(|e| CoreError::Nats {
-                            message: e.to_string(),
-                        })?;
-
-                    tracing::debug!("Task status updated successfully");
-                    Ok::<(), CoreError>(())
-                }
-            },
-            backoff_cfg,
-        )
-        .await
-    }
-
-    async fn save_result(&self, result: TaskResult) -> Result<(), CoreError> {
-        self.ensure_result_stream().await?;
-
-        // 发布结果到JetStream
-        let subject = format!("results.{}.{}", result.task_id, result.agent_id);
-        let data = serde_json::to_vec(&result).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })?;
-
-        self.jetstream
-            .publish(subject, data.into())
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
-
-        Ok(())
     }
 
     async fn get_result(
@@ -746,12 +647,6 @@ impl ResultConsumer for NatsResultConsumer {
             }
             Err(_) => Ok(None),
         }
-    }
-
-    async fn handle_result(&self, _result: TaskResult) -> Result<(), CoreError> {
-        // 默认实现：打印结果日志
-        tracing::info!("Received task result");
-        Ok(())
     }
 }
 

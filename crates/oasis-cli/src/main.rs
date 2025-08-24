@@ -1,21 +1,27 @@
 use anyhow::Result;
 use clap::Parser;
+use figment::{
+    Figment,
+    providers::{Format, Serialized, Toml},
+};
 use oasis_core::telemetry::{LogConfig, init_tracing_with};
 mod client;
 mod commands;
+mod common;
 mod config;
 mod precheck;
+mod tls;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = client::Cli::parse();
 
-    // 根据是否提供 --config 参数决定配置加载方式
-    let cfg = if let Some(ref config_path) = cli.config {
-        config::CliConfig::load_from_path(config_path).await?
-    } else {
-        config::CliConfig::load_smart().await?
-    };
+    // 默认值 + TOML 文件
+    let mut figment = Figment::new().merge(Serialized::defaults(config::CliConfig::default()));
+    if let Some(ref config_path) = cli.config {
+        figment = figment.merge(Toml::file(config_path));
+    }
+    let cfg: config::CliConfig = figment.extract()?;
 
     init_tracing_with(&LogConfig {
         level: cfg.common.telemetry.log_level,

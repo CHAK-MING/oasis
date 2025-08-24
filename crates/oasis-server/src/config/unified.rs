@@ -1,6 +1,4 @@
-use async_trait::async_trait;
-use oasis_core::config::{CommonConfig, ComponentConfig, ConfigLoadOptions, ConfigSource};
-use oasis_core::error::Result;
+use oasis_core::config::CommonConfig;
 use serde::{Deserialize, Serialize};
 
 /// 统一的 Server 配置
@@ -30,8 +28,8 @@ pub struct ServerSection {
     pub grpc_addr: String,
     /// Heartbeat KV TTL in seconds (should be 2x agent heartbeat interval)
     pub heartbeat_ttl_sec: u64,
-    /// TLS configuration for gRPC
-    pub grpc_tls: Option<GrpcTlsConfig>,
+    /// TLS configuration for gRPC (mandatory)
+    pub grpc_tls: GrpcTlsConfig,
     /// Leader election configuration
     pub leader_election: Option<LeaderElectionConfig>,
 }
@@ -104,16 +102,12 @@ pub struct PublishSection {
 /// TLS configuration for gRPC server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpcTlsConfig {
-    /// Enable TLS
-    pub enabled: bool,
     /// CA certificate path for client verification
     pub ca_cert: String,
     /// Server certificate path
     pub server_cert: String,
     /// Server private key path
     pub server_key: String,
-    /// Require client certificate (mTLS)
-    pub require_client_cert: bool,
     /// Certificate file check interval for hot reload (seconds)
     pub cert_check_interval_sec: u64,
 }
@@ -143,9 +137,9 @@ impl Default for ServerConfig {
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
-            grpc_addr: "[::1]:50052".into(),
-            heartbeat_ttl_sec: 60, // 2x default agent heartbeat interval (30s)
-            grpc_tls: Some(GrpcTlsConfig::default()),
+            grpc_addr: "0.0.0.0:50051".into(),
+            heartbeat_ttl_sec: 90,
+            grpc_tls: GrpcTlsConfig::default(),
             leader_election: None,
         }
     }
@@ -175,9 +169,30 @@ impl Default for KvSection {
 impl Default for StreamsSection {
     fn default() -> Self {
         Self {
-            tasks: StreamParams::default(),
-            results: StreamParams::default(),
-            rollouts: StreamParams::default(),
+            tasks: StreamParams {
+                max_age_sec: 86400, // 24 hours
+                max_msgs: 1000000,
+                max_bytes: 1000000000, // 1GB
+                max_msg_size: 1048576, // 1MB
+                storage: "file".into(),
+                replicas: 1,
+            },
+            results: StreamParams {
+                max_age_sec: 604800,   // 7 days
+                max_msgs: 10000000,    // 10M messages
+                max_bytes: 5000000000, // 5GB
+                max_msg_size: 1048576, // 1MB
+                storage: "file".into(),
+                replicas: 1,
+            },
+            rollouts: StreamParams {
+                max_age_sec: 86400, // 1 day
+                max_msgs: 1000000,
+                max_bytes: 1000000000, // 1GB
+                max_msg_size: 1048576, // 1MB
+                storage: "file".into(),
+                replicas: 1,
+            },
             dlq: DlqStreamParams::default(),
             artifacts: ObjectStoreParams::default(),
         }
@@ -188,7 +203,7 @@ impl Default for StreamParams {
     fn default() -> Self {
         Self {
             max_age_sec: 24 * 60 * 60, // 24 hours
-            max_msgs: 100_000,
+            max_msgs: 10_000,
             max_bytes: 1024 * 1024 * 1024, // 1GB
             max_msg_size: 1024 * 1024,     // 1MB
             storage: "file".into(),
@@ -210,8 +225,8 @@ impl Default for DlqStreamParams {
 impl Default for ObjectStoreParams {
     fn default() -> Self {
         Self {
-            max_age_sec: 24 * 60 * 60,          // 24 hours
-            max_bytes: 10 * 1024 * 1024 * 1024, // 10GB
+            max_age_sec: 86400,     // 24 hours
+            max_bytes: 10737418240, // 10GB
             storage: "file".into(),
             replicas: 1,
         }
@@ -232,11 +247,9 @@ impl Default for PublishSection {
 impl Default for GrpcTlsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            ca_cert: "certs/ca.pem".into(),
-            server_cert: "certs/server.pem".into(),
-            server_key: "certs/server-key.pem".into(),
-            require_client_cert: true,
+            ca_cert: "certs/grpc-ca.pem".into(),
+            server_cert: "certs/grpc-server.pem".into(),
+            server_key: "certs/grpc-server-key.pem".into(),
             cert_check_interval_sec: 300,
         }
     }
@@ -248,212 +261,5 @@ impl Default for LeaderElectionConfig {
             lease_ttl_sec: 30,
             renewal_interval_sec: 10,
         }
-    }
-}
-
-impl ServerConfig {
-    /// 智能配置加载
-    pub async fn load_smart() -> Result<Self> {
-        // Server 仅使用默认值，不自动加载配置文件
-        Self::load_from_sources(&[ConfigSource::Defaults], ConfigLoadOptions::default()).await
-    }
-
-    /// 从指定路径加载配置
-    pub async fn load_from_path(config_path: &str) -> Result<Self> {
-        let sources = vec![
-            ConfigSource::Defaults,
-            ConfigSource::File(config_path.into()),
-        ];
-
-        Self::load_from_sources(&sources, ConfigLoadOptions::default()).await
-    }
-}
-
-#[async_trait]
-impl ComponentConfig for ServerConfig {
-    type Common = CommonConfig;
-
-    async fn load_from_sources(
-        sources: &[ConfigSource],
-        options: ConfigLoadOptions,
-    ) -> Result<Self> {
-        oasis_core::config::load_config(sources, options).await
-    }
-
-    fn merge_with_common(&mut self, common: Self::Common) {
-        self.common = common;
-    }
-
-    fn common(&self) -> &Self::Common {
-        &self.common
-    }
-
-    fn common_mut(&mut self) -> &mut Self::Common {
-        &mut self.common
-    }
-
-    fn validate_business_rules(&self) -> Result<()> {
-        // Server 特定的业务规则验证
-        if self.server.grpc_addr.is_empty() {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "grpc_addr cannot be empty".to_string(),
-            });
-        }
-
-        if self.server.heartbeat_ttl_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "heartbeat_ttl_sec must be greater than 0".to_string(),
-            });
-        }
-
-        if self.kv.max_value_size == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "max_value_size must be greater than 0".to_string(),
-            });
-        }
-
-        if self.publish.max_publishes_per_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "max_publishes_per_sec must be greater than 0".to_string(),
-            });
-        }
-
-        // 验证流配置
-        self.validate_stream_config()?;
-
-        Ok(())
-    }
-
-    /// 检查配置是否可以热重载
-    fn can_hot_reload(&self, other: &Self) -> bool {
-        // 不可热重载的配置项
-        if self.server.grpc_addr != other.server.grpc_addr {
-            return false; // gRPC 地址变更需要重启
-        }
-
-        if self.common.nats.url != other.common.nats.url {
-            return false; // NATS URL 变更需要重启
-        }
-
-        if self.common.nats.tls_required != other.common.nats.tls_required {
-            return false; // TLS 要求变更需要重启
-        }
-
-        // 其他配置可以热重载
-        true
-    }
-
-    /// 获取配置摘要
-    fn summary(&self) -> std::collections::HashMap<String, String> {
-        let mut summary = std::collections::HashMap::new();
-
-        // 基本信息
-        summary.insert("grpc_addr".to_string(), self.server.grpc_addr.clone());
-        summary.insert("nats_url".to_string(), self.common.nats.url.clone());
-        summary.insert(
-            "log_level".to_string(),
-            self.common.telemetry.log_level.clone(),
-        );
-        summary.insert(
-            "log_format".to_string(),
-            self.common.telemetry.log_format.clone(),
-        );
-
-        // 服务器配置
-        summary.insert(
-            "heartbeat_ttl_sec".to_string(),
-            self.server.heartbeat_ttl_sec.to_string(),
-        );
-
-        // 流配置
-        summary.insert(
-            "tasks_max_age_sec".to_string(),
-            self.streams.tasks.max_age_sec.to_string(),
-        );
-        summary.insert(
-            "tasks_max_msgs".to_string(),
-            self.streams.tasks.max_msgs.to_string(),
-        );
-        summary.insert(
-            "results_max_age_sec".to_string(),
-            self.streams.results.max_age_sec.to_string(),
-        );
-        summary.insert(
-            "rollouts_max_age_sec".to_string(),
-            self.streams.rollouts.max_age_sec.to_string(),
-        );
-
-        // KV 配置
-        summary.insert(
-            "kv_max_value_size".to_string(),
-            self.kv.max_value_size.to_string(),
-        );
-        summary.insert(
-            "kv_facts_history".to_string(),
-            self.kv.facts_history.to_string(),
-        );
-        summary.insert(
-            "kv_labels_history".to_string(),
-            self.kv.labels_history.to_string(),
-        );
-
-        // 发布配置
-        summary.insert(
-            "publish_max_per_sec".to_string(),
-            self.publish.max_publishes_per_sec.to_string(),
-        );
-        summary.insert(
-            "publish_max_retries".to_string(),
-            self.publish.max_retries.to_string(),
-        );
-
-        // TLS 配置
-        if let Some(ref tls) = self.server.grpc_tls {
-            summary.insert("grpc_tls_enabled".to_string(), tls.enabled.to_string());
-            summary.insert(
-                "grpc_tls_require_client_cert".to_string(),
-                tls.require_client_cert.to_string(),
-            );
-        } else {
-            summary.insert("grpc_tls_enabled".to_string(), "false".to_string());
-        }
-
-        // Leader election 配置
-        if let Some(ref le) = self.server.leader_election {
-            summary.insert("leader_election_enabled".to_string(), "true".to_string());
-            summary.insert(
-                "leader_election_lease_ttl_sec".to_string(),
-                le.lease_ttl_sec.to_string(),
-            );
-        } else {
-            summary.insert("leader_election_enabled".to_string(), "false".to_string());
-        }
-
-        summary
-    }
-}
-
-impl ServerConfig {
-    fn validate_stream_config(&self) -> Result<()> {
-        // 验证任务流配置
-        if self.streams.tasks.max_age_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "tasks.max_age_sec must be greater than 0".to_string(),
-            });
-        }
-
-        if self.streams.results.max_age_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "results.max_age_sec must be greater than 0".to_string(),
-            });
-        }
-
-        if self.streams.rollouts.max_age_sec == 0 {
-            return Err(oasis_core::error::CoreError::Config {
-                message: "rollouts.max_age_sec must be greater than 0".to_string(),
-            });
-        }
-
-        Ok(())
     }
 }

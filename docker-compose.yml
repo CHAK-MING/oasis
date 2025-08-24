@@ -1,13 +1,23 @@
 services:
   nats:
     image: nats:2.11-alpine
-    command: ["-js", "-sd", "/data/nats", "-p", "4222", "-m", "8222"]
-    restart: unless-stopped
+    container_name: nats-tls
+    env_file:
+      - .env
+    command:
+      - "nats-server"
+      - "--config"
+      - "/etc/nats/nats-server.conf"
+      - "--jetstream"
     ports:
-      - "4222:4222"
+      - "4443:4443"
       - "8222:8222"
     volumes:
+      - ./certs:/etc/nats/certs:ro
+      - ./jwt:/etc/nats/jwt:ro
+      - ./certs/nats-server.conf:/etc/nats/nats-server.conf:ro
       - nats-data:/data/nats
+    restart: unless-stopped
 
 volumes:
   nats-data: {}

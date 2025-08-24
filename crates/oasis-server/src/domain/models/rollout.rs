@@ -259,11 +259,6 @@ impl Rollout {
         self.current_batch_tasks.insert(node_id, task_id);
     }
 
-    /// 移除任务从当前批次
-    pub fn remove_batch_task(&mut self, node_id: &str) -> Option<String> {
-        self.current_batch_tasks.remove(node_id)
-    }
-
     /// 标记节点为已处理
     pub fn mark_node_processed(&mut self, node_id: String) {
         self.processed_nodes.insert(node_id);

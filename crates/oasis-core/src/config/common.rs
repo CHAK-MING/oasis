@@ -5,7 +5,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommonConfig {
     pub nats: NatsConfig,
-    pub tls: TlsConfig,
     pub telemetry: TelemetryConfig,
 }
 
@@ -13,12 +12,10 @@ impl Default for CommonConfig {
     fn default() -> Self {
         Self {
             nats: NatsConfig::default(),
-            tls: TlsConfig::default(),
             telemetry: TelemetryConfig::default(),
         }
     }
 }
-
 
 /// NATS 连接配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,8 +26,7 @@ pub struct NatsConfig {
     pub tls_ca_file: Option<PathBuf>,
     pub tls_cert_file: Option<PathBuf>,
     pub tls_key_file: Option<PathBuf>,
-    #[serde(default)]
-    pub tls_required: bool,
+
     #[serde(default = "default_connection_timeout")]
     pub connection_timeout_sec: u64,
     #[serde(default = "default_reconnect_delay")]
@@ -43,41 +39,13 @@ impl Default for NatsConfig {
     fn default() -> Self {
         Self {
             url: default_nats_url(),
-            creds_file: None,
-            tls_ca_file: None,
-            tls_cert_file: None,
-            tls_key_file: None,
-            tls_required: false,
+            creds_file: Some(default_creds_file()),
+            tls_ca_file: Some(default_tls_ca_file()),
+            tls_cert_file: Some(default_tls_cert_file()),
+            tls_key_file: Some(default_tls_key_file()),
             connection_timeout_sec: default_connection_timeout(),
             reconnect_delay_sec: default_reconnect_delay(),
             max_reconnects: default_max_reconnects(),
-        }
-    }
-}
-
-/// TLS 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TlsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    pub ca_cert: Option<PathBuf>,
-    pub client_cert: Option<PathBuf>,
-    pub client_key: Option<PathBuf>,
-    #[serde(default)]
-    pub verify_hostname: bool,
-    #[serde(default = "default_tls_min_version")]
-    pub min_version: String,
-}
-
-impl Default for TlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ca_cert: None,
-            client_cert: None,
-            client_key: None,
-            verify_hostname: true,
-            min_version: default_tls_min_version(),
         }
     }
 }
@@ -120,7 +88,23 @@ impl Default for TelemetryConfig {
 
 // 默认值函数
 fn default_nats_url() -> String {
-    "nats://localhost:4222".to_string()
+    "tls://localhost:4443".to_string()
+}
+
+fn default_creds_file() -> PathBuf {
+    PathBuf::from("certs/nats.creds")
+}
+
+fn default_tls_ca_file() -> PathBuf {
+    PathBuf::from("certs/nats-ca.pem")
+}
+
+fn default_tls_cert_file() -> PathBuf {
+    PathBuf::from("certs/nats-client.pem")
+}
+
+fn default_tls_key_file() -> PathBuf {
+    PathBuf::from("certs/nats-client-key.pem")
 }
 
 fn default_connection_timeout() -> u64 {
@@ -133,10 +117,6 @@ fn default_reconnect_delay() -> u64 {
 
 fn default_max_reconnects() -> Option<usize> {
     None
-}
-
-fn default_tls_min_version() -> String {
-    "1.2".to_string()
 }
 
 fn default_log_level() -> String {
@@ -155,24 +135,10 @@ impl CommonConfig {
     /// 验证配置的有效性
     pub fn validate(&self) -> crate::error::Result<()> {
         // 验证 NATS URL 格式
-        if !self.nats.url.starts_with("nats://") && !self.nats.url.starts_with("nats://") {
+        if !self.nats.url.starts_with("tls://") {
             return Err(crate::error::CoreError::Config {
                 message: "Invalid NATS URL format".to_string(),
             });
-        }
-
-        // 验证 TLS 配置
-        if self.tls.enabled {
-            if self.tls.client_cert.is_some() && self.tls.client_key.is_none() {
-                return Err(crate::error::CoreError::Config {
-                    message: "TLS client certificate requires private key".to_string(),
-                });
-            }
-            if self.tls.client_key.is_some() && self.tls.client_cert.is_none() {
-                return Err(crate::error::CoreError::Config {
-                    message: "TLS private key requires client certificate".to_string(),
-                });
-            }
         }
 
         // 验证日志级别
@@ -212,9 +178,7 @@ impl CommonConfig {
         if other.nats.tls_key_file.is_some() {
             self.nats.tls_key_file = other.nats.tls_key_file.clone();
         }
-        if other.nats.tls_required {
-            self.nats.tls_required = true;
-        }
+
         if other.nats.connection_timeout_sec != default_connection_timeout() {
             self.nats.connection_timeout_sec = other.nats.connection_timeout_sec;
         }
@@ -223,26 +187,6 @@ impl CommonConfig {
         }
         if other.nats.max_reconnects != default_max_reconnects() {
             self.nats.max_reconnects = other.nats.max_reconnects;
-        }
-
-        // TLS 配置合并
-        if other.tls.enabled {
-            self.tls.enabled = true;
-        }
-        if other.tls.ca_cert.is_some() {
-            self.tls.ca_cert = other.tls.ca_cert.clone();
-        }
-        if other.tls.client_cert.is_some() {
-            self.tls.client_cert = other.tls.client_cert.clone();
-        }
-        if other.tls.client_key.is_some() {
-            self.tls.client_key = other.tls.client_key.clone();
-        }
-        if !other.tls.verify_hostname {
-            self.tls.verify_hostname = false;
-        }
-        if other.tls.min_version != default_tls_min_version() {
-            self.tls.min_version = other.tls.min_version.clone();
         }
 
         // 遥测配置合并

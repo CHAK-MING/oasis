@@ -28,3 +28,4 @@ toml = { workspace = true }
 
 # 本地依赖
 indicatif = "0.17"
+rustls-pemfile = "1"

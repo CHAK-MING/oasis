@@ -11,6 +11,7 @@ use tokio::sync::OnceCell;
 
 use crate::application::ports::repositories::NodeRepository;
 use crate::domain::models::node::{Node, NodeFacts, NodeHeartbeat, NodeLabels};
+use crate::infrastructure::persistence::utils as persist;
 
 /// 节点仓储实现 - 基于NATS KV存储
 pub struct NatsNodeRepository {
@@ -35,12 +36,7 @@ impl NatsNodeRepository {
         }
         let _ = self.kv_initialized.get_or_init(|| async { () }).await;
         // 确保心跳KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_HEARTBEAT)
-            .await
-            .is_err()
-        {
+        if self.jetstream.get_key_value(JS_KV_NODE_HEARTBEAT).await.is_err() {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_HEARTBEAT.to_string(),
                 description: "Agent heartbeat (TTL-based cleanup)".to_string(),
@@ -48,21 +44,11 @@ impl NatsNodeRepository {
                 history: 1,
                 ..Default::default()
             };
-            self.jetstream
-                .create_key_value(cfg)
-                .await
-                .map_err(|e| CoreError::Nats {
-                    message: e.to_string(),
-                })?;
+            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
         }
 
         // 确保facts KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_FACTS)
-            .await
-            .is_err()
-        {
+        if self.jetstream.get_key_value(JS_KV_NODE_FACTS).await.is_err() {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_FACTS.to_string(),
                 description: "Agent facts (versioned, no TTL)".to_string(),
@@ -70,21 +56,11 @@ impl NatsNodeRepository {
                 max_value_size: 65536,
                 ..Default::default()
             };
-            self.jetstream
-                .create_key_value(cfg)
-                .await
-                .map_err(|e| CoreError::Nats {
-                    message: e.to_string(),
-                })?;
+            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
         }
 
         // 确保labels KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_LABELS)
-            .await
-            .is_err()
-        {
+        if self.jetstream.get_key_value(JS_KV_NODE_LABELS).await.is_err() {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_LABELS.to_string(),
                 description: "Agent labels (versioned, no TTL)".to_string(),
@@ -92,12 +68,7 @@ impl NatsNodeRepository {
                 max_value_size: 65536,
                 ..Default::default()
             };
-            self.jetstream
-                .create_key_value(cfg)
-                .await
-                .map_err(|e| CoreError::Nats {
-                    message: e.to_string(),
-                })?;
+            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
         }
 
         Ok(())
@@ -106,34 +77,31 @@ impl NatsNodeRepository {
     /// 获取心跳存储
     async fn get_heartbeat_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self.jetstream
+        self
+            .jetstream
             .get_key_value(JS_KV_NODE_HEARTBEAT)
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })
+            .map_err(persist::map_nats_err)
     }
 
     /// 获取facts存储
     async fn get_facts_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self.jetstream
+        self
+            .jetstream
             .get_key_value(JS_KV_NODE_FACTS)
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })
+            .map_err(persist::map_nats_err)
     }
 
     /// 获取labels存储
     async fn get_labels_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self.jetstream
+        self
+            .jetstream
             .get_key_value(JS_KV_NODE_LABELS)
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })
+            .map_err(persist::map_nats_err)
     }
 
     /// 批量获取心跳数据（私有方法）
@@ -495,30 +463,6 @@ impl NodeRepository for NatsNodeRepository {
         })?;
 
         labels_store
-            .put(&key, data.into())
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })?;
-
-        Ok(())
-    }
-
-    async fn update_facts(&self, id: &str, facts: NodeFacts) -> Result<(), CoreError> {
-        let facts_store = self.get_facts_store().await?;
-        let key = format!("agent:facts:{}", id);
-
-        // 解析JSON facts为AgentFacts
-        let core_facts: AgentFacts =
-            serde_json::from_str(&facts.facts).map_err(|e| CoreError::Serialization {
-                message: e.to_string(),
-            })?;
-
-        let data = rmp_serde::to_vec(&core_facts).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })?;
-
-        facts_store
             .put(&key, data.into())
             .await
             .map_err(|e| CoreError::Nats {

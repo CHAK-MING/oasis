@@ -11,10 +11,11 @@ pub mod selector;
 pub mod shutdown;
 pub mod task;
 pub mod telemetry;
+pub mod transport;
 mod type_defs;
 
-pub use error::{CoreError, Result};
 pub use constants::*;
+pub use error::{CoreError, Result};
 
 pub mod types {
     pub use crate::agent::*;
@@ -25,4 +26,3 @@ pub mod types {
 pub mod proto {
     tonic::include_proto!("oasis");
 }
-

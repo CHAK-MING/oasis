@@ -172,6 +172,35 @@ impl From<std::io::Error> for CoreError {
     }
 }
 
+impl CoreError {
+    /// 从 IO 错误创建文件错误，保留文件路径上下文
+    pub fn from_io_with_path(err: std::io::Error, path: impl Into<String>) -> Self {
+        let message = err.to_string();
+        match err.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+                CoreError::File {
+                    path: path.into(),
+                    message,
+                }
+            }
+            _ => CoreError::Internal { message },
+        }
+    }
+
+    /// 从 IO 错误创建连接错误，保留端点上下文
+    pub fn from_io_with_endpoint(err: std::io::Error, endpoint: impl Into<String>) -> Self {
+        let message = err.to_string();
+        match err.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionRefused => {
+                CoreError::Connection {
+                    endpoint: endpoint.into(),
+                }
+            }
+            _ => CoreError::Internal { message },
+        }
+    }
+}
+
 impl From<async_nats::Error> for CoreError {
     fn from(err: async_nats::Error) -> Self {
         CoreError::Nats {

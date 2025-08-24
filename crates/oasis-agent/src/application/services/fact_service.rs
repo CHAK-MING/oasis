@@ -28,6 +28,10 @@ impl FactService {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        // 先立即发布一次，随后每分钟更新
+        if let Err(e) = self.collect_and_publish_facts().await {
+            error!(error = %e, "Failed to collect and publish facts initially");
+        }
         let mut interval = interval(Duration::from_secs(60)); // 每分钟更新一次
 
         loop {
@@ -43,11 +47,9 @@ impl FactService {
         // 收集系统信息
         let facts = self.collector.collect().await?;
 
-        // 转换为 AgentFacts 并发布到 KV 存储
-        let _agent_facts = self.convert_to_agent_facts(&facts).await;
-        self.repository
-            .publish_facts(&facts)
-            .await?;
+        // 转换为 AgentFacts 并发布到 KV 存储（MessagePack，与 Server 读取一致）
+        let agent_facts = self.convert_to_agent_facts(&facts).await;
+        self.repository.publish_agent_facts(&agent_facts).await?;
         info!("Published AgentFacts to KV storage");
 
         Ok(())
