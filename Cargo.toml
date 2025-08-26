@@ -29,3 +29,7 @@ futures-util = "0.3"
 # 配置管理相关 - 多个组件使用
 serde_yaml = "0.9"
 toml = "0.8"
+
+# 证书生成相关
+rcgen = "0.12"
+x509-parser = "0.15"

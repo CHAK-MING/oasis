@@ -1,51 +1,46 @@
-use async_trait::async_trait;
-use oasis_core::error::{CoreError, Result};
-
 use crate::application::ports::fact_repository::FactRepositoryPort;
-use oasis_core::types::AgentFacts;
+use async_nats::Client;
+use oasis_core::{agent::AgentFacts, error::Result};
+use rmp_serde;
 
-/// NATS KV 事实仓库实现
 pub struct NatsFactRepository {
-    client: async_nats::Client,
-    bucket: String,
+    client: Client,
+    bucket_name: String,
     key: String,
 }
 
 impl NatsFactRepository {
-    pub fn new(client: async_nats::Client, bucket: String, key: String) -> Self {
+    pub fn new(client: Client, bucket_name: String, key: String) -> Self {
         Self {
             client,
-            bucket,
+            bucket_name,
             key,
         }
     }
-
-    async fn get_kv_store(&self) -> Result<async_nats::jetstream::kv::Store> {
-        let js = async_nats::jetstream::new(self.client.clone());
-        js.get_key_value(&self.bucket)
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to create KV store: {}", e),
-            })
-    }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl FactRepositoryPort for NatsFactRepository {
     async fn publish_agent_facts(&self, facts: &AgentFacts) -> Result<()> {
-        let store = self.get_kv_store().await?;
-        let key = self.key.clone();
+        // 序列化为 MessagePack
+        let data = rmp_serde::to_vec(facts)
+            .map_err(|e| oasis_core::error::CoreError::Internal {
+                message: format!("Failed to serialize AgentFacts: {}", e),
+            })?;
 
-        let value = rmp_serde::to_vec_named(facts).map_err(|e| CoreError::Serialization {
-            message: format!("Failed to serialize AgentFacts: {}", e),
+        // 发布到 NATS KV
+        let js = async_nats::jetstream::new(self.client.clone());
+        let kv = js.get_key_value(&self.bucket_name).await.map_err(|e| {
+            oasis_core::error::CoreError::Nats {
+                message: format!("Failed to get KV bucket {}: {}", self.bucket_name, e),
+            }
         })?;
 
-        store
-            .put(&key, value.into())
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to publish AgentFacts: {}", e),
-            })?;
+        kv.put(&self.key, data.into()).await.map_err(|e| {
+            oasis_core::error::CoreError::Nats {
+                message: format!("Failed to put facts to KV: {}", e),
+            }
+        })?;
 
         Ok(())
     }

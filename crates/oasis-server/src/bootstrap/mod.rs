@@ -1,3 +1,4 @@
+use crate::infrastructure::connection::create_jetstream_context_with_config;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -6,18 +7,17 @@ use tracing::info;
 pub mod lifecycle;
 
 use crate::bootstrap::lifecycle::ServiceLifecycleManager;
-use crate::config::ServerConfig;
-use crate::infrastructure::connection::NatsConnectionManager;
 use crate::infrastructure::resource_manager::InfrastructureResourceManager;
 use crate::infrastructure::services::leader_election::LeaderElectionService;
 use crate::infrastructure::tls::TlsService;
 use crate::interface::grpc::factory::GrpcServiceFactory;
 use crate::interface::server_manager::GrpcServerManager;
+use oasis_core::config::OasisConfig;
 use oasis_core::shutdown::GracefulShutdown;
 
 /// 服务器启动器 - 负责整个应用程序的引导过程
 pub struct ServerBootstrapper {
-    config: ServerConfig,
+    config: OasisConfig,
     shutdown: GracefulShutdown,
 }
 
@@ -28,7 +28,7 @@ pub struct RunningServer {
 
 impl ServerBootstrapper {
     /// 创建新的服务器启动器
-    pub fn new(config: ServerConfig) -> Self {
+    pub fn new(config: OasisConfig) -> Self {
         let shutdown = GracefulShutdown::new();
 
         Self { config, shutdown }
@@ -37,9 +37,8 @@ impl ServerBootstrapper {
     /// 启动服务器，返回运行中的实例
     pub async fn start(self) -> Result<RunningServer> {
         info!(
-            grpc_addr = %self.config.server.grpc_addr,
-            nats_url = %self.config.common.nats.url,
-            heartbeat_ttl_sec = self.config.server.heartbeat_ttl_sec,
+            listen_addr = %self.config.listen_addr,
+            data_dir = %self.config.data_dir.display(),
             "Oasis Server starting"
         );
 
@@ -51,7 +50,7 @@ impl ServerBootstrapper {
         self.setup_signal_handler();
 
         // 连接 NATS
-        let jetstream = self.connect_to_nats().await?;
+        let jetstream = create_jetstream_context_with_config(&self.config.nats).await?;
 
         // 初始化基础设施资源
         self.initialize_infra_resources(&jetstream).await?;
@@ -74,6 +73,28 @@ impl ServerBootstrapper {
             self.start_kv_watchers(&jetstream, &health_service).await?;
         lifecycle_manager.register_tasks("kv_watchers".to_string(), kv_watcher_handles, 3);
         lifecycle_manager.register_task("event_processor".to_string(), event_processor_handle, 3);
+
+        // 启动 RolloutManager（统一纳入生命周期管理）
+        {
+            use crate::application::services::RolloutManager;
+            use crate::infrastructure::di_container::InfrastructureDiContainer;
+
+            let di_container = InfrastructureDiContainer::new(jetstream.clone(), 60);
+            let context = di_container.create_application_context()?;
+            let rollout_manager = RolloutManager::new(
+                context.rollout_repo,
+                context.node_repo,
+                context.task_repo,
+                context.selector_engine,
+                self.shutdown.child_token(),
+            );
+            let rollout_arc = Arc::new(rollout_manager);
+            let rollout_clone = rollout_arc.clone();
+            let handle = tokio::spawn(async move {
+                rollout_clone.run().await;
+            });
+            lifecycle_manager.register_task("rollout_manager".to_string(), handle, 2);
+        }
 
         // 启动 gRPC 服务器
         let grpc_handle = self
@@ -101,25 +122,12 @@ impl ServerBootstrapper {
         });
     }
 
-    /// 连接 NATS
-    async fn connect_to_nats(&self) -> Result<async_nats::jetstream::Context> {
-        info!("Initializing NATS connection with TLS...");
-        let jetstream =
-            NatsConnectionManager::create_jetstream_with_tls(&self.config.common.nats).await?;
-        Ok(jetstream)
-    }
-
     /// 初始化基础设施资源
     async fn initialize_infra_resources(
         &self,
         jetstream: &async_nats::jetstream::Context,
     ) -> Result<()> {
-        InfrastructureResourceManager::initialize(
-            jetstream,
-            &self.config,
-            self.shutdown.child_token(),
-        )
-        .await?;
+        InfrastructureResourceManager::initialize(jetstream, self.shutdown.child_token()).await?;
         Ok(())
     }
 
@@ -127,7 +135,25 @@ impl ServerBootstrapper {
     async fn initialize_tls_service(&self) -> Result<TlsService> {
         info!("Initializing TLS service...");
         let (tls_reload_sender, _) = broadcast::channel(1);
-        let tls_service = TlsService::new(self.config.server.grpc_tls.clone(), tls_reload_sender);
+
+        // 从配置加载 TLS 路径
+        let tls_config = crate::infrastructure::tls::GrpcTlsConfig {
+            server_cert: self
+                .config
+                .tls
+                .grpc_server_cert_path
+                .to_string_lossy()
+                .to_string(),
+            server_key: self
+                .config
+                .tls
+                .grpc_server_key_path
+                .to_string_lossy()
+                .to_string(),
+            ca_cert: self.config.tls.grpc_ca_path.to_string_lossy().to_string(),
+        };
+
+        let tls_service = TlsService::new(tls_config, tls_reload_sender);
 
         tls_service
             .load_certificates()
@@ -150,9 +176,17 @@ impl ServerBootstrapper {
     ) -> Result<LeaderElectionService> {
         info!("Initializing leader election service...");
 
+        // 硬编码选主配置
+        let leader_election_config =
+            crate::infrastructure::services::leader_election::LeaderElectionConfig {
+                election_key: "oasis.leader".to_string(),
+                ttl_sec: 30,
+                check_interval_sec: 5,
+            };
+
         let leader_election_service = LeaderElectionService::new(
             jetstream.clone(),
-            &self.config,
+            &leader_election_config,
             self.shutdown.child_token(),
         )
         .await
@@ -174,10 +208,13 @@ impl ServerBootstrapper {
     ) -> Result<Arc<crate::interface::health::HealthService>> {
         info!("Initializing health service...");
 
+        // 硬编码心跳 TTL
+        let heartbeat_ttl_sec = 60;
+
         // 创建 NodeRepository
         let node_repo = Arc::new(crate::infrastructure::persistence::NatsNodeRepository::new(
             jetstream.clone(),
-            self.config.server.heartbeat_ttl_sec,
+            heartbeat_ttl_sec,
         ))
             as Arc<dyn crate::application::ports::repositories::NodeRepository>;
 
@@ -188,11 +225,7 @@ impl ServerBootstrapper {
 
         // 启动健康检查监控
         health_service
-            .start_monitoring(
-                jetstream.clone(),
-                node_repo,
-                self.config.server.heartbeat_ttl_sec,
-            )
+            .start_monitoring(jetstream.clone(), node_repo, heartbeat_ttl_sec)
             .await;
 
         info!("Health service initialized successfully");
@@ -202,7 +235,7 @@ impl ServerBootstrapper {
     /// 启动 KV Watchers
     async fn start_kv_watchers(
         &self,
-        jetstream: &async_nats::jetstream::Context,
+        _jetstream: &async_nats::jetstream::Context,
         health_service: &Arc<crate::interface::health::HealthService>,
     ) -> Result<(
         Vec<tokio::task::JoinHandle<()>>,
@@ -210,11 +243,18 @@ impl ServerBootstrapper {
     )> {
         let (event_sender, _) = broadcast::channel(1000);
 
-        let kv_watcher = crate::infrastructure::services::KvWatcherService::new(
-            jetstream.clone(),
+        // 硬编码配置
+        let config = crate::infrastructure::services::kv_watcher::ServerConfig {
+            server: crate::infrastructure::services::kv_watcher::ServerSection {
+                heartbeat_ttl_sec: 60,
+            },
+        };
+
+        let kv_watcher = crate::infrastructure::services::kv_watcher::KvWatcherService::new(
+            _jetstream.clone(),
             event_sender.clone(),
             self.shutdown.child_token(),
-            self.config.clone(),
+            config,
         );
 
         let handles = kv_watcher.start_watching().await?;
@@ -282,13 +322,21 @@ impl ServerBootstrapper {
     ) -> Result<tokio::task::JoinHandle<()>> {
         let tls_service_clone = tls_service.clone();
 
-        let addr = self.config.server.grpc_addr.parse()?;
+        let addr = self.config.listen_addr.parse()?;
         let js_clone = jetstream.clone();
         let shutdown_token = self.shutdown.child_token(); // 创建子token
         let shutdown_clone = shutdown_token.clone(); // clone用于移动到闭包
         let health_clone = health_service.clone();
-        let streaming_config = self.config.streaming.clone();
-        let heartbeat_ttl = self.config.server.heartbeat_ttl_sec;
+
+        // 硬编码流配置
+        let streaming_config = crate::interface::grpc::server::StreamingBackoffSection {
+            initial_delay_ms: 100,
+            max_delay_ms: 5000,
+            max_retries: 10,
+        };
+
+        // 硬编码心跳 TTL
+        let heartbeat_ttl = 60;
 
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = GrpcServerManager::run_loop(

@@ -1,11 +1,11 @@
 use anyhow::Result;
-use async_nats::jetstream::kv::{Operation as KvOp, Store};
+use async_nats::jetstream::kv::Operation as KvOp;
 use futures::StreamExt;
 use oasis_core::{
     JS_KV_CONFIG, JS_KV_NODE_FACTS, JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS,
-    backoff::{execute_with_backoff, kv_operations_backoff},
-    types::{AgentFacts, AgentHeartbeat, AgentLabels},
+    agent::{AgentFacts, AgentHeartbeat, AgentLabels},
 };
+use rmp_serde;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -13,10 +13,14 @@ use tracing::{debug, error, info, warn};
 /// 确保KV存储存在并启动监听器
 pub async fn ensure_kv_and_watch(
     js: &async_nats::jetstream::Context,
-    cfg: &crate::config::ServerConfig,
     cancel_token: CancellationToken,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>> {
-    let ttl_sec = cfg.server.heartbeat_ttl_sec;
+    // 硬编码配置值
+    let ttl_sec = 60; // 心跳 TTL
+    let facts_history = 10; // Facts 历史版本数
+    let labels_history = 10; // Labels 历史版本数
+    let max_value_size = 1024 * 1024; // 1MB
+
     info!("Creating KV buckets with heartbeat TTL: {}s", ttl_sec);
 
     // Facts KV - 长期保存，版本化
@@ -26,8 +30,8 @@ pub async fn ensure_kv_and_watch(
             js.create_key_value(async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_FACTS.to_string(),
                 description: "Agent facts (versioned, no TTL)".to_string(),
-                history: cfg.kv.facts_history as i64,
-                max_value_size: cfg.kv.max_value_size as i32,
+                history: facts_history as i64,
+                max_value_size: max_value_size as i32,
                 ..Default::default()
             })
             .await?
@@ -56,8 +60,8 @@ pub async fn ensure_kv_and_watch(
             js.create_key_value(async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_LABELS.to_string(),
                 description: "Agent labels (versioned, no TTL)".to_string(),
-                history: cfg.kv.labels_history as i64,
-                max_value_size: cfg.kv.max_value_size as i32,
+                history: labels_history as i64,
+                max_value_size: max_value_size as i32,
                 ..Default::default()
             })
             .await?
@@ -72,7 +76,7 @@ pub async fn ensure_kv_and_watch(
                 bucket: JS_KV_CONFIG.to_string(),
                 description: "OASIS configuration (versioned, no TTL)".to_string(),
                 history: 50, // 使用默认值
-                max_value_size: cfg.kv.max_value_size as i32,
+                max_value_size: max_value_size as i32,
                 ..Default::default()
             })
             .await?
@@ -131,7 +135,7 @@ pub async fn ensure_kv_and_watch(
 /// - 当 watch 流异常结束时，使用 backoff 重新建立 watcher
 /// - 响应 cancel 以便优雅退出
 fn spawn_resilient_watcher<F>(
-    kv: Store,
+    kv: async_nats::jetstream::kv::Store,
     cancel: CancellationToken,
     on_put: F,
 ) -> tokio::task::JoinHandle<()>
@@ -140,13 +144,13 @@ where
 {
     let on_put = std::sync::Arc::new(on_put);
     tokio::spawn(async move {
-        let backoff = kv_operations_backoff();
+        let backoff = oasis_core::backoff::kv_operations_backoff();
 
         loop {
             if cancel.is_cancelled() {
                 break;
             }
-            let attempt = execute_with_backoff(
+            let attempt = oasis_core::backoff::execute_with_backoff(
                 || {
                     let kv = kv.clone();
                     let cancel_clone = cancel.clone();

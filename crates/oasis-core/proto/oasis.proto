@@ -44,8 +44,6 @@ service OasisService {
   rpc GetNodeFacts(GetNodeFactsRequest) returns (GetNodeFactsResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
 
-
-
   // 灰度发布管理
   rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
   rpc StartRollout(StartRolloutRequest) returns (StartRolloutResponse);
@@ -55,18 +53,6 @@ service OasisService {
   rpc RollbackRollout(RollbackRolloutRequest) returns (RollbackRolloutResponse);
   rpc GetRollout(GetRolloutRequest) returns (GetRolloutResponse);
   rpc ListRollouts(ListRolloutsRequest) returns (ListRolloutsResponse);
-
-  // agent 配置管理
-  rpc ApplyAgentConfig(ApplyAgentConfigRequest) returns (ApplyAgentConfigResponse);
-  rpc GetAgentConfig(GetAgentConfigRequest) returns (GetAgentConfigResponse);
-  rpc SetAgentConfig(SetAgentConfigRequest) returns (SetAgentConfigResponse);
-  rpc DelAgentConfig(DelAgentConfigRequest) returns (DelAgentConfigResponse);
-  rpc ListAgentConfig(ListAgentConfigRequest) returns (ListAgentConfigResponse);
-  rpc ShowAgentConfig(ShowAgentConfigRequest) returns (ShowAgentConfigResponse);
-  rpc BackupAgentConfig(BackupAgentConfigRequest) returns (BackupAgentConfigResponse);
-  rpc RestoreAgentConfig(RestoreAgentConfigRequest) returns (RestoreAgentConfigResponse);
-  rpc ValidateAgentConfig(ValidateAgentConfigRequest) returns (ValidateAgentConfigResponse);
-  rpc DiffAgentConfig(DiffAgentConfigRequest) returns (DiffAgentConfigResponse);
 }
 
 message ExecuteTaskRequest {
@@ -349,92 +335,4 @@ message RolloutMsg {
   int64 created_at = 14;
   int64 updated_at = 15;
   uint64 version = 16;
-}
-
-// Agent config messages
-message ApplyAgentConfigRequest {
-  string selector = 1; // CEL selector
-  bytes config_data = 2; // opaque config bytes (e.g., TOML)
-}
-message ApplyAgentConfigResponse {
-  uint64 applied_agents = 1;
-}
-message GetAgentConfigRequest { AgentId agent_id = 1; string key = 2; }
-message GetAgentConfigResponse { bool found = 1; string value = 2; }
-message SetAgentConfigRequest { AgentId agent_id = 1; string key = 2; string value = 3; }
-message DelAgentConfigRequest { AgentId agent_id = 1; string key = 2; }
-message SetAgentConfigResponse {}
-message DelAgentConfigResponse {}
-
-message ClearAgentConfigsForSelectorRequest { string selector = 1; }
-message ClearAgentConfigsForSelectorResponse { uint64 cleared_agents = 1; uint64 cleared_keys = 2; }
-
-// 新增的 Agent 配置管理消息
-message ListAgentConfigRequest { 
-  AgentId agent_id = 1; 
-  string prefix = 2; // 可选的前缀过滤
-}
-message ListAgentConfigResponse { 
-  repeated string keys = 1; 
-  uint64 total_count = 2;
-}
-
-message ShowAgentConfigRequest { 
-  AgentId agent_id = 1; 
-}
-message ShowAgentConfigResponse { 
-  map<string, string> summary = 1; // 配置摘要信息
-  uint64 total_keys = 2;
-}
-
-message BackupAgentConfigRequest { 
-  AgentId agent_id = 1; 
-  string output_format = 2; // "toml", "json", "yaml"
-}
-message BackupAgentConfigResponse { 
-  bytes config_data = 1; // 序列化的配置数据
-  string format = 2; // 实际使用的格式
-  uint64 key_count = 3;
-}
-
-message RestoreAgentConfigRequest { 
-  AgentId agent_id = 1; 
-  bytes config_data = 2; // 序列化的配置数据
-  string format = 3; // "toml", "json", "yaml"
-  bool overwrite = 4; // 是否覆盖现有配置
-}
-message RestoreAgentConfigResponse { 
-  uint64 restored_keys = 1;
-  uint64 skipped_keys = 2; // 跳过的键数量（如果 overwrite=false）
-}
-
-message ValidateAgentConfigRequest { 
-  AgentId agent_id = 1; 
-  bytes config_data = 2; // 要验证的配置数据
-  string format = 3; // "toml", "json", "yaml"
-}
-message ValidateAgentConfigResponse { 
-  bool valid = 1;
-  repeated string errors = 2; // 验证错误信息
-  repeated string warnings = 3; // 验证警告信息
-}
-
-message DiffAgentConfigRequest { 
-  AgentId agent_id = 1; 
-  bytes from_config = 2; // 源配置数据
-  bytes to_config = 3; // 目标配置数据
-  string format = 4; // "toml", "json", "yaml"
-}
-message DiffAgentConfigResponse { 
-  repeated ConfigDiffItem changes = 1; // 配置变更项
-  uint64 added_count = 2;
-  uint64 modified_count = 3;
-  uint64 deleted_count = 4;
-}
-
-message ConfigDiffItem {
-  string key = 1;
-  string operation = 2; // "added", "modified", "deleted"
-  string old_value = 3; // 旧值（对于 modified 和 deleted）
-  string new_value = 4; // 新值（对于 added 和 modified）
 }

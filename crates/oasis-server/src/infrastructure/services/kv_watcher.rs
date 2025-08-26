@@ -2,23 +2,35 @@ use anyhow::Result;
 use async_nats::jetstream::kv::Operation as KvOp;
 use futures::StreamExt;
 use oasis_core::{
-    types::{AgentFacts, AgentHeartbeat, AgentLabels}, 
-    JS_KV_NODE_FACTS, JS_KV_NODE_HEARTBEAT,
-    JS_KV_NODE_LABELS,
-    backoff::{execute_with_backoff, kv_operations_backoff},
+    agent::AgentHeartbeat,
+    types::{AgentLabels, AgentFacts},
+    JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS, JS_KV_NODE_FACTS,
 };
+use rmp_serde;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::events::{NodeEvent, NodeEvent::*};
-use crate::config::ServerConfig;
+use crate::domain::events::NodeEvent::{Online, Offline, LabelsUpdated, FactsUpdated};
+use crate::domain::events::NodeEvent;
+use oasis_core::backoff::{kv_operations_backoff, execute_with_backoff};
 
-/// KV 监听器服务
+/// KV 监听服务 - 监听各种 KV 存储的变化并发送相应的事件
 pub struct KvWatcherService {
     jetstream: async_nats::jetstream::Context,
     event_sender: broadcast::Sender<NodeEvent>,
     shutdown_token: tokio_util::sync::CancellationToken,
     config: ServerConfig,
+}
+
+// 硬编码的配置结构
+#[derive(Clone)]
+pub struct ServerConfig {
+    pub server: ServerSection,
+}
+
+#[derive(Clone)]
+pub struct ServerSection {
+    pub heartbeat_ttl_sec: u64,
 }
 
 impl KvWatcherService {

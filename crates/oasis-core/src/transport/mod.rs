@@ -4,7 +4,7 @@
 
 pub mod nats;
 
-pub use nats::{NatsClientFactory, UnifiedNatsClient};
+pub use nats::NatsClientFactory;
 
 
 

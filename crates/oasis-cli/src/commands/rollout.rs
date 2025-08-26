@@ -4,13 +4,16 @@
 use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, ContentArrangement, Table};
+use console::style;
 use oasis_core::proto::{
-    AbortRolloutRequest, CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest,
-    PauseRolloutRequest, ResumeRolloutRequest, RollbackRolloutRequest, RolloutId,
-    StartRolloutRequest, TaskId, TaskTargetMsg, oasis_service_client::OasisServiceClient,
-    task_target_msg,
+    oasis_service_client::OasisServiceClient, task_target_msg, AbortRolloutRequest,
+    CreateRolloutRequest, GetRolloutRequest, ListRolloutsRequest, PauseRolloutRequest,
+    ResumeRolloutRequest, RollbackRolloutRequest, RolloutId, StartRolloutRequest, TaskId,
+    TaskTargetMsg,
 };
 use std::collections::HashMap;
+use tokio::time::{sleep, Duration};
 use tonic::transport::Channel;
 
 async fn resolve_rollout_id(
@@ -46,156 +49,156 @@ async fn resolve_rollout_id(
             value: String::new(),
         }));
     }
-    anyhow::bail!("Rollout not found by id or name: {}", name_or_id)
+    anyhow::bail!("未找到指定的灰度（按 id 或 name）: {}", name_or_id)
 }
 
 #[derive(Debug, Subcommand)]
 pub enum RolloutCommand {
-    /// Start a rollout
+    /// 启动灰度发布
     Start(StartArgs),
-    /// Show rollout status
+    /// 查看灰度状态
     Status(StatusArgs),
-    /// Pause rollout
+    /// 暂停灰度
     Pause(PauseArgs),
-    /// Resume rollout
+    /// 恢复灰度
     Resume(ResumeArgs),
-    /// Abort rollout
+    /// 中止灰度
     Abort(AbortArgs),
-    /// Rollback rollout
+    /// 回滚灰度
     Rollback(RollbackArgs),
-    /// List rollouts
+    /// 列出灰度
     List(ListArgs),
-    /// Validate rollout config file
+    /// 校验灰度配置
     Validate(ValidateArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Rollout name
+    /// 灰度名称
     #[arg(short, long)]
     pub name: String,
 
-    /// Strategy (canary, rolling, blue-green)
+    /// 策略（canary, rolling, blue-green）
     #[arg(short, long, default_value = "canary")]
     pub strategy: String,
 
-    /// Target specification (CEL selector or comma-separated agent IDs)
+    /// 目标（CEL 选择器或逗号分隔的 Agent ID）
     #[arg(
         long,
         short = 't',
         value_name = "<TARGET>",
-        help = "Target specification (CEL selector or agent IDs)"
+        help = "目标（CEL 选择器或 Agent ID）"
     )]
     pub target: String,
 
-    /// Task definition file
-    #[arg(short, long)]
+    /// 任务定义文件
+    #[arg(long)]
     pub task_file: String,
 
-    /// Rollout config file
+    /// 灰度配置文件
     #[arg(short, long)]
     pub config_file: Option<String>,
 
-    /// Batch size (percentage or absolute)
+    /// 批次大小（百分比或绝对值）
     #[arg(short, long, default_value = "10%")]
     pub batch_size: String,
 
-    /// Batch interval (seconds)
+    /// 批次间隔（秒）
     #[arg(short, long, default_value = "300")]
     pub interval: u64,
 
-    /// Auto advance
+    /// 自动推进
     #[arg(long)]
     pub auto_advance: bool,
 
-    /// Health check config
+    /// 健康检查配置
     #[arg(long)]
     pub health_check: Option<String>,
 
-    /// Timeout (seconds)
+    /// 超时（秒）
     #[arg(long, default_value = "3600")]
     pub timeout: u64,
 
-    /// Labels (key=value)
+    /// 标签（key=value）
     #[arg(long, action = clap::ArgAction::Append)]
     pub label: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
-    /// Rollout ID or name
+    /// 灰度 ID 或名称
     pub name: String,
 
-    /// Verbose output
+    /// 详细输出
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Output format (table, json, yaml)
+    /// 输出格式（table, json, yaml）
     #[arg(short, long, default_value = "table")]
     pub format: String,
 
-    /// Watch (refresh every N seconds)
+    /// 监控（每 N 秒刷新）
     #[arg(short, long)]
     pub watch: Option<u64>,
 }
 
 #[derive(Debug, Args)]
 pub struct PauseArgs {
-    /// Rollout ID or name
+    /// 灰度 ID 或名称
     pub name: String,
 
-    /// Reason
+    /// 原因
     #[arg(long)]
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct ResumeArgs {
-    /// Rollout ID or name
+    /// 灰度 ID 或名称
     pub name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct AbortArgs {
-    /// Rollout ID or name
+    /// 灰度 ID 或名称
     pub name: String,
 
-    /// Reason
+    /// 原因
     #[arg(long)]
     pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct RollbackArgs {
-    /// Rollout ID or name
+    /// 灰度 ID 或名称
     pub name: String,
 
-    /// Reason
+    /// 原因
     #[arg(long)]
     pub reason: Option<String>,
 
-    /// Force rollback
+    /// 强制回滚
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Output format (table, json, yaml)
+    /// 输出格式（table, json, yaml）
     #[arg(short, long, default_value = "table")]
     pub format: String,
 
-    /// Verbose output
+    /// 详细输出
     #[arg(short, long)]
     pub verbose: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ValidateArgs {
-    /// Config file path
+    /// 配置文件路径
     pub config_file: String,
 
-    /// Output format (table, json, yaml)
+    /// 输出格式（table, json, yaml）
     #[arg(short, long, default_value = "table")]
     pub format: String,
 }
@@ -217,16 +220,18 @@ pub async fn run_rollout(
 }
 
 async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Starting rollout: {}", args.name);
+    println!("› 开始创建灰度任务: {}", style(&args.name).cyan());
 
     if args.target.is_empty() {
-        return Err(anyhow::anyhow!("必须提供 --target 参数。"));
+        println!("  {} 必须提供 --target 参数。", style("✖").red());
+        return Ok(());
     }
 
     // 读取任务脚本/定义
     let task_content = tokio::fs::read_to_string(&args.task_file)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read task file {}: {}", args.task_file, e))?;
+        .map_err(|e| anyhow::anyhow!("读取任务文件失败 {}: {}", args.task_file, e))?;
+    println!("  {} 读取任务文件", style("✔").green());
 
     // 解析标签参数 key=value
     let mut labels = HashMap::new();
@@ -234,20 +239,20 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
         if let Some((key, value)) = label.split_once('=') {
             labels.insert(key.to_string(), value.to_string());
         } else {
-            return Err(anyhow::anyhow!(
-                "Invalid label: {} (expected key=value)",
-                label
-            ));
+            anyhow::bail!("无效标签: {}（需 key=value）", label);
         }
     }
+    println!("  {} 解析任务标签", style("✔").green());
 
     // 使用智能解析器统一处理目标
-    let target_selector = TargetSelector::parse(&args.target);
+    let target_selector = TargetSelector::parse(&args.target)?;
+    let target_selector = TargetSelector::parse(&args.target)?;
     let target_msg = TaskTargetMsg {
         target: Some(task_target_msg::Target::Selector(
             target_selector.expression().to_string(),
         )),
     };
+    println!("  {} 解析目标选择器", style("✔").green());
 
     // 构造 TaskSpec 消息
     let task_msg = oasis_core::proto::TaskSpecMsg {
@@ -332,16 +337,22 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
         .unwrap_or_else(|| RolloutId {
             value: String::new(),
         });
-
-    println!("Created rollout: {}", rollout_id.value);
+    println!("  {} 创建灰度任务", style("✔").green());
 
     // 启动灰度
-    let _start_response = client
+    client
         .start_rollout(StartRolloutRequest {
             rollout_id: Some(rollout_id.clone()),
         })
         .await?;
-    println!("Rollout started: {}", rollout_id.value);
+    println!("  {} 启动灰度任务", style("✔").green());
+
+    println!(
+        "\n{} 灰度任务 '{}' 已成功启动，ID: {}",
+        style("✔").green(),
+        style(&args.name).cyan(),
+        style(rollout_id.value).yellow()
+    );
 
     Ok(())
 }
@@ -350,71 +361,105 @@ async fn show_rollout_status(
     args: StatusArgs,
     mut client: OasisServiceClient<Channel>,
 ) -> Result<()> {
-    println!("Rollout status: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
-    match client
-        .get_rollout(GetRolloutRequest {
-            rollout_id: Some(rid),
-        })
-        .await
-    {
-        Ok(response) => {
-            let r = response
-                .into_inner()
-                .rollout
-                .ok_or_else(|| anyhow::anyhow!("not found"))?;
-            println!("id: {}", r.id.as_ref().unwrap().value);
-            println!("status: {:?}", r.state);
-            if let Some(p) = r.progress {
-                println!("progress: {}/{} nodes", p.processed_nodes, p.total_nodes);
-                println!("success_rate: {:.1}%", p.completion_rate * 100.0);
+
+    loop {
+        match client
+            .get_rollout(GetRolloutRequest {
+                rollout_id: Some(rid.clone()),
+            })
+            .await
+        {
+            Ok(response) => {
+                let r = response
+                    .into_inner()
+                    .rollout
+                    .ok_or_else(|| anyhow::anyhow!("未找到灰度任务"))?;
+
+                println!("› {}: {}", style("灰度任务").bold(), style(&r.name).cyan());
+
+                println!("  {:<10} {}", "ID:", style(r.id.unwrap().value).dim());
+                println!("  {:<10} {}", "状态:", format_rollout_state(r.state));
+
+                if let Some(p) = r.progress {
+                    let progress_bar = format!(
+                        "[{:27}]",
+                        "=".repeat((p.completion_rate * 27.0).round() as usize)
+                    );
+                    println!(
+                        "  {:<10} {} {}/{}, {:.1}%",
+                        "进度:",
+                        style(progress_bar).cyan(),
+                        p.processed_nodes,
+                        p.total_nodes,
+                        p.completion_rate * 100.0
+                    );
+                }
+
+                println!("  {:<10} {}", "创建于:", style(r.created_at).dim());
+                println!("  {:<10} {}", "更新于:", style(r.updated_at).dim());
             }
-            println!("created_at: {}", r.created_at);
-            println!("updated_at: {}", r.updated_at);
+            Err(e) => {
+                println!("{} 获取状态失败: {}", style("✖").red(), e);
+                break;
+            }
         }
-        Err(e) => {
-            anyhow::bail!("Failed to get rollout status: {}", e);
+
+        if let Some(interval) = args.watch {
+            sleep(Duration::from_secs(interval)).await;
+            println!(""); // 换行
+            continue;
         }
+        break;
     }
 
     Ok(())
 }
 
 async fn pause_rollout(args: PauseArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Pausing rollout: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
-    let _response = client
+    client
         .pause_rollout(PauseRolloutRequest {
             rollout_id: Some(rid),
-            reason: args.reason.unwrap_or_else(|| "user".to_string()),
+            reason: args.reason.unwrap_or_else(|| "用户手动暂停".to_string()),
         })
         .await?;
-    println!("Paused");
+    println!(
+        "{} 灰度任务 '{}' 已暂停。",
+        style("⏸").yellow(),
+        style(args.name).cyan()
+    );
     Ok(())
 }
 
 async fn resume_rollout(args: ResumeArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Resuming rollout: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
-    let _response = client
+    client
         .resume_rollout(ResumeRolloutRequest {
             rollout_id: Some(rid),
         })
         .await?;
-    println!("Resumed");
+    println!(
+        "{} 灰度任务 '{}' 已恢复。",
+        style("▶").green(),
+        style(args.name).cyan()
+    );
     Ok(())
 }
 
 async fn abort_rollout(args: AbortArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Aborting rollout: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
-    let _response = client
+    client
         .abort_rollout(AbortRolloutRequest {
             rollout_id: Some(rid),
-            reason: args.reason.unwrap_or_else(|| "user".to_string()),
+            reason: args.reason.unwrap_or_else(|| "用户手动中止".to_string()),
         })
         .await?;
-    println!("Aborted");
+    println!(
+        "{} 灰度任务 '{}' 已中止。",
+        style("⏹").red(),
+        style(args.name).cyan()
+    );
     Ok(())
 }
 
@@ -422,71 +467,111 @@ async fn rollback_rollout(
     args: RollbackArgs,
     mut client: OasisServiceClient<Channel>,
 ) -> Result<()> {
-    println!("Rolling back rollout: {}", args.name);
     let rid = resolve_rollout_id(&mut client, &args.name).await?;
-    let _response = client
+    client
         .rollback_rollout(RollbackRolloutRequest {
             rollout_id: Some(rid),
-            reason: args.reason.unwrap_or_else(|| "user".to_string()),
+            reason: args.reason.unwrap_or_else(|| "用户手动回滚".to_string()),
         })
         .await?;
-    println!("Rollback started");
+    println!(
+        "{} 灰度任务 '{}' 已触发回滚。",
+        style("🔄").yellow(),
+        style(args.name).cyan()
+    );
     Ok(())
 }
 
 async fn list_rollouts(args: ListArgs, mut client: OasisServiceClient<Channel>) -> Result<()> {
-    println!("Listing rollouts");
-
-    match client
+    let response = client
         .list_rollouts(ListRolloutsRequest {
             status_filter: String::new(),
             limit: if args.verbose { 100 } else { 20 },
         })
-        .await
-    {
-        Ok(response) => {
-            let rollouts = response.into_inner().rollouts;
-            if rollouts.is_empty() {
-                println!("no rollouts");
-            } else {
-                println!("found {} rollouts:", rollouts.len());
-                for r in rollouts {
-                    println!(
-                        "  {} - {} ({:?})",
-                        r.id.as_ref().unwrap().value,
-                        r.name,
-                        r.state
-                    );
-                    if let Some(p) = r.progress.clone() {
-                        if args.verbose {
-                            println!("    progress: {}/{}", p.processed_nodes, p.total_nodes);
-                            println!("    success_rate: {:.1}%", p.completion_rate * 100.0);
-                            println!("    created_at: {}", r.created_at);
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("Failed to list rollouts: {}", e);
+        .await?;
+
+    let rollouts = response.into_inner().rollouts;
+    if rollouts.is_empty() {
+        println!("{}", style("未找到任何灰度任务。").yellow());
+        return Ok(());
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("ID").add_attribute(Attribute::Bold),
+        Cell::new("名称").add_attribute(Attribute::Bold),
+        Cell::new("状态").add_attribute(Attribute::Bold),
+        Cell::new("进度").add_attribute(Attribute::Bold),
+        Cell::new("创建于").add_attribute(Attribute::Bold),
+    ]);
+    for r in rollouts {
+        let id = r.id.as_ref().map(|x| x.value.clone()).unwrap_or_default();
+        let name = r.name;
+        let status = format_rollout_state(r.state);
+        let progress = r
+            .progress
+            .as_ref()
+            .map(|p| {
+                format!(
+                    "{}/{} ({:.0}%)",
+                    p.processed_nodes,
+                    p.total_nodes,
+                    p.completion_rate * 100.0
+                )
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let created = r.created_at.to_string();
+        table.add_row(vec![
+            Cell::new(id),
+            Cell::new(name),
+            Cell::new(status),
+            Cell::new(progress),
+            Cell::new(created),
+        ]);
+        if let Some(column) = table.column_mut(2) {
+            column.set_cell_alignment(CellAlignment::Center);
         }
     }
+    println!("{}", table);
 
     Ok(())
 }
 
 async fn validate_rollout_config(args: ValidateArgs) -> Result<()> {
-    println!("Validating rollout config: {}", args.config_file); // 英文输出
+    println!(
+        "› 正在校验灰度配置文件: {}",
+        style(&args.config_file).cyan()
+    );
 
     let config_content = tokio::fs::read_to_string(&args.config_file)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", args.config_file, e))?;
+        .map_err(|e| anyhow::anyhow!("读取配置失败 {}: {}", args.config_file, e))?;
 
     let config: serde_json::Value = serde_json::from_str(&config_content)
-        .map_err(|e| anyhow::anyhow!("Invalid JSON: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("JSON 格式无效: {}", e))?;
 
-    println!("Valid JSON");
-    println!("{}", serde_json::to_string_pretty(&config)?);
+    println!(
+        "  {} 配置文件校验通过 (JSON 格式有效)。",
+        style("✔").green()
+    );
+    println!("{}", style(serde_json::to_string_pretty(&config)?).dim());
 
     Ok(())
+}
+
+fn format_rollout_state(state: i32) -> String {
+    // 兼容 proto 中的枚举值：参考 oasis_core::proto::RolloutStateEnum
+    match state {
+        0 => style("创建").dim().to_string(),
+        1 => style("批次执行").cyan().to_string(),
+        2 => style("等待下一批").cyan().to_string(),
+        3 => style("已暂停").yellow().to_string(),
+        4 => style("已成功").green().to_string(),
+        5 => style("已失败").red().to_string(),
+        6 => style("已中止").red().to_string(),
+        7 => style("回滚中").yellow().to_string(),
+        _ => style("未知").dim().to_string(),
+    }
 }

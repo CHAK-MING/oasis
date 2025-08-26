@@ -1,10 +1,20 @@
-use crate::config::GrpcTlsConfig;
-use oasis_core::error::CoreError;
-use std::fs;
-use std::path::Path;
+use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
-use tonic::transport::{Identity, ServerTlsConfig};
+use tokio::fs;
+use tokio::sync::broadcast;
+use tokio::sync::RwLock;
+use tokio::time::{interval, Duration};
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tracing::{error, info, warn};
+
+// 硬编码的配置结构
+#[derive(Clone)]
+pub struct GrpcTlsConfig {
+    pub server_cert: String,
+    pub server_key: String,
+    pub ca_cert: String,
+}
 
 /// TLS service for managing certificates and TLS configuration
 pub struct TlsService {
@@ -24,12 +34,17 @@ impl TlsService {
     }
 
     /// Load certificates from files
-    pub async fn load_certificates(&self) -> Result<(), CoreError> {
-        tracing::info!("Loading TLS certificates...");
+    pub async fn load_certificates(&self) -> Result<(), anyhow::Error> {
+        info!(
+            server_cert = %self.config.server_cert,
+            server_key = %self.config.server_key,
+            ca_cert = %self.config.ca_cert,
+            "Loading TLS certificates..."
+        );
 
         // Load server certificate and private key
-        let server_cert = self.load_certificate(&self.config.server_cert)?;
-        let server_key = self.load_private_key(&self.config.server_key)?;
+        let server_cert = self.load_certificate(&self.config.server_cert).await?;
+        let server_key = self.load_private_key(&self.config.server_key).await?;
 
         // Create server identity
         let identity = Identity::from_pem(server_cert, server_key);
@@ -38,10 +53,10 @@ impl TlsService {
         let mut tls_config = ServerTlsConfig::new().identity(identity);
 
         // Load CA certificate for client verification
-        let ca_cert_data = self.load_certificate(&self.config.ca_cert)?;
-        let ca_cert = tonic::transport::Certificate::from_pem(ca_cert_data);
+        let ca_cert_data = self.load_certificate(&self.config.ca_cert).await?;
+        let ca_cert = Certificate::from_pem(ca_cert_data);
         tls_config = tls_config.client_ca_root(ca_cert);
-        tracing::info!("mTLS enabled - client certificates required");
+        info!("mTLS enabled - client certificates required");
 
         // Store the TLS configuration
         {
@@ -49,7 +64,7 @@ impl TlsService {
             *tls_config_guard = Some(tls_config);
         }
 
-        tracing::info!("TLS certificates loaded successfully");
+        info!("TLS certificates loaded successfully");
         Ok(())
     }
 
@@ -59,13 +74,13 @@ impl TlsService {
     }
 
     /// Reload certificates (for hot reload)
-    pub async fn reload_certificates(&self) -> Result<(), CoreError> {
-        tracing::info!("Reloading TLS certificates...");
+    pub async fn reload_certificates(&self) -> Result<(), anyhow::Error> {
+        info!("Reloading TLS certificates...");
         self.load_certificates().await?;
 
         // Notify listeners that certificates have been reloaded
         if self.reload_notifier.send(()).is_err() {
-            tracing::warn!("No active listeners for TLS reload notifications.");
+            warn!("No active listeners for TLS reload notifications.");
         }
 
         Ok(())
@@ -78,57 +93,44 @@ impl TlsService {
     }
 
     /// Load certificate from file
-    fn load_certificate(&self, path: &str) -> Result<Vec<u8>, CoreError> {
-        let cert_path = Path::new(path);
+    async fn load_certificate(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
+        let cert_path = PathBuf::from(path);
         if !cert_path.exists() {
-            return Err(CoreError::Config {
-                message: format!("Certificate file not found: {}", path),
-            });
+            return Err(anyhow::Error::msg(format!("Certificate file not found: {}", path)));
         }
 
-        fs::read(cert_path).map_err(|e| CoreError::Config {
-            message: format!("Failed to read certificate file {}: {}", path, e),
-        })
+        fs::read(cert_path).await.map_err(|e| anyhow::Error::msg(format!("Failed to read certificate file {}: {}", path, e)))
     }
 
     /// Load private key from file
-    fn load_private_key(&self, path: &str) -> Result<Vec<u8>, CoreError> {
-        let key_path = Path::new(path);
+    async fn load_private_key(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
+        let key_path = PathBuf::from(path);
         if !key_path.exists() {
-            return Err(CoreError::Config {
-                message: format!("Private key file not found: {}", path),
-            });
+            return Err(anyhow::Error::msg(format!("Private key file not found: {}", path)));
         }
 
-        fs::read(key_path).map_err(|e| CoreError::Config {
-            message: format!("Failed to read private key file {}: {}", path, e),
-        })
+        fs::read(key_path).await.map_err(|e| anyhow::Error::msg(format!("Failed to read private key file {}: {}", path, e)))
     }
 
     /// Start certificate monitoring for hot reload
-    pub async fn start_certificate_monitoring(&self) -> Result<(), CoreError> {
-        if self.config.cert_check_interval_sec == 0 {
-            return Ok(());
-        }
+    pub async fn start_certificate_monitoring(&self) -> Result<(), anyhow::Error> {
+        // Hardcoded check interval: 300 seconds (5 minutes)
+        let check_interval = Duration::from_secs(300);
 
         let service_clone = self.clone();
-        let check_interval = std::time::Duration::from_secs(self.config.cert_check_interval_sec);
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(check_interval);
+            let mut interval = interval(check_interval);
             loop {
                 interval.tick().await;
 
                 if let Err(e) = service_clone.reload_certificates().await {
-                    tracing::error!("Failed to reload certificates: {}", e);
+                    error!("Failed to reload certificates: {}", e);
                 }
             }
         });
 
-        tracing::info!(
-            "Certificate monitoring started with interval {}s",
-            self.config.cert_check_interval_sec
-        );
+        info!("Certificate monitoring started with interval 300s");
         Ok(())
     }
 }

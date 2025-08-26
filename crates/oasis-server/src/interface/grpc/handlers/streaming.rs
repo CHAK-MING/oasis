@@ -41,8 +41,8 @@ impl StreamingHandlers {
             let mut retry_count = 0;
             let max_retries = backoff.max_retries;
             let initial_poll_interval =
-                std::time::Duration::from_millis(backoff.initial_poll_interval_ms);
-            let max_poll_interval = std::time::Duration::from_millis(backoff.max_poll_interval_ms);
+                std::time::Duration::from_millis(backoff.initial_delay_ms);
+            let max_poll_interval = std::time::Duration::from_millis(backoff.max_delay_ms);
 
             let mut consumer = match stream_use_case.create_consumer(&task_id).await {
                 Ok(consumer) => consumer,
@@ -117,7 +117,7 @@ impl StreamingHandlers {
                             }
                             Ok(None) => {
                                 consecutive_empty_results += 1;
-                                if consecutive_empty_results > backoff.empty_results_threshold {
+                                if consecutive_empty_results > 5 {
                                     poll_interval = std::cmp::min(poll_interval * 2, max_poll_interval);
                                 }
                                 tokio::time::sleep(poll_interval).await;

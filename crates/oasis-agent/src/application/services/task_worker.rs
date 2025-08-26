@@ -1,4 +1,3 @@
-use crate::config::AgentConfig;
 use crate::domain::{agent::Agent, task::Task};
 use crate::error::{CoreError, Result};
 use crate::infrastructure::{
@@ -23,7 +22,6 @@ use tracing::error;
 
 pub struct TaskWorker {
     agent: Arc<RwLock<Agent>>,
-    config: Arc<RwLock<AgentConfig>>,
     executor: Arc<CommandExecutor>,
     file_handler: Arc<FileApplyHandler>,
     publisher: Arc<NatsPublisher>,
@@ -36,7 +34,6 @@ pub struct TaskWorker {
 impl TaskWorker {
     pub fn new(
         agent: Arc<RwLock<Agent>>,
-        config: Arc<RwLock<AgentConfig>>,
         executor: Arc<CommandExecutor>,
         file_handler: Arc<FileApplyHandler>,
         publisher: Arc<NatsPublisher>,
@@ -47,7 +44,6 @@ impl TaskWorker {
     ) -> Self {
         Self {
             agent,
-            config,
             executor,
             file_handler,
             publisher,
@@ -254,15 +250,11 @@ impl TaskWorker {
             return Ok(());
         }
 
-        // 获取允许的根目录列表
-        let allowed_roots: Vec<std::path::PathBuf> = {
-            let g = self.config.read().await;
-            g.security
-                .file_allowed_roots
-                .iter()
-                .map(|s| std::path::PathBuf::from(s))
-                .collect()
-        };
+        // 获取允许的根目录列表（硬编码）
+        let allowed_roots: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("/tmp"),
+            std::path::PathBuf::from("/var/tmp"),
+        ];
 
         // 解析权限/所有者设置
         let perms = cfg
@@ -320,30 +312,6 @@ impl TaskWorker {
         let start_time = std::time::Instant::now();
         
         let (exit_code, stdout, stderr) = {
-            let cfg = self.config.read().await;
-            if !cfg.is_command_allowed(&task.spec.command) {
-                // 权限被拒：回报失败结果并 ack，避免无限重投递
-                task.fail(format!(
-                    "permission denied: command '{}' is not allowed",
-                    task.spec.command
-                ))?;
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                let result = TaskExecution {
-                    task_id: task.spec.id.clone(),
-                    agent_id: oasis_core::types::AgentId::from(self.agent_id.clone()),
-                    stdout: String::new(),
-                    stderr: format!(
-                        "permission denied: command '{}' is not allowed",
-                        task.spec.command
-                    ),
-                    exit_code: Some(1),
-                    timestamp: chrono::Utc::now().timestamp(),
-                    duration_ms,
-                };
-                let _ = self.publish_task_result_safely(&result).await;
-                self.ack_message_safely(msg).await;
-                return Ok(());
-            }
             match self
                 .executor
                 .execute(&task.spec.command, &task.spec.args, &task.spec.env)

@@ -1,6 +1,5 @@
 use crate::application::services::task_worker::TaskWorker;
 use crate::domain::agent::Agent;
-use crate::config::AgentConfig;
 use crate::infrastructure::{
     nats::{
         attributes_repository::NatsAttributesRepository, consumer::NatsConsumer,
@@ -20,7 +19,6 @@ use tracing::{debug, error, info, warn};
 
 pub struct TaskProcessor {
     agent: Arc<RwLock<Agent>>,
-    config: Arc<RwLock<AgentConfig>>,
     nats_client: crate::infrastructure::nats::client::NatsClient,
     executor: Arc<CommandExecutor>,
     limiters: Arc<RateLimiterCollection>,
@@ -30,7 +28,6 @@ pub struct TaskProcessor {
 impl TaskProcessor {
     pub fn new(
         agent: Arc<RwLock<Agent>>,
-        config: Arc<RwLock<AgentConfig>>,
         nats_client: crate::infrastructure::nats::client::NatsClient,
         executor: Arc<CommandExecutor>,
         limiters: Arc<RateLimiterCollection>,
@@ -38,7 +35,6 @@ impl TaskProcessor {
     ) -> Self {
         Self {
             agent,
-            config,
             nats_client,
             executor,
             limiters,
@@ -79,11 +75,8 @@ impl TaskProcessor {
             }
         };
 
-        // 并发上限和缓冲区（可配置化）
-        let max_concurrent: usize = {
-            let cfg = self.config.read().await;
-            cfg.agent.max_concurrent_tasks.max(1)
-        };
+        // 硬编码的并发上限和缓冲区
+        let max_concurrent: usize = 4; 
         let channel_buffer: usize = max_concurrent.saturating_mul(2);
 
         // 创建有界通道
@@ -93,7 +86,6 @@ impl TaskProcessor {
         // 构建共享的 TaskWorker 实例
         let worker = Arc::new(TaskWorker::new(
             self.agent.clone(),
-            self.config.clone(),
             self.executor.clone(),
             file_handler.clone(),
             publisher.clone(),

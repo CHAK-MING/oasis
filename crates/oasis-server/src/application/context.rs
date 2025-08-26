@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::ports::repositories::{
-    AgentConfigRepository, FileRepository, NodeRepository, RolloutRepository, TaskRepository,
+    FileRepository, NodeRepository, RolloutRepository, TaskRepository,
 };
 use crate::domain::services::SelectorEngine;
 
@@ -13,7 +13,6 @@ pub struct ApplicationContext {
     pub task_repo: Arc<dyn TaskRepository>,
     pub rollout_repo: Arc<dyn RolloutRepository>,
     pub file_repo: Arc<dyn FileRepository>,
-    pub agent_config_repo: Arc<dyn AgentConfigRepository>,
     pub selector_engine: Arc<dyn SelectorEngine>,
 }
 
@@ -23,7 +22,6 @@ pub struct ApplicationContextBuilder {
     task_repo: Option<Arc<dyn TaskRepository>>,
     rollout_repo: Option<Arc<dyn RolloutRepository>>,
     file_repo: Option<Arc<dyn FileRepository>>,
-    agent_config_repo: Option<Arc<dyn AgentConfigRepository>>,
     selector_engine: Option<Arc<dyn SelectorEngine>>,
 }
 
@@ -34,7 +32,6 @@ impl ApplicationContextBuilder {
             task_repo: None,
             rollout_repo: None,
             file_repo: None,
-            agent_config_repo: None,
             selector_engine: None,
         }
     }
@@ -59,10 +56,7 @@ impl ApplicationContextBuilder {
         self
     }
 
-    pub fn with_agent_config_repo(mut self, repo: Arc<dyn AgentConfigRepository>) -> Self {
-        self.agent_config_repo = Some(repo);
-        self
-    }
+
 
     pub fn with_selector_engine(mut self, engine: Arc<dyn SelectorEngine>) -> Self {
         self.selector_engine = Some(engine);
@@ -83,9 +77,7 @@ impl ApplicationContextBuilder {
             file_repo: self
                 .file_repo
                 .ok_or_else(|| anyhow::anyhow!("FileRepository is required"))?,
-            agent_config_repo: self
-                .agent_config_repo
-                .ok_or_else(|| anyhow::anyhow!("AgentConfigRepository is required"))?,
+
             selector_engine: self
                 .selector_engine
                 .ok_or_else(|| anyhow::anyhow!("SelectorEngine is required"))?,

@@ -16,6 +16,8 @@ tonic = { workspace = true }
 async-trait = { workspace = true }
 figment = { workspace = true }
 futures-util = { workspace = true }
+# 配置解析所需
+toml = "0.8"
 
 # 本地依赖
 libc = "0.2"
@@ -37,6 +39,10 @@ json-patch = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 url = "2.5"
+
+# 证书生成相关
+rcgen = { workspace = true }
+x509-parser = { workspace = true }
 
 [build-dependencies]
 tonic-build = { version = "0.11", features = ["prost"] }

@@ -1,23 +1,19 @@
 services:
   nats:
-    image: nats:2.11-alpine
-    container_name: nats-tls
-    env_file:
-      - .env
-    command:
-      - "nats-server"
-      - "--config"
-      - "/etc/nats/nats-server.conf"
-      - "--jetstream"
+    image: nats:2.10-alpine
+    container_name: oasis-nats
     ports:
-      - "4443:4443"
+      - "4222:4222"
       - "8222:8222"
+    command: >
+      -js
+      -m 8222
+      --tls
+      --tlscert=/etc/nats/certs/nats-server.pem
+      --tlskey=/etc/nats/certs/nats-server-key.pem
+      --tlscacert=/etc/nats/certs/nats-ca.pem
+      --tlsverify
     volumes:
-      - ./certs:/etc/nats/certs:ro
-      - ./jwt:/etc/nats/jwt:ro
-      - ./certs/nats-server.conf:/etc/nats/nats-server.conf:ro
-      - nats-data:/data/nats
+      - ././certs:/etc/nats/certs:ro
+      - ././data/nats:/data
     restart: unless-stopped
-
-volumes:
-  nats-data: {}

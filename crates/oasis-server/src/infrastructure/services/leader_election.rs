@@ -1,4 +1,4 @@
-use crate::config::{LeaderElectionConfig, ServerConfig};
+use anyhow::Result;
 use async_nats::jetstream::Context;
 use async_nats::jetstream::kv::Store;
 use oasis_core::error::CoreError;
@@ -24,6 +24,14 @@ pub struct LeaderElectionService {
     shutdown_token: CancellationToken,
 }
 
+// 硬编码的配置结构
+#[derive(Clone)]
+pub struct LeaderElectionConfig {
+    pub election_key: String,
+    pub ttl_sec: u64,
+    pub check_interval_sec: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderInfo {
     pub instance_id: String,
@@ -35,20 +43,14 @@ impl LeaderElectionService {
     /// Create a new leader election service
     pub async fn new(
         jetstream: Context,
-        config: &ServerConfig,
+        config: &LeaderElectionConfig,
         shutdown_token: CancellationToken,
     ) -> Result<Self, CoreError> {
         let instance_id = Uuid::new_v4().to_string();
 
-        // Read election parameters from config
-        let default_config = LeaderElectionConfig::default();
-        let leader_config = config
-            .server
-            .leader_election
-            .as_ref()
-            .unwrap_or(&default_config);
-        let lease_ttl = Duration::from_secs(leader_config.lease_ttl_sec);
-        let renewal_interval = Duration::from_secs(leader_config.renewal_interval_sec);
+        // 硬编码配置值
+        let lease_ttl = Duration::from_secs(config.ttl_sec);
+        let renewal_interval = Duration::from_secs(config.check_interval_sec);
 
         // Create or get the leader election KV store (作为备选方案)
         let kv_store = jetstream
@@ -428,7 +430,6 @@ impl LeaderElectionService {
 
         Ok(())
     }
-
 
     /// Stop being the leader (for graceful shutdown)
     pub async fn stop_leadership(&self) -> Result<(), CoreError> {

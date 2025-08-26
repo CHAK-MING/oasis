@@ -1,14 +1,15 @@
-use crate::commands::config::{ConfigArgs, run_config};
-use crate::commands::exec::ExecArgs;
+use crate::commands::agent::{run_agent, AgentCommands};
 use crate::commands::exec::run_exec;
-use crate::commands::file::{FileArgs, run_file};
-use crate::commands::node::{NodeCommands, run_node};
-use crate::commands::rollout::{RolloutCommand, run_rollout};
-use crate::commands::task::{TaskCommands, run_task};
+use crate::commands::exec::ExecArgs;
+use crate::commands::file::{run_file, FileArgs};
+
+use crate::commands::rollout::{run_rollout, RolloutCommand};
+use crate::commands::storage::{run_storage, StorageCommands};
+use crate::commands::system::{run_system, SystemCommands};
 use crate::precheck;
-use crate::tls::TlsClientService;
 use anyhow::{Context, Result};
 use clap::Parser;
+use console::style;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use tonic::transport::{Channel, Endpoint};
 
@@ -33,12 +34,6 @@ use tonic::transport::{Channel, Endpoint};
   oasis-cli node ls --selector 'labels["environment"] == "prod"' --verbose
   oasis-cli node facts --selector 'labels["role"] == "db"' --output table
 
-  # Distribute configs
-  oasis-cli config apply --src ./agent.toml --selector 'labels["role"] == "web"'
-  oasis-cli config set agent-1 log.level debug
-  oasis-cli config get agent-1 log.level
-  oasis-cli config del agent-1 log.level
-
   # Task results
   oasis-cli task get --id <task_id> --wait-ms 5000
   oasis-cli task watch --id <task_id>
@@ -46,8 +41,7 @@ use tonic::transport::{Channel, Endpoint};
 For detailed options:
   oasis-cli exec --help
   oasis-cli file --help
-  oasis-cli node --help
-  oasis-cli config --help"#
+  oasis-cli node --help"#
 )]
 pub struct Cli {
     /// Configuration file path (handled in main.rs for telemetry)
@@ -60,95 +54,109 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCommands,
+    },
     Exec(ExecArgs),
     File {
         #[command(subcommand)]
         args: FileArgs,
     },
-    Node {
-        #[command(subcommand)]
-        cmd: NodeCommands,
-    },
+
     Rollout {
         #[command(subcommand)]
         cmd: RolloutCommand,
     },
-    Config {
+    Storage {
         #[command(subcommand)]
-        args: ConfigArgs,
+        cmd: StorageCommands,
     },
-    Task {
+    System {
         #[command(subcommand)]
-        cmd: TaskCommands,
+        cmd: SystemCommands,
     },
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
-    // Use defaults for CLI config here; main.rs already initialized telemetry.
-    let cfg = crate::config::CliConfig::default();
-
-    // Create gRPC client with TLS support
-    let mut client = create_grpc_client(&cfg)
-        .await
-        .context("Failed to create gRPC client")?;
-
-    // 在连接成功后立即进行服务器健康检查
-    precheck::precheck_server_health(&mut client).await?;
-
+pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<()> {
     match cli.command {
-        Commands::Exec(args) => run_exec(client, args).await?,
-        Commands::File { args } => run_file(client, args).await?,
-        Commands::Node { cmd } => run_node(client, cmd).await?,
-        Commands::Rollout { cmd } => run_rollout(cmd, client).await?,
-        Commands::Config { args } => run_config(client, args).await?,
-        Commands::Task { cmd } => run_task(client, cmd).await?,
+        Commands::System { cmd } => {
+            // System commands don't need gRPC client
+            run_system(cmd).await?
+        }
+        Commands::Agent { cmd } => {
+            // Agent commands don't need gRPC client
+            run_agent(cmd).await?
+        }
+        Commands::Storage { cmd } => {
+            // Storage commands don't need gRPC client
+            run_storage(cmd).await?
+        }
+        _ => {
+            // Create gRPC client with configuration for other commands
+            let mut client = create_grpc_client(config)
+                .await
+                .context("Failed to create gRPC client")?;
+
+            // 在连接成功后立即进行服务器健康检查
+            precheck::precheck_server_health(&mut client).await?;
+
+            match cli.command {
+                Commands::Exec(args) => run_exec(client, args).await?,
+                Commands::File { args } => run_file(client, args).await?,
+
+                Commands::Rollout { cmd } => run_rollout(cmd, client).await?,
+                Commands::System { .. } | Commands::Agent { .. } | Commands::Storage { .. } => {
+                    unreachable!()
+                }
+            }
+        }
     }
     Ok(())
 }
 
-/// Create gRPC client with TLS configuration
-async fn create_grpc_client(cfg: &crate::config::CliConfig) -> Result<OasisServiceClient<Channel>> {
-    let server_url = &cfg.cli.server_url;
+/// Create gRPC client with configuration
+async fn create_grpc_client(
+    config: &oasis_core::config::OasisConfig,
+) -> Result<OasisServiceClient<Channel>> {
+    // 使用配置中的服务器地址，强制使用 TLS
+    // 将 0.0.0.0 替换为 localhost 以匹配证书的 SAN
+    let server_addr = config.listen_addr.replace("0.0.0.0", "localhost");
+    let server_url = format!("https://{}", server_addr);
+
+    println!("› 正在连接 Oasis 服务器: {}", style(&server_url).cyan());
 
     // Parse the endpoint
-    let endpoint = Endpoint::from_shared(server_url.clone()).context("Invalid server URL")?;
+    let endpoint = Endpoint::from_shared(server_url.to_string()).context("无效的服务器地址")?;
 
-    // Check if TLS is configured and URL uses HTTPS
-    let channel = if server_url.starts_with("https://") {
-        if let Some(ref tls_config) = cfg.cli.grpc_tls {
-            tracing::info!("Connecting to server with TLS: {}", server_url);
+    // Load client certificates for mTLS
+    let client_cert = tokio::fs::read(&config.tls.grpc_client_cert_path)
+        .await
+        .context("读取客户端证书失败")?;
+    let client_key = tokio::fs::read(&config.tls.grpc_client_key_path)
+        .await
+        .context("读取客户端密钥失败")?;
+    let ca_cert = tokio::fs::read(&config.tls.grpc_ca_path)
+        .await
+        .context("读取 CA 证书失败")?;
 
-            // Create TLS client service
-            let tls_service = TlsClientService::new(tls_config.clone());
-            let client_tls_config = tls_service
-                .create_client_tls_config()
-                .context("Failed to create TLS configuration")?;
+    // Configure TLS
+    let endpoint = endpoint
+        .tls_config(
+            tonic::transport::ClientTlsConfig::new()
+                .identity(tonic::transport::Identity::from_pem(
+                    client_cert,
+                    client_key,
+                ))
+                .ca_certificate(tonic::transport::Certificate::from_pem(ca_cert)),
+        )
+        .context("配置 TLS 失败")?;
 
-            // Connect with TLS
-            endpoint
-                .tls_config(client_tls_config)
-                .context("Failed to configure TLS")?
-                .connect()
-                .await
-                .context("Failed to connect to server with TLS")?
-        } else {
-            return Err(anyhow::anyhow!(
-                "HTTPS URL specified but no TLS configuration found. Please configure [grpc_tls] section."
-            ));
-        }
-    } else if server_url.starts_with("http://") {
-        tracing::info!("Connecting to server without TLS: {}", server_url);
-
-        // Connect without TLS
-        endpoint
-            .connect()
-            .await
-            .context("Failed to connect to server")?
-    } else {
-        return Err(anyhow::anyhow!(
-            "Invalid server URL scheme. Must start with http:// or https://"
-        ));
-    };
+    // Connect with TLS
+    let channel = endpoint
+        .connect()
+        .await
+        .with_context(|| format!("无法连接到服务器 {}", server_url))?;
 
     Ok(OasisServiceClient::new(channel))
 }

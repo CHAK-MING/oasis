@@ -1,104 +1,64 @@
 use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::Parser;
+use console::style;
 use oasis_core::proto::{
-    ApplyFileRequest, TaskTargetMsg, oasis_service_client::OasisServiceClient, task_target_msg,
+    oasis_service_client::OasisServiceClient, task_target_msg, ApplyFileRequest, TaskTargetMsg,
 };
 
-/// File management commands for distributed file operations
-///
-/// These commands allow you to distribute files to agents and manage the object store.
-/// Files can be applied atomically with proper permissions and ownership settings.
+/// 分发文件到目标 Agent 并管理对象存储
 #[derive(Parser, Debug)]
 #[command(
     name = "file",
-    about = "Distribute files to agents and manage object store",
-    after_help = r#"Examples:
-  # Apply nginx configuration to web servers
-  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
-  
-  # Apply configuration with atomic replacement and permissions
-  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --atomic --owner root:root --mode 0644
-  
-  # Apply file to specific agent IDs
+    about = "分发文件到 Agent 并管理对象存储",
+    after_help = r#"示例：
+  # 向 Web 服务器分发 nginx 配置
+  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels[\"role\"] == \"web\"'
+
+  # 原子替换并设置权限/属主
+  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels[\"environment\"] == \"prod\"' --atomic --owner root:root --mode 0644
+
+  # 指定多个 agent ID
   oasis-cli file apply --src ./config.conf --dest /etc/config.conf --target agent-1,agent-2,agent-3
-  
-  # Clear all files from object store
+
+  # 清空对象存储
   oasis-cli file clear"#
 )]
 pub enum FileArgs {
-    /// Distribute a local file to target agents
-    ///
-    /// Uploads a local file to the object store and applies it to agents that match the CEL selector.
-    /// Supports atomic replacement, file permissions, and ownership settings.
+    /// 分发本地文件到匹配的 Agent
     Apply {
-        /// Path to the local file to distribute
-        #[arg(
-            long,
-            value_name = "FILE_PATH",
-            help = "Path to the local file to distribute"
-        )]
+        /// 本地文件路径
+        #[arg(long, value_name = "FILE_PATH", help = "本地文件路径")]
         src: String,
-        /// Target specification (CEL selector or comma-separated agent IDs)
-        ///
-        /// Smart parsing supports multiple formats:
-        /// - Single agent: agent-1 -> agent_id == "agent-1"
-        /// - Multiple agents: agent-1,agent-2 -> agent_id in ["agent-1", "agent-2"]
-        /// - All agents: true -> true
-        /// - CEL expressions: labels["role"] == "web" -> labels["role"] == "web"
+        /// 目标（CEL 选择器或逗号分隔的 Agent ID）
         #[arg(
             long,
             short = 't',
             value_name = "TARGET",
-            help = "Target specification (CEL selector or agent IDs)"
+            help = "目标（CEL 选择器或 Agent ID）"
         )]
         target: String,
-        /// Destination path on the target agents
-        #[arg(
-            long,
-            value_name = "DEST_PATH",
-            help = "Destination path on the target agents"
-        )]
+        /// 目标机器上的目标路径
+        #[arg(long, value_name = "DEST_PATH", help = "目标路径（远端）")]
         dest: String,
-        /// Expected SHA256 checksum for file validation
-        ///
-        /// If provided, the file will be validated against this checksum
-        /// before being applied to ensure integrity.
-        #[arg(
-            long,
-            value_name = "SHA256",
-            help = "Expected SHA256 checksum (hex format) for file validation"
-        )]
+        /// 期望的 SHA256 校验（可选）
+        #[arg(long, value_name = "SHA256", help = "可选：文件校验 SHA256（hex）")]
         sha256: Option<String>,
-        /// File ownership (user:group format)
-        ///
-        /// Examples: 'nginx:nginx', 'root:root', 'www-data:www-data'
+        /// 目标文件属主（user:group）
         #[arg(
             long,
             value_name = "USER:GROUP",
-            help = "File ownership in user:group format (e.g., 'nginx:nginx')"
+            help = "属主，格式 user:group，如 'nginx:nginx'"
         )]
         owner: Option<String>,
-        /// File permissions in octal format
-        ///
-        /// Examples: '0644', '0755', '0600'
-        #[arg(
-            long,
-            value_name = "MODE",
-            help = "File permissions in octal format (e.g., '0644')"
-        )]
+        /// 目标文件权限（八进制）
+        #[arg(long, value_name = "MODE", help = "权限（八进制），如 '0644'")]
         mode: Option<String>,
-        /// Use atomic file replacement
-        ///
-        /// When enabled, the file is written to a temporary location first,
-        /// then atomically moved to the final destination to prevent corruption.
-        #[arg(long, help = "Use atomic file replacement for safe updates")]
+        /// 使用原子替换
+        #[arg(long, help = "启用原子替换，防止中途损坏")]
         atomic: bool,
     },
-    /// Clear all files from the object store
-    ///
-    /// Removes all files from the distributed object store.
-    /// This operation cannot be undone and will affect all agents.
+    /// 清空对象存储
     Clear {},
 }
 
@@ -121,8 +81,15 @@ pub async fn run_file(
                 return Err(anyhow::anyhow!("必须提供 --target 参数。"));
             }
 
+            println!(
+                "{} `{}` -> `{}`",
+                style("分发文件:").bold(),
+                style(&src).cyan(),
+                style(&dest).cyan()
+            );
+
             // 使用智能解析器统一处理目标
-            let target_selector = TargetSelector::parse(&target);
+            let target_selector = TargetSelector::parse(&target)?;
             let target_msg = TaskTargetMsg {
                 target: Some(task_target_msg::Target::Selector(
                     target_selector.expression().to_string(),
@@ -137,6 +104,8 @@ pub async fn run_file(
                 .to_string();
 
             let data = tokio::fs::read(&src).await?;
+            println!("  {} {}", style("✔").green(), style("读取本地文件").dim());
+
             let response = client
                 .apply_file(ApplyFileRequest {
                     object_name,
@@ -153,22 +122,45 @@ pub async fn run_file(
 
             if resp.success {
                 println!(
-                    "File applied successfully to {} nodes",
-                    resp.applied_nodes.len()
+                    "  {} {} {}",
+                    style("✔").green(),
+                    style("文件已成功下发到").dim(),
+                    style(format!("{} 个节点", resp.applied_nodes.len()))
+                        .dim()
+                        .bold()
                 );
                 if !resp.failed_nodes.is_empty() {
-                    println!("Failed nodes: {:?}", resp.failed_nodes);
+                    let ids = resp
+                        .failed_nodes
+                        .into_iter()
+                        .map(|id| id.value)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "  {} {}: {}",
+                        style("✖").red(),
+                        style("失败节点").red(),
+                        style(ids).red()
+                    );
                 }
             } else {
-                anyhow::bail!("File apply failed: {}", resp.message);
+                anyhow::bail!("文件分发失败: {}", resp.message);
             }
         }
         FileArgs::Clear {} => {
+            println!("{}", style("正在清空对象存储...").bold());
+
             let resp = client
                 .clear_files(oasis_core::proto::ClearFilesRequest {})
                 .await?
                 .into_inner();
-            println!("cleared objects: {}", resp.deleted_count);
+
+            println!(
+                "{} {} {}",
+                style("✔").green(),
+                style("操作完成，已删除对象数量:").dim(),
+                style(resp.deleted_count).bold()
+            );
         }
     }
     Ok(())

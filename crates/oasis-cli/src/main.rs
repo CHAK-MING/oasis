@@ -1,33 +1,29 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use figment::{
-    Figment,
-    providers::{Format, Serialized, Toml},
-};
-use oasis_core::telemetry::{LogConfig, init_tracing_with};
+use console::style;
+use oasis_core::config::OasisConfig;
 mod client;
 mod commands;
 mod common;
-mod config;
 mod precheck;
-mod tls;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = client::Cli::parse();
 
-    // 默认值 + TOML 文件
-    let mut figment = Figment::new().merge(Serialized::defaults(config::CliConfig::default()));
-    if let Some(ref config_path) = cli.config {
-        figment = figment.merge(Toml::file(config_path));
+    // 强制启用 ANSI 颜色
+    if std::env::var("CLICOLOR_FORCE").is_err() {
+        std::env::set_var("CLICOLOR_FORCE", "1");
     }
-    let cfg: config::CliConfig = figment.extract()?;
 
-    init_tracing_with(&LogConfig {
-        level: cfg.common.telemetry.log_level,
-        format: cfg.common.telemetry.log_format,
-        no_ansi: cfg.common.telemetry.log_no_ansi,
-    });
+    // 统一从 oasis.toml 加载配置
+    let cfg = OasisConfig::load_config(cli.config.as_deref())
+        .with_context(|| "无法加载 oasis.toml 配置文件，请检查文件是否存在或路径是否正确。")?;
 
-    client::run(cli).await
+    if let Err(e) = client::run(cli, &cfg).await {
+        eprintln!("{} {:#}", style("错误:").red().bold(), e);
+        std::process::exit(1);
+    }
+
+    Ok(())
 }

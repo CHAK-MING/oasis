@@ -1,18 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
-use figment::{
-    Figment,
-    providers::{Format, Serialized, Toml},
-};
 
 mod application;
 mod bootstrap;
-mod config;
 mod domain;
 mod infrastructure;
 mod interface;
 
 use crate::bootstrap::ServerBootstrapper;
+use oasis_core::config::OasisConfig;
 
 #[derive(Parser)]
 #[command(name = "oasis-server")]
@@ -28,21 +24,23 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // 加载配置：默认值 + TOML 文件（不读取环境变量）
-    let mut figment = Figment::new().merge(Serialized::defaults(config::ServerConfig::default()));
-    if let Some(path) = args.config.as_deref() {
-        figment = figment.merge(Toml::file(path));
-    }
-    let cfg: config::ServerConfig = figment
-        .extract()
-        .map_err(|e| anyhow::anyhow!("Configuration error: {}", e))?;
+    // Load configuration from the single oasis.toml file.
+    let cfg: OasisConfig = OasisConfig::load_config(args.config.as_deref())?;
 
     // 初始化遥测
     oasis_core::telemetry::init_tracing_with(&oasis_core::telemetry::LogConfig {
-        level: cfg.common.telemetry.log_level.clone(),
-        format: cfg.common.telemetry.log_format.clone(),
-        no_ansi: cfg.common.telemetry.log_no_ansi,
+        level: cfg.telemetry.log_level.clone(),
+        format: "text".to_string(), // Hardcode format
+        no_ansi: false,             // Hardcode no_ansi
     });
+
+    if let Some(path) = args.config.as_deref() {
+        tracing::info!("Loaded config file: {}", path);
+    } else {
+        tracing::info!("Config: using default search (current dir)");
+    }
+    tracing::info!("Effective NATS URL: {}", cfg.nats.url);
+    tracing::info!("Effective gRPC listen: {}", cfg.listen_addr);
 
     // 创建并启动服务器
     let bootstrapper = ServerBootstrapper::new(cfg);

@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use crate::config::ExecutorSection;
-
 pub struct CommandExecutor {
-    exec: ExecutorSection,
+    command_timeout_sec: u64,
 }
 
 impl CommandExecutor {
-    pub fn new(exec: ExecutorSection) -> Self {
-        Self { exec }
+    pub fn new() -> Self {
+        Self { 
+            command_timeout_sec: 300, // 硬编码 5 分钟超时
+        }
     }
 
     pub async fn execute(
@@ -24,7 +24,7 @@ impl CommandExecutor {
             cmd.envs(envs);
         }
 
-        let timeout = std::time::Duration::from_secs(self.exec.command_timeout_sec);
+        let timeout = std::time::Duration::from_secs(self.command_timeout_sec);
         let child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

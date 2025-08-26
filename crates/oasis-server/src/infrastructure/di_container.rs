@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::application::context::{ApplicationContext, ApplicationContextBuilder};
 use crate::application::ports::repositories::{
-    AgentConfigRepository, FileRepository, NodeRepository, RolloutRepository, TaskRepository,
+    FileRepository, NodeRepository, RolloutRepository, TaskRepository,
 };
 use crate::domain::services::SelectorEngine;
 
@@ -28,7 +28,6 @@ impl InfrastructureDiContainer {
         let task_repo = self.create_task_repository();
         let rollout_repo = self.create_rollout_repository();
         let file_repo = self.create_file_repository();
-        let agent_config_repo = self.create_agent_config_repository();
         let selector_engine = self.create_selector_engine();
 
         ApplicationContextBuilder::new()
@@ -36,7 +35,6 @@ impl InfrastructureDiContainer {
             .with_task_repo(task_repo)
             .with_rollout_repo(rollout_repo)
             .with_file_repo(file_repo)
-            .with_agent_config_repo(agent_config_repo)
             .with_selector_engine(selector_engine)
             .build()
     }
@@ -78,14 +76,7 @@ impl InfrastructureDiContainer {
         ) as Arc<dyn FileRepository>
     }
 
-    /// 创建Agent配置仓储实现
-    fn create_agent_config_repository(&self) -> Arc<dyn AgentConfigRepository> {
-        Arc::new(
-            crate::infrastructure::persistence::agent_config_repository::NatsAgentConfigRepository::new(
-                self.jetstream.clone(),
-            )
-        ) as Arc<dyn AgentConfigRepository>
-    }
+
 
     /// 创建选择器引擎实现
     fn create_selector_engine(&self) -> Arc<dyn SelectorEngine> {

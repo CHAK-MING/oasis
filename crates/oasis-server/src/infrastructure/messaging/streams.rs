@@ -4,16 +4,24 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// 确保所有必要的JetStream流存在
-pub async fn ensure_streams(
-    js: &async_nats::jetstream::Context,
-    cfg: &crate::config::ServerConfig,
-) -> Result<()> {
+pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
     info!("Starting JetStream streams initialization...");
 
-    let tasks = &cfg.streams.tasks;
-    let results = &cfg.streams.results;
-    let dlq = &cfg.streams.dlq;
-    let artifacts = &cfg.streams.artifacts;
+    // 硬编码配置值
+    let tasks_max_age_sec = 3600; // 1小时
+    let tasks_max_msgs = 10000;
+    let tasks_max_bytes = 1024 * 1024 * 100; // 100MB
+
+    let results_max_age_sec = 86400; // 24小时
+    let results_max_msgs = 50000;
+    let results_max_bytes = 1024 * 1024 * 500; // 500MB
+
+    let dlq_max_age_sec = 604800; // 7天
+    let dlq_max_msgs = 1000;
+    let dlq_max_bytes = 1024 * 1024 * 10; // 10MB
+
+    let artifacts_max_age_sec = 2592000; // 30天
+    let artifacts_max_bytes = 1024 * 1024 * 1024; // 1GB
 
     // 任务流
     info!("Creating/updating tasks stream...");
@@ -24,12 +32,12 @@ pub async fn ensure_streams(
             "tasks.exec.agent.>".to_string(),
         ],
         retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
-        max_age: Duration::from_secs(tasks.max_age_sec),
+        max_age: Duration::from_secs(tasks_max_age_sec),
         duplicate_window: Duration::from_secs(30), // 固定30秒
         num_replicas: 1,
         storage: async_nats::jetstream::stream::StorageType::File,
-        max_messages: tasks.max_msgs,
-        max_bytes: tasks.max_bytes,
+        max_messages: tasks_max_msgs,
+        max_bytes: tasks_max_bytes,
         ..Default::default()
     };
     ensure_or_update_stream(js, JS_STREAM_TASKS, desired_tasks_cfg).await?;
@@ -40,11 +48,11 @@ pub async fn ensure_streams(
         name: JS_STREAM_RESULTS.to_string(),
         subjects: vec!["results.>".to_string()],
         retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
-        max_age: Duration::from_secs(results.max_age_sec),
+        max_age: Duration::from_secs(results_max_age_sec),
         num_replicas: 1,
         storage: async_nats::jetstream::stream::StorageType::File,
-        max_messages: results.max_msgs,
-        max_bytes: results.max_bytes,
+        max_messages: results_max_msgs,
+        max_bytes: results_max_bytes,
         ..Default::default()
     };
     ensure_or_update_stream(js, JS_STREAM_RESULTS, desired_results_cfg).await?;
@@ -55,11 +63,11 @@ pub async fn ensure_streams(
         name: JS_STREAM_TASKS_DLQ.to_string(),
         subjects: vec!["tasks.dlq.>".to_string()],
         retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
-        max_age: Duration::from_secs(dlq.max_age_sec),
+        max_age: Duration::from_secs(dlq_max_age_sec),
         num_replicas: 1,
         storage: async_nats::jetstream::stream::StorageType::File,
-        max_messages: dlq.max_msgs,
-        max_bytes: dlq.max_bytes,
+        max_messages: dlq_max_msgs,
+        max_bytes: dlq_max_bytes,
         ..Default::default()
     };
     ensure_or_update_stream(js, JS_STREAM_TASKS_DLQ, desired_dlq_cfg).await?;
@@ -76,8 +84,8 @@ pub async fn ensure_streams(
             let cfg = async_nats::jetstream::object_store::Config {
                 bucket: JS_OBJ_ARTIFACTS.to_string(),
                 description: Some("File artifacts storage".to_string()),
-                max_bytes: artifacts.max_bytes,
-                max_age: Duration::from_secs(artifacts.max_age_sec),
+                max_bytes: artifacts_max_bytes,
+                max_age: Duration::from_secs(artifacts_max_age_sec),
                 storage: async_nats::jetstream::stream::StorageType::File,
                 num_replicas: 1,
                 ..Default::default()

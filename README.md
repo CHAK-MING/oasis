@@ -1,194 +1,166 @@
 # Oasis
 
-Oasis 是一个为大规模集群设计的分布式命令执行与文件分发系统，核心通信基于 NATS JetStream，管控接口基于 gRPC。
+在 OpenCloudOS Stream 23/OpenCloudOS 9 上的大规模集群节点管理工具
 
-## 核心功能
+## 快速开始（本机）
 
-- **远程命令执行**: 在符合条件的节点上安全地执行 Shell 命令
-- **文件分发**: 将文件或配置原子化地应用到目标节点
-- **动态配置管理**: 实时更新 Agent 的运行时配置，支持热重载
-- **灰度发布**: 支持滚动、金丝雀等策略，对变更进行分批、可控的部署
-- **目标选择**: 使用 CEL 表达式或直接指定 Agent ID 列表，基于节点标签（Labels）进行精确的目标选择
-
----
-
-## 快速开始
-
-### 1. 启动基础设施
-
-#### 1.1 生成证书
+1. 初始化（生成证书、配置与 docker-compose.yml）
 
 ```bash
-./scripts/generate-certs.sh
+oasis-cli system init --output-dir . --force
 ```
 
-将生成的证书放在 `certs/` 目录下。Server 与 CLI 的 gRPC 必须启用 TLS（mTLS），NATS 也需要 TLS + JWT。
-
-#### 1.2 启动 NATS 服务
+2. 启动 NATS
 
 ```bash
-docker compose up -d
+docker-compose up -d
 ```
 
-### 2. 构建项目
+3. 启动服务器
 
 ```bash
-cargo build --release
+oasis-cli system start --daemon
 ```
 
-### 3. 启动 Server
+4. 启动本机 Agent（使用 `./certs` 证书）
 
 ```bash
-./target/release/oasis-server --config config/oasis-server.toml
+OASIS_NATS_URL=tls://127.0.0.1:4222 \
+OASIS_NATS_CA=certs/nats-ca.pem \
+OASIS_NATS_CLIENT_CERT=certs/nats-client.pem \
+OASIS_NATS_CLIENT_KEY=certs/nats-client-key.pem \
+OASIS_SERVER_URL=https://127.0.0.1:50051 \
+OASIS_GRPC_CA=certs/grpc-ca.pem \
+OASIS_GRPC_CLIENT_CERT=certs/grpc-client.pem \
+OASIS_GRPC_CLIENT_KEY=certs/grpc-client-key.pem \
+./target/debug/oasis-agent
 ```
 
-`config/oasis-server.toml` 关键段：
-
-```toml
-[server]
-grpc_addr = "127.0.0.1:50051"
-
-[server.grpc_tls]
-ca_cert = "certs/grpc-ca.pem"
-server_cert = "certs/grpc-server.pem"
-server_key = "certs/grpc-server-key.pem"
-cert_check_interval_sec = 300
-```
-
-### 4. 启动 Agent
-
-- 支持环境变量（带 `OASIS_AGENT_` 前缀，`__` 作为分层分隔符）+ 远端 NATS KV 覆盖
-- 或通过 CLI 下发配置（TOML）
+5. 执行命令并获取结果（exec 已内置结果获取）
 
 ```bash
-# 方式1: 环境变量（示例）
-OASIS_AGENT_AGENT_ID=agent-001 \
-OASIS_NATS_URL=tls://<NATS_SERVER_IP>:4443 \
-./target/release/oasis-agent
+# 下发任务（不等待）
+oasis-cli exec --target true -- /bin/echo hello
 
-# 方式2: 通过 CLI 下发配置（TOML）
-./target/release/oasis-cli --config config/oasis-cli.toml config apply --src config/oasis-agent.toml -t 'agent_id == "agent-001"'
+# 下发并等待 5 秒结果
+oasis-cli exec --target true --wait-ms 5000 -- /bin/echo hi
+
+# 下发并流式查看结果（直到 Ctrl+C）
+oasis-cli exec --target true --stream -- /bin/echo hi
 ```
 
-### 5. 使用 CLI（统一 --target/-t）
+说明：历史上的 `task get` 将逐步移除，请优先使用 `exec --wait-ms` 或 `--stream`。
+
+6. 查看状态与停止
 
 ```bash
-# 列出节点
-./target/release/oasis-cli --config config/oasis-cli.toml node ls
-
-# 过滤节点
-./target/release/oasis-cli --config config/oasis-cli.toml node ls -t 'labels["environment"] == "production"'
+oasis-cli system status
+oasis-cli system stop
 ```
 
----
-
-## CLI 用法示例
-
-### 目标选择方式
-
-- 批量命令（exec、file apply、rollout、node、config apply）统一使用 `--target`/`-t`：
-  - 支持 CEL 表达式（如 `labels["role"] == "web"`）
-  - 支持逗号分隔的 Agent ID 列表（如 `agent-001,agent-002`）
-  - 支持 `true` 表示全部节点
-- 配置管理（单点操作）使用 `--agent-id`
-
-### 节点管理 (`node`)
+## 远端部署 Agent（示例）
 
 ```bash
-# 列出所有在线节点
-oasis-cli --config config/oasis-cli.toml node ls
+oasis-cli agent deploy \
+  --target user@host \
+  --server-url https://127.0.0.1:50051 \
+  --nats-url tls://127.0.0.1:4222 \
+  --output-dir ./deploy
 
-# 列出生产环境的节点
-oasis-cli --config config/oasis-cli.toml node ls -t 'labels["environment"] == "production"'
-
-# 查看指定节点的详细信息（Facts）
-oasis-cli --config config/oasis-cli.toml node facts -t 'agent-001'
-
-# 查看所有 Web 服务器的系统信息（JSON）
-oasis-cli --config config/oasis-cli.toml node facts -t 'labels["role"] == "web"' --output json
+# 将 oasis-agent 放入 ./deploy 目录后执行
+cd deploy && ./install.sh
 ```
 
-### 远程执行 (`exec`)
+`agent.env`（自动生成）中的关键变量：
+
+- OASIS_SERVER_URL：Server 的 gRPC 地址（必须为 https）
+- OASIS_NATS_URL：NATS 地址（必须为 tls）
+- 证书路径默认在 `/opt/oasis/certs/`，安装脚本会从 `deploy/certs/` 拷贝过去
+
+## CLI 用法
+
+### system：系统管理
 
 ```bash
-# 在所有 `role == 'web'` 的节点上执行 `uptime`
-oasis-cli --config config/oasis-cli.toml exec -t 'labels["role"] == "web"' -- /usr/bin/uptime
+# 初始化系统
+oasis-cli system init --force
 
-# 在生产环境的前端服务器上执行命令
-oasis-cli --config config/oasis-cli.toml exec -t 'labels["environment"] == "prod" && "frontend" in groups' -- /usr/bin/ps aux
+# 启动服务器（守护模式，日志重定向到文件）
+oasis-cli system start --daemon --log-file ./oasis-server.log
 
-# 在所有节点上执行（谨慎使用）
-oasis-cli --config config/oasis-cli.toml exec -t 'true' -- /usr/bin/uptime
+# 查看状态
+oasis-cli system status
 
-# 在指定的 Agent ID 列表上执行命令
-oasis-cli --config config/oasis-cli.toml exec -t 'agent-001,agent-002,agent-003' -- /usr/bin/uptime
+# 停止服务器
+oasis-cli system stop
 ```
 
-### 文件分发 (`file`)
+### exec：执行命令
 
 ```bash
-# 将本地的 nginx.conf 分发到目标节点并原子化更新
-oasis-cli --config config/oasis-cli.toml file apply \
-  --src ./nginx.conf \
-  --dest /etc/nginx/nginx.conf \
-  -t 'labels["role"] == "web"' \
-  --atomic
+# 基本执行
+oasis-cli exec --target 'labels["role"] == "web"' -- /usr/bin/uptime
 
-# 验证文件完整性
-oasis-cli --config config/oasis-cli.toml file apply \
-  --src ./secure.conf \
-  --dest /etc/secure.conf \
-  -t 'labels["role"] == "db"' \
-  --sha256 a1b2c3d4e5f6...
+# 等待结果（5秒超时）
+oasis-cli exec --target true --wait-ms 5000 -- /bin/echo hi
+
+# 流式查看结果
+oasis-cli exec --target true --stream -- /bin/echo hi
 ```
 
-### 配置管理 (`config`)
+### file：分发文件
 
 ```bash
-# 应用配置文件到匹配的 agents
-oasis-cli --config config/oasis-cli.toml config apply --src ./agent.toml -t 'labels["role"] == "web"'
+# 分发文件
+oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
 
-# 设置单个配置项（单点）
-oasis-cli --config config/oasis-cli.toml config set --component agent --agent-id agent-1 telemetry.log_level debug
-
-# 获取配置值
-oasis-cli --config config/oasis-cli.toml config get --component agent --agent-id agent-1 telemetry.log_level
-
-# 列出所有配置键
-oasis-cli --config config/oasis-cli.toml config list --component agent --agent-id agent-1
-
-# 显示配置摘要
-oasis-cli --config config/oasis-cli.toml config show --component agent --agent-id agent-1
-
-# 备份配置
-oasis-cli --config config/oasis-cli.toml config backup --component agent --agent-id agent-1 --output backup.toml
-
-# 验证配置文件
-oasis-cli --config config/oasis-cli.toml config validate --component agent --file agent.toml
-
-# 比较配置差异
-oasis-cli --config config/oasis-cli.toml config diff --component agent config/old.toml config/new.toml
-
-# 删除配置项
-oasis-cli --config config/oasis-cli.toml config delete --component agent --agent-id agent-1 telemetry.log_level
+# 清空对象存储
+oasis-cli file clear
 ```
 
-### 灰度发布 (`rollout`)
+### agent：Agent 管理
 
 ```bash
-# 创建一个滚动更新任务，每次更新 10% 的节点
-oasis-cli --config config/oasis-cli.toml rollout start \
-  --name 'security-updates' \
-  --strategy rolling \
-  -t 'labels["os"] == "opencloudos"' \
-  --task-file ./update-script.sh \
-  --batch-size 10% \
-  --auto-advance
+# 部署 Agent
+oasis-cli agent deploy --target user@host --output-dir ./deploy
 
-# 监控发布状态
-oasis-cli --config config/oasis-cli.toml rollout status security-updates --watch
+# 列出 Agent（简洁模式）
+oasis-cli agent list
+
+# 列出 Agent（详细模式，包含系统信息）
+oasis-cli agent list --verbose
+
+# 移除 Agent
+oasis-cli agent remove --target user@host
 ```
 
-## TODO
+### rollout：灰度发布
 
-当前还只是一个半成品项目，还有许多复杂测试没有做。代码也存在诸多问题，后面会慢慢调整。大多数功能均已经实现。当前的实现与初版的设计文档之间存在一些差异。后面，会重新上传一份最新的文档。
+```bash
+# 启动灰度
+oasis-cli rollout start --name my-rollout --strategy rolling -t 'labels["role"] == "web"' --task-file ./task.sh
+
+# 查看状态
+oasis-cli rollout status my-rollout
+
+# 控制灰度
+oasis-cli rollout pause my-rollout
+oasis-cli rollout resume my-rollout
+oasis-cli rollout abort my-rollout
+oasis-cli rollout rollback my-rollout
+```
+
+### storage：存储管理
+
+```bash
+# 查看存储信息
+oasis-cli storage info
+
+# 设置存储容量
+oasis-cli storage set-capacity --size-gb 100
+```
+
+## 输出说明
+- CLI 输出使用中文，支持彩色显示
+- 默认启用 ANSI 颜色（可通过 `CLICOLOR_FORCE=0` 关闭）
+- 服务器日志重定向到文件（守护模式）

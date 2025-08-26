@@ -101,38 +101,3 @@ pub trait FileRepository: Send + Sync {
     /// 清空对象存储
     async fn clear_all(&self) -> Result<u64, CoreError>;
 }
-
-/// Agent 配置仓储接口
-#[async_trait]
-pub trait AgentConfigRepository: Send + Sync {
-    /// 批量应用配置（已扁平化 K/V）到多个 agent
-    async fn apply_bulk(
-        &self,
-        agent_ids: &[String],
-        flat_kv: &std::collections::HashMap<String, String>,
-    ) -> Result<u64, CoreError>;
-
-    /// 获取单个配置值
-    async fn get(&self, agent_id: &str, key: &str) -> Result<Option<String>, CoreError>;
-
-    /// 设置单个配置值
-    async fn set(&self, agent_id: &str, key: &str, value: &str) -> Result<(), CoreError>;
-
-    /// 删除单个配置值
-    async fn del(&self, agent_id: &str, key: &str) -> Result<(), CoreError>;
-
-    /// 列出 agent 的所有配置键
-    async fn list_keys(
-        &self,
-        agent_id: &str,
-        prefix: Option<&str>,
-    ) -> Result<Vec<String>, CoreError>;
-
-    /// 获取 agent 的所有配置
-    async fn get_all(
-        &self,
-        agent_id: &str,
-    ) -> Result<std::collections::HashMap<String, String>, CoreError>;
-
-    // 批量清空能力由明确的用例/RPC驱动时再暴露
-}

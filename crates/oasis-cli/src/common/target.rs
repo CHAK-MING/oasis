@@ -2,6 +2,8 @@
 ///
 /// 这个模块实现了智能解析逻辑，将用户输入统一转换为CEL选择器表达式
 
+use anyhow::{anyhow, Result};
+
 #[derive(Debug, Clone)]
 pub struct TargetSelector {
     pub expression: String,
@@ -15,11 +17,11 @@ impl TargetSelector {
     /// - "agent1" -> agent_id == "agent1"
     /// - "true" | "all" -> true (所有agents)
     /// - "labels.role == 'web'" -> labels.role == 'web' (CEL表达式)
-    pub fn parse(input: &str) -> Self {
+    pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
 
         if input.is_empty() {
-            panic!("Target cannot be empty");
+            return Err(anyhow!("目标选择器不能为空"));
         }
 
         let expression = if input.contains(',') {
@@ -43,7 +45,7 @@ impl TargetSelector {
             format!("agent_id == \"{}\"", input)
         };
 
-        Self { expression }
+        Ok(Self { expression })
     }
 
     /// 检测是否为CEL表达式

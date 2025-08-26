@@ -1,10 +1,9 @@
 use anyhow::Result;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::application::services::RolloutManager;
 use crate::infrastructure::di_container::InfrastructureDiContainer;
+use crate::interface::grpc::server::StreamingBackoffSection;
 
 /// gRPC 服务工厂 - 只负责组装服务，不创建具体实现
 pub struct GrpcServiceFactory;
@@ -15,7 +14,7 @@ impl GrpcServiceFactory {
         jetstream: async_nats::jetstream::Context,
         shutdown_token: CancellationToken,
         heartbeat_ttl_sec: u64,
-        streaming_backoff: crate::config::StreamingBackoffSection,
+        streaming_backoff: StreamingBackoffSection,
         health_service: Option<std::sync::Arc<crate::interface::health::HealthService>>,
     ) -> Result<crate::interface::grpc::server::OasisServer> {
         info!(
@@ -35,21 +34,13 @@ impl GrpcServiceFactory {
             health_service,
         );
 
-        // 创建 RolloutManager
-        let rollout_manager = RolloutManager::new(
+        // 注意：RolloutManager 的启动改由 ServerBootstrapper 统一管理
+        let _ = (
             context.rollout_repo,
             context.node_repo,
             context.task_repo,
             context.selector_engine,
-            shutdown_token.child_token(),
         );
-
-        // 启动 RolloutManager
-        let rollout_manager_arc = Arc::new(rollout_manager);
-        let rollout_manager_clone = rollout_manager_arc.clone();
-        tokio::spawn(async move {
-            rollout_manager_clone.run().await;
-        });
 
         info!("OasisServer created successfully");
         Ok(server)
@@ -60,7 +51,7 @@ impl GrpcServiceFactory {
         jetstream: async_nats::jetstream::Context,
         shutdown_token: CancellationToken,
         heartbeat_ttl_sec: u64,
-        streaming_backoff: crate::config::StreamingBackoffSection,
+        streaming_backoff: StreamingBackoffSection,
         health_service: Option<std::sync::Arc<crate::interface::health::HealthService>>,
     ) -> Result<
         oasis_core::proto::oasis_service_server::OasisServiceServer<
