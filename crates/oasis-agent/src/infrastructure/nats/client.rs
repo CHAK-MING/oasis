@@ -18,7 +18,7 @@ impl NatsClient {
         Ok(Self { client, jetstream })
     }
 
-    /// 连接到 NATS 服务器（使用显式证书路径参数，兼容现有调用）
+    /// 连接到 NATS 服务器
     pub async fn connect_with_config(
         nats_url: &str,
         nats_ca: &str,

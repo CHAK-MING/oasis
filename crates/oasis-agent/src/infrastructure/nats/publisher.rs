@@ -38,7 +38,8 @@ impl NatsPublisher {
         };
 
         let key = constants::kv_key_heartbeat(hb.agent_id.as_str());
-        let data = rmp_serde::to_vec(hb).context("serialize heartbeat")?;
+        let proto: oasis_core::proto::AgentHeartbeat = hb.into();
+        let data = oasis_core::proto_impls::encoding::to_vec(&proto);
         kv.put(&key, data.into())
             .await
             .context("kv put heartbeat")?;
@@ -47,25 +48,28 @@ impl NatsPublisher {
 
     pub async fn publish_task_result(&self, exec: &TaskExecution) -> Result<()> {
         let subject = constants::result_subject_for_typed(&exec.task_id, &exec.agent_id);
-        let data = serde_json::to_vec(exec).context("serialize task execution")?;
-        
+        // Protobuf 编码 TaskExecution
+        let proto: oasis_core::proto::TaskExecutionMsg = exec.into();
+        let data = oasis_core::proto_impls::encoding::to_vec(&proto);
+
         // 发布并等待 ACK 确认，确保消息成功写入 JetStream
-        let ack = self.client
+        let ack = self
+            .client
             .jetstream
             .publish(subject.clone(), data.into())
             .await
             .context("publish task execution")?;
-        
+
         // 等待 ACK 确认
         ack.await.context("wait for publish ack")?;
-        
+
         tracing::info!(
             "Task result published successfully: task_id={}, agent_id={}, subject={}",
             exec.task_id.as_str(),
             exec.agent_id.as_str(),
             subject
         );
-        
+
         Ok(())
     }
 }

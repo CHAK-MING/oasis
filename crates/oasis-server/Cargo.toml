@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-nats = { workspace = true }
 tonic = { workspace = true, features = ["tls"] }
+prost = { workspace = true }
 clap = { workspace = true }
 async-trait = { workspace = true }
 serde_yaml = { workspace = true }
@@ -29,13 +30,13 @@ uuid = { version = "1.15", features = ["v4"] }
 governor = "0.6"
 cel = "0.11"
 sha2 = "0.10"
-rmp-serde = "1.1"
 tokio-stream = "0.1"
 dashmap = "5.5"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 anyhow = { workspace = true }
 futures = "0.3"
 tokio-util = "0.7"
+base64 = "0.21"
 
 # TLS 相关依赖
 tonic-health = "0.11"

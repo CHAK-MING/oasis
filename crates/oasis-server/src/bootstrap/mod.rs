@@ -300,7 +300,7 @@ impl ServerBootstrapper {
                                 info!(node_id = %node_id, labels = ?labels, timestamp = %timestamp, "Node labels updated");
                             }
                             crate::domain::events::NodeEvent::FactsUpdated { node_id, facts, timestamp } => {
-                                tracing::debug!(node_id = %node_id, facts = %facts, timestamp = %timestamp, "Node facts updated");
+                                tracing::debug!(node_id = %node_id, facts = ?facts, timestamp = %timestamp, "Node facts updated");
                             }
                         }
                     }

@@ -2,6 +2,7 @@ use async_nats::HeaderMap;
 use async_trait::async_trait;
 use futures::StreamExt;
 use oasis_core::{error::CoreError, types::TaskExecution};
+use prost::Message;
 
 use crate::application::ports::repositories::{ResultConsumer, TaskRepository};
 use crate::domain::models::task::{Task, TaskResult};
@@ -241,7 +242,9 @@ impl TaskRepository for NatsTaskRepository {
         let kv = self.ensure_task_kv_store().await?;
         let key = format!("task:{}", task.id);
 
-        let task_data = persist::to_json_vec(&task)?;
+        let task_spec = task.to_spec();
+        let proto: oasis_core::proto::TaskSpecMsg = (&task_spec).into();
+        let task_data = oasis_core::proto_impls::encoding::to_vec(&proto);
 
         kv.put(&key, task_data.into())
             .await
@@ -290,9 +293,10 @@ impl TaskRepository for NatsTaskRepository {
             Ok(mut batch) => {
                 tracing::info!("Fetching messages for subject: {}", filter_subject);
                 if let Some(Ok(msg)) = batch.next().await {
-                    if let Ok(task_execution) =
-                        serde_json::from_slice::<TaskExecution>(&msg.payload)
+                    if let Ok(proto) =
+                        oasis_core::proto::TaskExecutionMsg::decode(msg.payload.as_ref())
                     {
+                        let task_execution: TaskExecution = TaskExecution::from(&proto);
                         // 将 TaskExecution 转换为 TaskResult
                         let task_result = TaskResult {
                             task_id: task_execution.task_id.clone(),
@@ -369,9 +373,10 @@ impl TaskRepository for NatsTaskRepository {
                     match fetch_result {
                         Ok(mut batch) => {
                             if let Some(Ok(msg)) = batch.next().await {
-                                if let Ok(task_execution) =
-                                    serde_json::from_slice::<TaskExecution>(&msg.payload)
-                                {
+                                if let Ok(proto) = oasis_core::proto::TaskExecutionMsg::decode(
+                                    msg.payload.as_ref(),
+                                ) {
+                                    let task_execution: TaskExecution = TaskExecution::from(&proto);
                                     // 将 TaskExecution 转换为 TaskResult
                                     let task_result = TaskResult {
                                         task_id: task_execution.task_id.clone(),
@@ -456,7 +461,8 @@ impl TaskRepository for NatsTaskRepository {
             })?;
 
         while let Some(Ok(msg)) = batch.next().await {
-            if let Ok(task_execution) = serde_json::from_slice::<TaskExecution>(&msg.payload) {
+            if let Ok(proto) = oasis_core::proto::TaskExecutionMsg::decode(msg.payload.as_ref()) {
+                let task_execution: TaskExecution = TaskExecution::from(&proto);
                 tracing::info!(
                     "Successfully deserialized TaskExecution: {:?}",
                     task_execution
@@ -484,8 +490,8 @@ impl TaskRepository for NatsTaskRepository {
                 results.push(task_result);
             } else {
                 tracing::warn!(
-                    "Failed to deserialize message as TaskExecution, payload: {:?}",
-                    String::from_utf8_lossy(&msg.payload)
+                    "Failed to decode message as TaskExecutionMsg, len: {} bytes",
+                    msg.payload.len()
                 );
             }
             let _ = msg.ack().await;
@@ -542,9 +548,9 @@ impl TaskRepository for NatsTaskRepository {
         // 根据目标节点发布任务（幂等 + 去重 + Ack 确认 + 轻量重试）
         for agent_id in &task.target_agents() {
             let subject = format!("tasks.exec.agent.{}", agent_id);
-            let data = serde_json::to_vec(&task_spec).map_err(|e| CoreError::Serialization {
-                message: e.to_string(),
-            })?;
+            // 使用 Protobuf 编码 TaskSpec
+            let proto: oasis_core::proto::TaskSpecMsg = (&task_spec).into();
+            let data = oasis_core::proto_impls::encoding::to_vec(&proto);
 
             // 设置 Nats-Msg-Id = <task_id>@<subject>，确保同一任务在不同 subject 上不会误去重
             let mut headers = HeaderMap::new();
@@ -616,10 +622,10 @@ impl ResultConsumer for NatsResultConsumer {
         match fetch_result {
             Ok(mut batch) => {
                 if let Some(Ok(msg)) = batch.next().await {
-                    if let Ok(task_execution) =
-                        serde_json::from_slice::<TaskExecution>(&msg.payload)
+                    if let Ok(proto) =
+                        oasis_core::proto::TaskExecutionMsg::decode(msg.payload.as_ref())
                     {
-                        // 将 TaskExecution 转换为 TaskResult
+                        let task_execution: TaskExecution = TaskExecution::from(&proto);
                         let task_result = TaskResult {
                             task_id: task_execution.task_id.clone(),
                             agent_id: task_execution.agent_id.clone(),

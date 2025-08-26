@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_nats::jetstream::Context;
 use async_nats::jetstream::kv::Store;
 use oasis_core::error::CoreError;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -118,14 +119,12 @@ impl LeaderElectionService {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let new_leader_data = serde_json::to_string(&LeaderInfo {
+        let new_leader_msg = oasis_core::proto::LeaderInfoMsg {
             instance_id: self.instance_id.clone(),
             elected_at: now,
             last_renewal: now,
-        })
-        .map_err(|e| CoreError::Serialization {
-            message: format!("Failed to serialize leader info: {}", e),
-        })?;
+        };
+        let new_leader_data = oasis_core::proto_impls::encoding::to_vec(&new_leader_msg);
 
         // Use atomic election strategy with retry logic
         let max_retries = 5;
@@ -160,8 +159,12 @@ impl LeaderElectionService {
             match self.kv_store.entry("leader").await {
                 Ok(Some(entry)) => {
                     let current_leader_info =
-                        match serde_json::from_slice::<LeaderInfo>(&entry.value) {
-                            Ok(info) => info,
+                        match oasis_core::proto::LeaderInfoMsg::decode(entry.value.as_ref()) {
+                            Ok(p) => LeaderInfo {
+                                instance_id: p.instance_id,
+                                elected_at: p.elected_at,
+                                last_renewal: p.last_renewal,
+                            },
                             Err(_) => {
                                 retry_count += 1;
                                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -241,7 +244,8 @@ impl LeaderElectionService {
 
                         // First, verify we're still the current leader
                         if let Ok(Some(current_entry)) = kv_store.get("leader").await {
-                            if let Ok(current_leader_info) = serde_json::from_slice::<LeaderInfo>(&current_entry) {
+                            if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(current_entry.as_ref()) {
+                                let current_leader_info = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
                                 if current_leader_info.instance_id != instance_id {
                                     tracing::warn!(
                                         instance_id = %instance_id,
@@ -267,7 +271,8 @@ impl LeaderElectionService {
                         // CAS renew: read current revision and ensure we are still the leader, then update
                         match kv_store.entry("leader").await {
                             Ok(Some(entry)) => {
-                                if let Ok(current_leader_info) = serde_json::from_slice::<LeaderInfo>(&entry.value) {
+                                if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(entry.value.as_ref()) {
+                                    let current_leader_info = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
                                     if current_leader_info.instance_id != instance_id {
                                         tracing::warn!(instance_id = %instance_id, "Lost leadership before renewal");
                                         let mut is_leader_guard = is_leader.write().await;
@@ -275,12 +280,8 @@ impl LeaderElectionService {
                                         break;
                                     }
 
-                                    let renewal_data = serde_json::to_string(&LeaderInfo {
-                                        instance_id: instance_id.clone(),
-                                        elected_at: current_leader_info.elected_at,
-                                        last_renewal: now,
-                                    })
-                                    .unwrap();
+                                    let renewal_msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at: current_leader_info.elected_at, last_renewal: now };
+                                    let renewal_data = oasis_core::proto_impls::encoding::to_vec(&renewal_msg);
 
                                     if kv_store
                                         .update("leader", renewal_data.into(), entry.revision)
@@ -353,7 +354,8 @@ impl LeaderElectionService {
 
                         // Check current leader status
                         if let Ok(Some(entry)) = kv_store.get("leader").await {
-                            if let Ok(current_leader) = serde_json::from_slice::<LeaderInfo>(&entry) {
+                            if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(entry.as_ref()) {
+                                let current_leader = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
                                 let now = SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
                                     .unwrap()
@@ -374,13 +376,10 @@ impl LeaderElectionService {
                                         .duration_since(UNIX_EPOCH)
                                         .unwrap()
                                         .as_secs() as i64;
-                                    let new_leader_data = serde_json::to_string(&LeaderInfo {
-                                        instance_id: instance_id.clone(),
-                                        elected_at: now,
-                                        last_renewal: now,
-                                    });
+                                    let new_leader_msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at: now, last_renewal: now };
+                                    let data = oasis_core::proto_impls::encoding::to_vec(&new_leader_msg);
 
-                                    if let Ok(data) = new_leader_data {
+                                    {
                                         // Use create() first; if exists, try CAS with update() using current revision
                                         match kv_store.create("leader", data.clone().into()).await {
                                             Ok(_) => {

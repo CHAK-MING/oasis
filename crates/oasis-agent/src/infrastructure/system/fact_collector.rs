@@ -7,7 +7,6 @@ use crate::domain::models::SystemFacts;
 use oasis_core::error::Result as CoreResult;
 
 pub struct SystemMonitor {
-    // system: System, // TODO: 当前未使用，考虑移除或实现系统监控功能
 }
 
 impl SystemMonitor {

@@ -143,14 +143,7 @@ impl CoreError {
 /// Core 操作的 Result 类型别名
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-// === 自动错误转换实现 ===
-impl From<serde_json::Error> for CoreError {
-    fn from(err: serde_json::Error) -> Self {
-        CoreError::Serialization {
-            message: err.to_string(),
-        }
-    }
-}
+
 
 impl From<std::io::Error> for CoreError {
     fn from(err: std::io::Error) -> Self {
@@ -233,22 +226,6 @@ impl From<tonic::Status> for CoreError {
             _ => CoreError::Internal {
                 message: format!("gRPC({}): {}", status.code() as i32, status.message()),
             },
-        }
-    }
-}
-
-impl From<rmp_serde::encode::Error> for CoreError {
-    fn from(err: rmp_serde::encode::Error) -> Self {
-        CoreError::Serialization {
-            message: format!("MessagePack encode: {}", err),
-        }
-    }
-}
-
-impl From<rmp_serde::decode::Error> for CoreError {
-    fn from(err: rmp_serde::decode::Error) -> Self {
-        CoreError::Serialization {
-            message: format!("MessagePack decode: {}", err),
         }
     }
 }

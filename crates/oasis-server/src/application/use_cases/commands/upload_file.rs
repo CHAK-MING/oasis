@@ -7,6 +7,7 @@ use crate::domain::models::task::Task;
 use oasis_core::task::TaskSpec;
 use oasis_core::types::AgentId;
 use oasis_core::types::TaskId;
+use base64::Engine as _;
 
 /// 文件上传用例
 pub struct UploadFileUseCase {
@@ -76,17 +77,21 @@ impl UploadFileUseCase {
             });
         };
 
-        // 5. 构建统一的文件应用消息（JSON 单参数）
-        let msg = serde_json::json!({
-            "object_name": config.object_name,
-            "destination": config.destination_path,
-            "sha256": file_info.checksum,
-            "size": file_info.size,
-            "mode": config.mode.clone().unwrap_or_default(),
-            "owner": config.owner.clone().unwrap_or_default(),
-            "atomic": config.atomic,
-        })
-        .to_string();
+        // 5. 构建统一的文件应用消息（Protobuf 参数）
+        // 复用 ApplyFileRequest proto（已在 oasis.proto 中定义）
+        let apply = oasis_core::proto::ApplyFileRequest {
+            object_name: config.object_name.clone(),
+            file_data: Vec::new(),
+            destination_path: config.destination_path.clone(),
+            expected_sha256: file_info.checksum.clone(),
+            owner: config.owner.clone().unwrap_or_default(),
+            mode: config.mode.clone().unwrap_or_default(),
+            atomic: config.atomic,
+            target: None,
+        };
+        let msg = base64::engine::general_purpose::STANDARD.encode(
+            oasis_core::proto_impls::encoding::to_vec(&apply),
+        );
 
         // 6. 构建任务并通过仓储发布（统一使用 oasis:file-apply）
         let task_spec = TaskSpec::for_agents(

@@ -16,20 +16,19 @@ tonic = { workspace = true }
 async-trait = { workspace = true }
 figment = { workspace = true }
 futures-util = { workspace = true }
+prost = { workspace = true }
 # 配置解析所需
 toml = "0.8"
 
 # 本地依赖
 libc = "0.2"
 thiserror = "1.0"
-prost = "0.12"
 bytes = "1.6"
 uuid = { version = "1.15", features = ["v4"] }
 time = { version = "0.3", features = ["macros"] }
 governor = "0.6"
 backoff = { version = "0.4", features = ["tokio"] }
 cel = "0.11"
-rmp-serde = "1.1"
 sha2 = "0.10"
 rand = "0.8"
 dashmap = "5.5"

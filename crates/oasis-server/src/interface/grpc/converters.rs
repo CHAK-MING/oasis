@@ -19,7 +19,7 @@ pub fn from_proto_task_spec(msg: &oasis_core::proto::TaskSpecMsg) -> Result<Task
         uuid::Uuid::new_v4().to_string().into()
     };
 
-    // TaskTarget 必须存在 - 不再有垃圾默认值！
+    // TaskTarget 必须存在
     let target = match msg.target.as_ref().and_then(|t| t.target.as_ref()) {
         Some(ProtoTaskTarget::Selector(s)) => {
             if s.is_empty() {
@@ -400,4 +400,176 @@ pub fn to_proto_rollout(
         updated_at: r.updated_at,
         version: r.version,
     }
+}
+
+/// 从 Protobuf RolloutProgressMsg 转为领域 RolloutProgress
+pub fn from_proto_progress(
+    msg: &oasis_core::proto::RolloutProgressMsg,
+) -> crate::domain::models::rollout::RolloutProgress {
+    crate::domain::models::rollout::RolloutProgress {
+        total_nodes: msg.total_nodes as usize,
+        processed_nodes: msg.processed_nodes as usize,
+        successful_nodes: msg.successful_nodes as usize,
+        failed_nodes: msg.failed_nodes as usize,
+        completion_rate: msg.completion_rate,
+        current_batch: if msg.current_batch == 0 {
+            None
+        } else {
+            Some(msg.current_batch as usize)
+        },
+        total_batches: msg.total_batches as usize,
+    }
+}
+
+/// 从 Protobuf BatchResultMsg 转为领域 BatchResult
+pub fn from_proto_batch_result(
+    msg: &oasis_core::proto::BatchResultMsg,
+) -> crate::domain::models::rollout::BatchResult {
+    crate::domain::models::rollout::BatchResult {
+        batch_index: msg.batch_index as usize,
+        node_count: msg.node_count as usize,
+        successful_count: msg.successful_count as usize,
+        failed_count: msg.failed_count as usize,
+        duration_secs: msg.duration_secs,
+        completed_at: msg.completed_at,
+    }
+}
+
+/// 从枚举和状态数据还原领域状态
+pub fn from_proto_state(
+    state: i32,
+    data: &oasis_core::proto::RolloutStateDataMsg,
+    progress: &crate::domain::models::rollout::RolloutProgress,
+) -> Result<crate::domain::models::rollout::RolloutState, CoreError> {
+    use crate::domain::models::rollout::RolloutState as S;
+    match oasis_core::proto::RolloutStateEnum::from_i32(state) {
+        Some(oasis_core::proto::RolloutStateEnum::RollCreated) => Ok(S::Created),
+        Some(oasis_core::proto::RolloutStateEnum::RollRunningBatch) => Ok(S::RunningBatch {
+            current_batch: data.current_batch as usize,
+        }),
+        Some(oasis_core::proto::RolloutStateEnum::RollWaitingNext) => Ok(S::WaitingForNextBatch {
+            batch_completed_at: data.batch_completed_at,
+        }),
+        Some(oasis_core::proto::RolloutStateEnum::RollPaused) => Ok(S::Paused {
+            reason: data.reason.clone(),
+        }),
+        Some(oasis_core::proto::RolloutStateEnum::RollSucceeded) => Ok(S::Succeeded),
+        Some(oasis_core::proto::RolloutStateEnum::RollFailed) => Ok(S::Failed {
+            error: data.error.clone(),
+        }),
+        Some(oasis_core::proto::RolloutStateEnum::RollAborted) => Ok(S::Aborted {
+            reason: data.reason.clone(),
+        }),
+        Some(oasis_core::proto::RolloutStateEnum::RollRollingBack) => Ok(S::RollingBack {
+            reason: data.reason.clone(),
+        }),
+        None => Err(CoreError::Internal {
+            message: format!("Unknown rollout state: {}", state),
+        }),
+    }
+}
+
+/// 从 Protobuf RolloutMsg 转为领域 Rollout
+pub fn from_proto_rollout(
+    msg: &oasis_core::proto::RolloutMsg,
+) -> Result<crate::domain::models::rollout::Rollout, CoreError> {
+    use crate::domain::models::rollout::Rollout as DRollout;
+
+    let id = msg
+        .id
+        .as_ref()
+        .ok_or_else(|| CoreError::Internal {
+            message: "RolloutMsg.id is required".to_string(),
+        })?
+        .value
+        .clone();
+
+    let task_msg = msg.task.as_ref().ok_or_else(|| CoreError::Internal {
+        message: "RolloutMsg.task is required".to_string(),
+    })?;
+    let task = from_proto_task_spec(task_msg)?;
+
+    let target_selector = match msg.target.as_ref().and_then(|t| t.target.as_ref()) {
+        Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => {
+            if s.is_empty() {
+                return Err(CoreError::Internal {
+                    message: "Rollout target selector cannot be empty".to_string(),
+                });
+            }
+            s.clone()
+        }
+        _ => {
+            return Err(CoreError::Internal {
+                message: "Rollout target selector missing".to_string(),
+            });
+        }
+    };
+
+    let config_msg = msg.config.as_ref().ok_or_else(|| CoreError::Internal {
+        message: "RolloutMsg.config is required".to_string(),
+    })?;
+    let config = from_proto_rollout_config(config_msg)?;
+
+    let progress_msg = msg.progress.as_ref().ok_or_else(|| CoreError::Internal {
+        message: "RolloutMsg.progress is required".to_string(),
+    })?;
+    let progress = from_proto_progress(progress_msg);
+
+    let state_data = msg.state_data.as_ref().ok_or_else(|| CoreError::Internal {
+        message: "RolloutMsg.state_data is required".to_string(),
+    })?;
+    let state = from_proto_state(msg.state, state_data, &progress)?;
+
+    let batch_results = msg
+        .batch_results
+        .iter()
+        .map(from_proto_batch_result)
+        .collect::<Vec<_>>();
+
+    let processed_nodes = msg
+        .processed_nodes
+        .iter()
+        .map(|a| a.value.clone())
+        .collect::<std::collections::HashSet<_>>();
+
+    let current_batch_tasks = msg
+        .current_batch_tasks
+        .iter()
+        .map(|(k, v)| (k.clone(), v.value.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let current_batch_started_at = if msg.current_batch_started_at == 0 {
+        None
+    } else {
+        Some(msg.current_batch_started_at)
+    };
+
+    let cached_target_nodes_vec = msg
+        .cached_target_nodes
+        .iter()
+        .map(|a| a.value.clone())
+        .collect::<Vec<_>>();
+    let cached_target_nodes = if cached_target_nodes_vec.is_empty() {
+        None
+    } else {
+        Some(cached_target_nodes_vec)
+    };
+
+    Ok(DRollout {
+        id,
+        name: msg.name.clone(),
+        task,
+        target_selector,
+        config,
+        state,
+        progress,
+        batch_results,
+        processed_nodes,
+        current_batch_tasks,
+        current_batch_started_at,
+        cached_target_nodes,
+        created_at: msg.created_at,
+        updated_at: msg.updated_at,
+        version: msg.version,
+    })
 }

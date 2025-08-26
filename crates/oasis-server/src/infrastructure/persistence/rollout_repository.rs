@@ -5,6 +5,10 @@ use oasis_core::error::CoreError;
 use crate::application::ports::repositories::RolloutRepository;
 use crate::domain::models::rollout::Rollout;
 use crate::infrastructure::persistence::utils as persist;
+use crate::interface::grpc::converters::{from_proto_rollout, to_proto_rollout};
+use oasis_core::proto;
+use oasis_core::proto_impls::encoding;
+use prost::Message;
 
 /// 灰度发布仓储实现 - 基于NATS KV存储
 pub struct NatsRolloutRepository {
@@ -28,7 +32,8 @@ impl RolloutRepository for NatsRolloutRepository {
         let store = self.ensure_rollout_store().await?;
         let key = format!("rollout.{}", rollout.id);
 
-        let data = persist::to_json_vec(&rollout)?;
+        let msg = to_proto_rollout(&rollout);
+        let data = encoding::to_vec(&msg);
 
         store
             .put(&key, data.into())
@@ -49,7 +54,11 @@ impl RolloutRepository for NatsRolloutRepository {
             message: "Rollout not found".to_string(),
         })?;
 
-        let rollout: Rollout = persist::from_json_slice(&entry_data)?;
+        let msg =
+            proto::RolloutMsg::decode(entry_data.as_ref()).map_err(|e| CoreError::Internal {
+                message: format!("decode RolloutMsg error: {}", e),
+            })?;
+        let rollout: Rollout = from_proto_rollout(&msg)?;
 
         Ok(rollout)
     }
@@ -62,7 +71,12 @@ impl RolloutRepository for NatsRolloutRepository {
         let current_entry = store.entry(&key).await.map_err(persist::map_nats_err)?;
 
         let (current_revision, current_version) = if let Some(entry) = current_entry {
-            let existing: Rollout = persist::from_json_slice(&entry.value)?;
+            let existing_msg = proto::RolloutMsg::decode(entry.value.as_ref()).map_err(|e| {
+                CoreError::Internal {
+                    message: format!("decode RolloutMsg error: {}", e),
+                }
+            })?;
+            let existing: Rollout = from_proto_rollout(&existing_msg)?;
             (entry.revision, existing.version)
         } else {
             return Err(CoreError::InvalidTask {
@@ -80,7 +94,8 @@ impl RolloutRepository for NatsRolloutRepository {
             });
         }
 
-        let data = persist::to_json_vec(&rollout)?;
+        let msg = to_proto_rollout(&rollout);
+        let data = encoding::to_vec(&msg);
 
         // 使用 KV 的 update（带期望的 last revision）实现 CAS
         store
@@ -110,7 +125,11 @@ impl RolloutRepository for NatsRolloutRepository {
                     let kv = persist::ensure_kv(&store, "rollouts", "Rollout state storage").await;
                     match kv {
                         Ok(kv) => match kv.get(&format!("rollout.{}", id)).await {
-                            Ok(Some(entry)) => persist::from_json_slice::<Rollout>(&entry).ok(),
+                            Ok(Some(entry)) => proto::RolloutMsg::decode(entry.as_ref())
+                                .ok()
+                                .and_then(|m| {
+                                    crate::interface::grpc::converters::from_proto_rollout(&m).ok()
+                                }),
                             _ => None,
                         },
                         Err(_) => None,

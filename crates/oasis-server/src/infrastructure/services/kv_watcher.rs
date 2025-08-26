@@ -6,7 +6,7 @@ use oasis_core::{
     types::{AgentLabels, AgentFacts},
     JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS, JS_KV_NODE_FACTS,
 };
-use rmp_serde;
+use prost::Message;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -88,7 +88,9 @@ impl KvWatcherService {
                                                 let agent_id = entry.key.to_string();
                                                 match entry.operation {
                                                     KvOp::Put => {
-                                                        if let Ok(heartbeat) = rmp_serde::from_slice::<AgentHeartbeat>(&entry.value) {
+                                                        // Decode protobuf heartbeat
+                                                        if let Ok(proto) = oasis_core::proto::AgentHeartbeat::decode(entry.value.as_ref()) {
+                                                            let heartbeat: AgentHeartbeat = (&proto).into();
                                                             // 检查心跳时间戳是否在有效期内
                                                             let now = chrono::Utc::now();
                                                             let heartbeat_age = now.signed_duration_since(chrono::DateTime::from_timestamp(heartbeat.last_seen, 0).unwrap_or(now)).num_seconds() as u64;
@@ -171,7 +173,8 @@ impl KvWatcherService {
                                                     .to_string();
                                                 match entry.operation {
                                                     KvOp::Put => {
-                                                        if let Ok(labels) = rmp_serde::from_slice::<AgentLabels>(&entry.value) {
+                                                        if let Ok(proto) = oasis_core::proto::AgentLabels::decode(entry.value.as_ref()) {
+                                                            let labels: AgentLabels = (&proto).into();
                                                             let labels_clone = labels.labels.clone();
                                                             let event = LabelsUpdated { node_id: agent_id.clone(), labels: labels_clone, timestamp: chrono::Utc::now() };
                                                             if let Err(e) = event_sender.send(event) { warn!(error = %e, "Failed to send labels updated event"); }
@@ -237,9 +240,9 @@ impl KvWatcherService {
                                                     .to_string();
                                                 match entry.operation {
                                                     KvOp::Put => {
-                                                        if let Ok(facts) = rmp_serde::from_slice::<AgentFacts>(&entry.value) {
-                                                            let facts_json = serde_json::to_string(&facts).unwrap_or_else(|_| "{}".to_string());
-                                                            let event = FactsUpdated { node_id: agent_id, facts: facts_json, timestamp: chrono::Utc::now() };
+                                                        if let Ok(proto) = oasis_core::proto::AgentFacts::decode(entry.value.as_ref()) {
+                                                            let facts: AgentFacts = (&proto).into();
+                                                            let event = FactsUpdated { node_id: agent_id.clone(), facts: facts.clone(), timestamp: chrono::Utc::now() };
                                                             if let Err(e) = event_sender.send(event) { warn!(error = %e, "Failed to send facts updated event"); }
                                                             debug!(agent_id = %facts.agent_id, hostname = %facts.hostname, "Agent facts updated");
                                                         }

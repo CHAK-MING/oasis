@@ -4,7 +4,6 @@ use crate::commands::exec::ExecArgs;
 use crate::commands::file::{run_file, FileArgs};
 
 use crate::commands::rollout::{run_rollout, RolloutCommand};
-use crate::commands::storage::{run_storage, StorageCommands};
 use crate::commands::system::{run_system, SystemCommands};
 use crate::precheck;
 use anyhow::{Context, Result};
@@ -68,10 +67,6 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: RolloutCommand,
     },
-    Storage {
-        #[command(subcommand)]
-        cmd: StorageCommands,
-    },
     System {
         #[command(subcommand)]
         cmd: SystemCommands,
@@ -88,10 +83,6 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
             // Agent commands don't need gRPC client
             run_agent(cmd).await?
         }
-        Commands::Storage { cmd } => {
-            // Storage commands don't need gRPC client
-            run_storage(cmd).await?
-        }
         _ => {
             // Create gRPC client with configuration for other commands
             let mut client = create_grpc_client(config)
@@ -106,7 +97,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
                 Commands::File { args } => run_file(client, args).await?,
 
                 Commands::Rollout { cmd } => run_rollout(cmd, client).await?,
-                Commands::System { .. } | Commands::Agent { .. } | Commands::Storage { .. } => {
+                Commands::System { .. } | Commands::Agent { .. } => {
                     unreachable!()
                 }
             }

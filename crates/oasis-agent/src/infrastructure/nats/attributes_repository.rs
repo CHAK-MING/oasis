@@ -24,8 +24,7 @@ impl NatsAttributesRepository {
             .await
             .context("bind to node labels KV bucket")?;
 
-        // 将 NodeAttributes 中的 labels 以 AgentLabels 结构（MessagePack）写入，
-        // 与服务端读取/监听的格式保持一致
+        // 将 NodeAttributes 中的 labels 以 AgentLabels 结构（Protobuf）写入
         let key = constants::kv_key_labels(agent_id.as_str());
         let agent_labels = AgentLabels {
             agent_id: agent_id.clone(),
@@ -33,7 +32,8 @@ impl NatsAttributesRepository {
             updated_at: chrono::Utc::now().timestamp(),
             updated_by: "oasis-agent".to_string(),
         };
-        let payload = rmp_serde::to_vec(&agent_labels).context("serialize AgentLabels")?;
+        let proto: oasis_core::proto::AgentLabels = (&agent_labels).into();
+        let payload = oasis_core::proto_impls::encoding::to_vec(&proto);
         kv.put(&key, payload.into())
             .await
             .context("kv put AgentLabels")?;

@@ -54,10 +54,9 @@ pub async fn handle_dead_letter(
     js_context: &async_nats::jetstream::Context,
     entry: &DeadLetterEntry,
 ) -> Result<()> {
-    // 存储到 KV
-    let payload = serde_json::to_vec(entry).map_err(|e| CoreError::Serialization {
-        message: e.to_string(),
-    })?;
+    // 存储到 KV（Protobuf）
+    let proto: crate::proto::DeadLetterEntryMsg = entry.into();
+    let payload = crate::proto_impls::encoding::to_vec(&proto);
 
     kv_store
         .put(&entry.dlq_key(), payload.into())
@@ -66,10 +65,8 @@ pub async fn handle_dead_letter(
             message: format!("Failed to store DLQ entry: {}", e),
         })?;
 
-    // 发布通知
-    let notification_payload = serde_json::to_vec(entry).map_err(|e| CoreError::Serialization {
-        message: e.to_string(),
-    })?;
+    // 发布通知（Protobuf）
+    let notification_payload = crate::proto_impls::encoding::to_vec(&proto);
 
     js_context
         .publish(entry.notification_subject(), notification_payload.into())
@@ -93,9 +90,8 @@ pub async fn publish_dlq(
     js_context: &async_nats::jetstream::Context,
     entry: &DeadLetterEntry,
 ) -> Result<()> {
-    let payload = serde_json::to_vec(entry).map_err(|e| CoreError::Serialization {
-        message: e.to_string(),
-    })?;
+    let proto: crate::proto::DeadLetterEntryMsg = entry.into();
+    let payload = crate::proto_impls::encoding::to_vec(&proto);
 
     js_context
         .publish(entry.notification_subject(), payload.into())

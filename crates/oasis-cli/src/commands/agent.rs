@@ -380,48 +380,24 @@ async fn list_agents(verbose: bool) -> Result<()> {
                 }
             );
 
-            // 解析并显示 facts
-            if !node.facts_json.is_empty() {
-                if let Ok(facts) = serde_json::from_str::<serde_json::Value>(&node.facts_json) {
-                    println!("  {}:", style("系统信息").dim());
-                    if let Some(os) = facts.get("os_name") {
-                        println!("    {}: {}", style("操作系统").dim(), os);
-                    }
-                    if let Some(version) = facts.get("os_version") {
-                        println!("    {}: {}", style("版本").dim(), version);
-                    }
-                    if let Some(cpu) = facts.get("cpu_cores") {
-                        println!("    {}: {}", style("CPU 核心数").dim(), cpu);
-                    }
-                    if let Some(memory) = facts.get("memory_total_bytes") {
-                        let mem_gb = memory.as_u64().unwrap_or(0) / (1024 * 1024 * 1024);
-                        println!("    {}: {} GB", style("内存").dim(), mem_gb);
-                    }
-                    if let Some(hostname) = facts.get("hostname") {
-                        println!("    {}: {}", style("主机名").dim(), hostname);
-                    }
-                    if let Some(ip) = facts.get("primary_ip") {
-                        println!("    {}: {}", style("主 IP").dim(), ip);
-                    }
-                    if let Some(agent_version) = facts.get("agent_version") {
-                        println!("    {}: {}", style("Agent 版本").dim(), agent_version);
-                    }
-                    if let Some(collected_at) = facts.get("collected_at") {
-                        if let Some(timestamp) = collected_at.as_i64() {
-                            let datetime = chrono::DateTime::from_timestamp(timestamp, 0)
-                                .unwrap_or_default()
-                                .format("%Y-%m-%d %H:%M:%S")
-                                .to_string();
-                            println!("    {}: {}", style("信息收集时间").dim(), datetime);
-                        }
-                    }
-                    if let Some(kernel) = facts.get("kernel_version") {
-                        println!("    {}: {}", style("内核版本").dim(), kernel);
-                    }
-                    if let Some(arch) = facts.get("cpu_arch") {
-                        println!("    {}: {}", style("CPU 架构").dim(), arch);
-                    }
-                }
+            // 解析并显示 facts（来自 Protobuf 结构）
+            if let Some(facts) = node.facts {
+                println!("  {}:", style("系统信息").dim());
+                println!("    {}: {}", style("操作系统").dim(), facts.os_name);
+                println!("    {}: {}", style("版本").dim(), facts.os_version);
+                println!("    {}: {}", style("CPU 核心数").dim(), facts.cpu_cores);
+                let mem_gb = facts.memory_total_bytes / (1024 * 1024 * 1024);
+                println!("    {}: {} GB", style("内存").dim(), mem_gb);
+                println!("    {}: {}", style("主机名").dim(), facts.hostname);
+                println!("    {}: {}", style("主 IP").dim(), facts.primary_ip);
+                println!("    {}: {}", style("Agent 版本").dim(), facts.agent_version);
+                let datetime = chrono::DateTime::from_timestamp(facts.collected_at, 0)
+                    .unwrap_or_default()
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                println!("    {}: {}", style("信息收集时间").dim(), datetime);
+                println!("    {}: {}", style("内核版本").dim(), facts.kernel_version);
+                println!("    {}: {}", style("CPU 架构").dim(), facts.cpu_arch);
             }
         }
     } else {
@@ -451,14 +427,11 @@ async fn list_agents(verbose: bool) -> Result<()> {
                 .join(", ");
 
             // 从 facts 中提取主机名
-            let mut hostname = "未知".to_string();
-            if !node.facts_json.is_empty() {
-                if let Ok(facts) = serde_json::from_str::<serde_json::Value>(&node.facts_json) {
-                    if let Some(hn) = facts.get("hostname") {
-                        hostname = hn.as_str().unwrap_or("未知").to_string();
-                    }
-                }
-            }
+            let hostname = node
+                .facts
+                .as_ref()
+                .map(|f| f.hostname.clone())
+                .unwrap_or_else(|| "未知".to_string());
 
             table.add_row(vec![
                 Cell::new(agent_id),

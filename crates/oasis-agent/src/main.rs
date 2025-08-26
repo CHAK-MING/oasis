@@ -10,9 +10,7 @@ use oasis_agent::{
     },
 };
 use oasis_core::{
-    rate_limit::RateLimiterCollection,
-    shutdown::GracefulShutdown,
-    telemetry::init_tracing_with,
+    rate_limit::RateLimiterCollection, shutdown::GracefulShutdown, telemetry::init_tracing_with,
     types::AgentId,
 };
 use std::sync::Arc;

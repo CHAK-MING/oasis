@@ -5,7 +5,7 @@ use oasis_core::{
     JS_KV_CONFIG, JS_KV_NODE_FACTS, JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS,
     agent::{AgentFacts, AgentHeartbeat, AgentLabels},
 };
-use rmp_serde;
+use prost::Message;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -90,7 +90,8 @@ pub async fn ensure_kv_and_watch(
         kv_heartbeat.clone(),
         cancel_token.clone(),
         |entry| {
-            if let Ok(heartbeat) = rmp_serde::from_slice::<AgentHeartbeat>(&entry.value) {
+            if let Ok(proto) = oasis_core::proto::AgentHeartbeat::decode(entry.value.as_ref()) {
+                let heartbeat: AgentHeartbeat = (&proto).into();
                 debug!(agent_id = %heartbeat.agent_id, status = ?heartbeat.status, "Agent heartbeat updated");
             }
         },
@@ -101,7 +102,8 @@ pub async fn ensure_kv_and_watch(
         kv_facts.clone(),
         cancel_token.clone(),
         |entry| {
-            if let Ok(facts) = rmp_serde::from_slice::<AgentFacts>(&entry.value) {
+            if let Ok(proto) = oasis_core::proto::AgentFacts::decode(entry.value.as_ref()) {
+                let facts: AgentFacts = (&proto).into();
                 debug!(agent_id = %facts.agent_id, hostname = %facts.hostname, "Agent facts updated");
             }
         },
@@ -112,7 +114,8 @@ pub async fn ensure_kv_and_watch(
         kv_labels.clone(),
         cancel_token.clone(),
         |entry| {
-            if let Ok(labels) = rmp_serde::from_slice::<AgentLabels>(&entry.value) {
+            if let Ok(proto) = oasis_core::proto::AgentLabels::decode(entry.value.as_ref()) {
+                let labels: AgentLabels = (&proto).into();
                 debug!(agent_id = %labels.agent_id, labels_count = labels.labels.len(), "Agent labels updated");
             }
         },

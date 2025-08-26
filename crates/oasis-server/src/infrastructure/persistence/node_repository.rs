@@ -6,6 +6,7 @@ use oasis_core::{
     JS_KV_NODE_FACTS, JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS,
     types::{AgentFacts, AgentHeartbeat, AgentLabels},
 };
+use prost::Message;
 use std::collections::HashMap;
 use tokio::sync::OnceCell;
 
@@ -36,7 +37,12 @@ impl NatsNodeRepository {
         }
         let _ = self.kv_initialized.get_or_init(|| async { () }).await;
         // 确保心跳KV存储存在
-        if self.jetstream.get_key_value(JS_KV_NODE_HEARTBEAT).await.is_err() {
+        if self
+            .jetstream
+            .get_key_value(JS_KV_NODE_HEARTBEAT)
+            .await
+            .is_err()
+        {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_HEARTBEAT.to_string(),
                 description: "Agent heartbeat (TTL-based cleanup)".to_string(),
@@ -48,7 +54,12 @@ impl NatsNodeRepository {
         }
 
         // 确保facts KV存储存在
-        if self.jetstream.get_key_value(JS_KV_NODE_FACTS).await.is_err() {
+        if self
+            .jetstream
+            .get_key_value(JS_KV_NODE_FACTS)
+            .await
+            .is_err()
+        {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_FACTS.to_string(),
                 description: "Agent facts (versioned, no TTL)".to_string(),
@@ -60,7 +71,12 @@ impl NatsNodeRepository {
         }
 
         // 确保labels KV存储存在
-        if self.jetstream.get_key_value(JS_KV_NODE_LABELS).await.is_err() {
+        if self
+            .jetstream
+            .get_key_value(JS_KV_NODE_LABELS)
+            .await
+            .is_err()
+        {
             let cfg = async_nats::jetstream::kv::Config {
                 bucket: JS_KV_NODE_LABELS.to_string(),
                 description: "Agent labels (versioned, no TTL)".to_string(),
@@ -77,8 +93,7 @@ impl NatsNodeRepository {
     /// 获取心跳存储
     async fn get_heartbeat_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self
-            .jetstream
+        self.jetstream
             .get_key_value(JS_KV_NODE_HEARTBEAT)
             .await
             .map_err(persist::map_nats_err)
@@ -87,8 +102,7 @@ impl NatsNodeRepository {
     /// 获取facts存储
     async fn get_facts_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self
-            .jetstream
+        self.jetstream
             .get_key_value(JS_KV_NODE_FACTS)
             .await
             .map_err(persist::map_nats_err)
@@ -97,8 +111,7 @@ impl NatsNodeRepository {
     /// 获取labels存储
     async fn get_labels_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
         self.ensure_kv_stores().await?;
-        self
-            .jetstream
+        self.jetstream
             .get_key_value(JS_KV_NODE_LABELS)
             .await
             .map_err(persist::map_nats_err)
@@ -129,7 +142,8 @@ impl NatsNodeRepository {
         let results = join_all(futures).await;
         for (agent_id, result) in results {
             if let Ok(Some(entry)) = result {
-                if let Ok(core_heartbeat) = rmp_serde::from_slice::<AgentHeartbeat>(&entry) {
+                if let Ok(proto) = oasis_core::proto::AgentHeartbeat::decode(entry.as_ref()) {
+                    let core_heartbeat: AgentHeartbeat = (&proto).into();
                     heartbeats.insert(
                         agent_id,
                         crate::domain::models::node::NodeHeartbeat {
@@ -168,7 +182,8 @@ impl NatsNodeRepository {
         for (agent_id, result) in results {
             match result {
                 Ok(Some(entry)) => {
-                    if let Ok(core_labels) = rmp_serde::from_slice::<AgentLabels>(&entry) {
+                    if let Ok(proto) = oasis_core::proto::AgentLabels::decode(entry.as_ref()) {
+                        let core_labels: AgentLabels = (&proto).into();
                         labels_map.insert(
                             agent_id,
                             crate::domain::models::node::NodeLabels {
@@ -217,11 +232,12 @@ impl NatsNodeRepository {
         for (agent_id, result) in results {
             match result {
                 Ok(Some(entry)) => {
-                    if let Ok(core_facts) = rmp_serde::from_slice::<AgentFacts>(&entry) {
+                    if let Ok(proto) = oasis_core::proto::AgentFacts::decode(entry.as_ref()) {
+                        let core_facts: AgentFacts = (&proto).into();
                         facts_map.insert(
                             agent_id,
                             crate::domain::models::node::NodeFacts {
-                                facts: serde_json::to_string(&core_facts)?,
+                                facts: core_facts,
                                 version: 1,
                             },
                         );
@@ -229,9 +245,24 @@ impl NatsNodeRepository {
                 }
                 _ => {
                     facts_map.insert(
-                        agent_id,
+                        agent_id.clone(),
                         crate::domain::models::node::NodeFacts {
-                            facts: "{}".to_string(),
+                            facts: AgentFacts {
+                                agent_id: agent_id.clone().into(),
+                                hostname: String::new(),
+                                primary_ip: String::new(),
+                                cpu_arch: String::new(),
+                                cpu_cores: 0,
+                                memory_total_bytes: 0,
+                                os_name: String::new(),
+                                os_version: String::new(),
+                                kernel_version: String::new(),
+                                boot_id: String::new(),
+                                network_interfaces: Vec::new(),
+                                cidrs: Vec::new(),
+                                agent_version: String::new(),
+                                collected_at: 0,
+                            },
                             version: 0,
                         },
                     );
@@ -253,10 +284,13 @@ impl NodeRepository for NatsNodeRepository {
 
         let heartbeat = match heartbeat_store.get(&heartbeat_key).await {
             Ok(Some(entry)) => {
-                let core_heartbeat: AgentHeartbeat =
-                    rmp_serde::from_slice(&entry).map_err(|e| CoreError::Serialization {
-                        message: e.to_string(),
+                let proto =
+                    oasis_core::proto::AgentHeartbeat::decode(entry.as_ref()).map_err(|e| {
+                        CoreError::Serialization {
+                            message: e.to_string(),
+                        }
                     })?;
+                let core_heartbeat: AgentHeartbeat = (&proto).into();
 
                 NodeHeartbeat {
                     timestamp: core_heartbeat.last_seen,
@@ -278,14 +312,17 @@ impl NodeRepository for NatsNodeRepository {
 
         let labels = match labels_store.get(&labels_key).await {
             Ok(Some(entry)) => {
-                let core_labels: AgentLabels =
-                    rmp_serde::from_slice(&entry).map_err(|e| CoreError::Serialization {
-                        message: e.to_string(),
+                let proto =
+                    oasis_core::proto::AgentLabels::decode(entry.as_ref()).map_err(|e| {
+                        CoreError::Serialization {
+                            message: e.to_string(),
+                        }
                     })?;
+                let core_labels: AgentLabels = (&proto).into();
 
                 NodeLabels {
                     labels: core_labels.labels,
-                    version: 1, // 暂时使用固定版本
+                    version: 1,
                 }
             }
             Ok(None) => NodeLabels {
@@ -305,22 +342,35 @@ impl NodeRepository for NatsNodeRepository {
 
         let facts = match facts_store.get(&facts_key).await {
             Ok(Some(entry)) => {
-                let core_facts: AgentFacts =
-                    rmp_serde::from_slice(&entry).map_err(|e| CoreError::Serialization {
+                let proto = oasis_core::proto::AgentFacts::decode(entry.as_ref()).map_err(|e| {
+                    CoreError::Serialization {
                         message: e.to_string(),
-                    })?;
+                    }
+                })?;
+                let core_facts: AgentFacts = (&proto).into();
 
                 NodeFacts {
-                    facts: serde_json::to_string(&core_facts).map_err(|e| {
-                        CoreError::Serialization {
-                            message: e.to_string(),
-                        }
-                    })?,
+                    facts: core_facts,
                     version: 1, // 暂时使用固定版本
                 }
             }
             Ok(None) => NodeFacts {
-                facts: "{}".to_string(),
+                facts: AgentFacts {
+                    agent_id: id.to_string().into(),
+                    hostname: String::new(),
+                    primary_ip: String::new(),
+                    cpu_arch: String::new(),
+                    cpu_cores: 0,
+                    memory_total_bytes: 0,
+                    os_name: String::new(),
+                    os_version: String::new(),
+                    kernel_version: String::new(),
+                    boot_id: String::new(),
+                    network_interfaces: Vec::new(),
+                    cidrs: Vec::new(),
+                    agent_version: String::new(),
+                    collected_at: 0,
+                },
                 version: 0,
             },
             Err(e) => {
@@ -396,7 +446,22 @@ impl NodeRepository for NatsNodeRepository {
             });
             let facts = facts_results.get(agent_id).cloned().unwrap_or_else(|| {
                 crate::domain::models::node::NodeFacts {
-                    facts: "{}".to_string(),
+                    facts: AgentFacts {
+                        agent_id: agent_id.clone().into(),
+                        hostname: String::new(),
+                        primary_ip: String::new(),
+                        cpu_arch: String::new(),
+                        cpu_cores: 0,
+                        memory_total_bytes: 0,
+                        os_name: String::new(),
+                        os_version: String::new(),
+                        kernel_version: String::new(),
+                        boot_id: String::new(),
+                        network_interfaces: Vec::new(),
+                        cidrs: Vec::new(),
+                        agent_version: String::new(),
+                        collected_at: 0,
+                    },
                     version: 0,
                 }
             });
@@ -458,9 +523,8 @@ impl NodeRepository for NatsNodeRepository {
             updated_by: "oasis-server".to_string(),
         };
 
-        let data = rmp_serde::to_vec(&core_labels).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })?;
+        let proto: oasis_core::proto::AgentLabels = (&core_labels).into();
+        let data = oasis_core::proto_impls::encoding::to_vec(&proto);
 
         labels_store
             .put(&key, data.into())

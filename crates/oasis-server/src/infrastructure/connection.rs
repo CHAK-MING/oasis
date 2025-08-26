@@ -9,7 +9,7 @@ pub async fn create_jetstream_context_with_config(
 ) -> Result<jetstream::Context> {
     info!("Connecting to NATS (JetStream) url={}", config.url);
 
-    // 最多 3 次尝试，指数退避
+    // TODO：手动退避，需要修改。
     let mut delay_ms = 300u64;
     for attempt in 1..=3 {
         match NatsClientFactory::connect_with_config(config).await {

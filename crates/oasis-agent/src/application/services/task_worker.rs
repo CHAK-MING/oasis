@@ -15,6 +15,7 @@ use oasis_core::{
     rate_limit::RateLimiterCollection,
     task::{TaskExecution, TaskSpec},
 };
+use prost::Message;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -104,8 +105,8 @@ impl TaskWorker {
         &self,
         msg: &async_nats::jetstream::Message,
     ) -> Result<oasis_core::types::TaskSpec> {
-        match serde_json::from_slice(&msg.payload) {
-            Ok(task_spec) => Ok(task_spec),
+        match oasis_core::proto::TaskSpecMsg::decode(msg.payload.as_ref()) {
+            Ok(proto) => Ok(oasis_core::types::TaskSpec::from(&proto)),
             Err(e) => {
                 // 无法反序列化任务，发送 DLQ 以便后续审计
                 match self
@@ -198,29 +199,35 @@ impl TaskWorker {
         task_spec: &oasis_core::types::TaskSpec,
         msg: &async_nats::jetstream::Message,
     ) -> Result<()> {
-        #[derive(Deserialize)]
-        struct ApplyJson {
-            object_name: String,
-            destination: String,
-            #[allow(dead_code)]
-            sha256: Option<String>,
-            #[allow(dead_code)]
-            size: Option<u64>,
-            mode: Option<String>,
-            owner: Option<String>, // user:group
-        }
-
-        let payload = task_spec.args.get(0).cloned().unwrap_or_default();
-        let cfg: ApplyJson = match serde_json::from_str(&payload) {
-            Ok(v) => v,
+        // 解析为 Protobuf ApplyFileRequest（base64 编码的 protobuf）
+        let payload_b64 = task_spec.args.get(0).cloned().unwrap_or_default();
+        let payload_bytes = match base64::engine::general_purpose::STANDARD.decode(payload_b64) {
+            Ok(b) => b,
             Err(e) => {
-                self.send_dlq_and_ack(task_spec, &format!("file-apply invalid json: {}", e), msg).await?;
+                self.send_dlq_and_ack(task_spec, &format!("file-apply invalid base64: {}", e), msg)
+                    .await?;
                 return Ok(());
             }
         };
-
-        if cfg.object_name.is_empty() || cfg.destination.is_empty() {
-            self.send_dlq_and_ack(task_spec, "file-apply missing object_name or destination", msg).await?;
+        let apply_req = match oasis_core::proto::ApplyFileRequest::decode(payload_bytes.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                self.send_dlq_and_ack(
+                    task_spec,
+                    &format!("file-apply invalid protobuf: {}", e),
+                    msg,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if apply_req.object_name.is_empty() || apply_req.destination_path.is_empty() {
+            self.send_dlq_and_ack(
+                task_spec,
+                "file-apply missing object_name or destination",
+                msg,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -232,21 +239,24 @@ impl TaskWorker {
         {
             Ok(s) => s,
             Err(e) => {
-                self.send_dlq_and_ack(task_spec, &format!("object-store bind failed: {}", e), msg).await?;
+                self.send_dlq_and_ack(task_spec, &format!("object-store bind failed: {}", e), msg)
+                    .await?;
                 return Ok(());
             }
         };
-        let mut obj = match os.get(cfg.object_name.as_str()).await {
+        let mut obj = match os.get(apply_req.object_name.as_str()).await {
             Ok(o) => o,
             Err(e) => {
-                self.send_dlq_and_ack(task_spec, &format!("object not found: {}", e), msg).await?;
+                self.send_dlq_and_ack(task_spec, &format!("object not found: {}", e), msg)
+                    .await?;
                 return Ok(());
             }
         };
         use tokio::io::AsyncReadExt as _;
         let mut data = Vec::new();
         if let Err(e) = obj.read_to_end(&mut data).await {
-            self.send_dlq_and_ack(task_spec, &format!("object read failed: {}", e), msg).await?;
+            self.send_dlq_and_ack(task_spec, &format!("object read failed: {}", e), msg)
+                .await?;
             return Ok(());
         }
 
@@ -257,22 +267,17 @@ impl TaskWorker {
         ];
 
         // 解析权限/所有者设置
-        let perms = cfg
-            .mode
-            .as_ref()
-            .and_then(|m| u32::from_str_radix(m.trim_start_matches('0'), 8).ok())
-            .unwrap_or(0o644);
-        let (owner_user, owner_group) = cfg
+        let perms = u32::from_str_radix(apply_req.mode.trim_start_matches('0'), 8).unwrap_or(0o644);
+        let (owner_user, owner_group) = apply_req
             .owner
-            .as_ref()
-            .and_then(|s| s.split_once(':'))
+            .split_once(':')
             .map(|(u, g)| (Some(u.to_string()), Some(g.to_string())))
             .unwrap_or((None, None));
 
         // 构造请求并执行原子落地
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
         let req = FileApplyRequest {
-            path: cfg.destination,
+            path: apply_req.destination_path,
             content_b64: b64,
             permissions: perms,
             owner: owner_user,
@@ -283,7 +288,8 @@ impl TaskWorker {
             .apply_with_roots(&req, &allowed_roots)
             .await
         {
-            self.send_dlq_and_ack(task_spec, &format!("file-apply failed: {}", e), msg).await?;
+            self.send_dlq_and_ack(task_spec, &format!("file-apply failed: {}", e), msg)
+                .await?;
             return Ok(());
         }
 
@@ -310,7 +316,7 @@ impl TaskWorker {
         let mut task = Task::new(task_spec.clone());
         task.start()?;
         let start_time = std::time::Instant::now();
-        
+
         let (exit_code, stdout, stderr) = {
             match self
                 .executor
@@ -337,7 +343,7 @@ impl TaskWorker {
                 }
             }
         };
-        
+
         let duration_ms = start_time.elapsed().as_millis() as u64;
         // 只有在任务还没有失败的情况下才更新状态
         if exit_code == 0 {
@@ -348,7 +354,7 @@ impl TaskWorker {
                 task.fail(format!("Command failed with exit code: {}", exit_code))?;
             }
         }
-        
+
         let result = TaskExecution {
             task_id: task.spec.id.clone(),
             agent_id: oasis_core::types::AgentId::from(self.agent_id.clone()),

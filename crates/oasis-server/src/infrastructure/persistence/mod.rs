@@ -13,17 +13,6 @@ pub mod utils {
         }
     }
 
-    pub fn to_json_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, CoreError> {
-        serde_json::to_vec(value).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })
-    }
-
-    pub fn from_json_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, CoreError> {
-        serde_json::from_slice(bytes).map_err(|e| CoreError::Serialization {
-            message: e.to_string(),
-        })
-    }
 
     pub async fn ensure_kv(
         js: &async_nats::jetstream::Context,

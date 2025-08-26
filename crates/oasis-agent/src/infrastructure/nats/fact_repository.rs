@@ -1,7 +1,6 @@
 use crate::application::ports::fact_repository::FactRepositoryPort;
 use async_nats::Client;
 use oasis_core::{agent::AgentFacts, error::Result};
-use rmp_serde;
 
 pub struct NatsFactRepository {
     client: Client,
@@ -22,11 +21,9 @@ impl NatsFactRepository {
 #[async_trait::async_trait]
 impl FactRepositoryPort for NatsFactRepository {
     async fn publish_agent_facts(&self, facts: &AgentFacts) -> Result<()> {
-        // 序列化为 MessagePack
-        let data = rmp_serde::to_vec(facts)
-            .map_err(|e| oasis_core::error::CoreError::Internal {
-                message: format!("Failed to serialize AgentFacts: {}", e),
-            })?;
+        // 转为 Proto 并使用 Protobuf (prost) 编码
+        let proto: oasis_core::proto::AgentFacts = facts.into();
+        let data = oasis_core::proto_impls::encoding::to_vec(&proto);
 
         // 发布到 NATS KV
         let js = async_nats::jetstream::new(self.client.clone());
@@ -36,11 +33,11 @@ impl FactRepositoryPort for NatsFactRepository {
             }
         })?;
 
-        kv.put(&self.key, data.into()).await.map_err(|e| {
-            oasis_core::error::CoreError::Nats {
+        kv.put(&self.key, data.into())
+            .await
+            .map_err(|e| oasis_core::error::CoreError::Nats {
                 message: format!("Failed to put facts to KV: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(())
     }

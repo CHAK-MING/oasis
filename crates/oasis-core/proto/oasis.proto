@@ -163,7 +163,7 @@ message GetNodeFactsRequest {
 }
 
 message GetNodeFactsResponse {
-  string facts_json = 1; // JSON serialized AgentFacts
+  AgentFacts facts = 1;
 }
 
 message ListNodesRequest {
@@ -174,7 +174,7 @@ message ListNodesRequest {
 message NodeInfo {
   AgentId agent_id = 1;
   bool is_online = 2;
-  string facts_json = 3; // JSON serialized AgentFacts
+  AgentFacts facts = 3;
   map<string, string> labels = 4;
 }
 
@@ -335,4 +335,87 @@ message RolloutMsg {
   int64 created_at = 14;
   int64 updated_at = 15;
   uint64 version = 16;
+}
+
+// ===== Agent structured messages =====
+
+message NetworkInterfaceMsg {
+  string name = 1;
+  optional string mac = 2;
+  repeated string ipv4 = 3;
+  repeated string ipv6 = 4;
+}
+
+enum AgentStatusEnum {
+  AGENT_ONLINE = 0;
+  AGENT_OFFLINE = 1;
+  AGENT_BUSY = 2;
+}
+
+message AgentFacts {
+  AgentId agent_id = 1;
+  string hostname = 2;
+  string primary_ip = 3;
+  string cpu_arch = 4;
+  uint32 cpu_cores = 5;
+  uint64 memory_total_bytes = 6;
+  string os_name = 7;
+  string os_version = 8;
+  string kernel_version = 9;
+  string boot_id = 10;
+  repeated NetworkInterfaceMsg network_interfaces = 11;
+  repeated string cidrs = 12;
+  string agent_version = 13;
+  int64 collected_at = 14;
+}
+
+message AgentHeartbeat {
+  AgentId agent_id = 1;
+  AgentStatusEnum status = 2;
+  int64 last_seen = 3;
+  uint64 sequence = 4;
+}
+
+// ===== Task execution result (internal Pub/Sub over NATS) =====
+message TaskExecutionMsg {
+  TaskId task_id = 1;
+  AgentId agent_id = 2;
+  string stdout = 3;
+  string stderr = 4;
+  int32 exit_code = 5; // -1 if not available
+  int64 timestamp = 6;
+  uint64 duration_ms = 7;
+}
+
+// ===== Agent labels (KV) =====
+message AgentLabels {
+  AgentId agent_id = 1;
+  map<string, string> labels = 2;
+  int64 updated_at = 3;
+  string updated_by = 4;
+}
+
+// ===== Leader election =====
+message LeaderInfoMsg {
+  string instance_id = 1;
+  int64 elected_at = 2;
+  int64 last_renewal = 3;
+}
+
+// ===== File metadata =====
+message FileMetadataMsg {
+  string name = 1;
+  uint64 size = 2;
+  string checksum = 3;
+  string content_type = 4;
+  int64 uploaded_at = 5;
+}
+
+// ===== Dead letter (DLQ) =====
+message DeadLetterEntryMsg {
+  TaskSpecMsg task = 1;
+  string error = 2;
+  AgentId agent_id = 3;
+  uint32 retry_count = 4;
+  int64 timestamp = 5;
 }

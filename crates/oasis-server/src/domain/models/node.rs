@@ -20,7 +20,7 @@ pub struct NodeLabels {
 /// 节点事实信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeFacts {
-    pub facts: String, // JSON 格式的事实信息
+    pub facts: oasis_core::agent::AgentFacts,
     pub version: u64,
 }
 
@@ -55,8 +55,18 @@ impl Node {
     pub fn to_attributes(&self) -> NodeAttributes {
         let groups: Vec<String> = self.groups.clone();
 
-        let custom_facts: HashMap<String, String> =
-            serde_json::from_str(&self.facts.facts).unwrap_or_default();
+        // 将结构化 facts 的部分字段映射为可被选择器使用的自定义键
+        let mut custom_facts: HashMap<String, String> = HashMap::new();
+        custom_facts.insert("hostname".to_string(), self.facts.facts.hostname.clone());
+        custom_facts.insert(
+            "primary_ip".to_string(),
+            self.facts.facts.primary_ip.clone(),
+        );
+        custom_facts.insert("os_name".to_string(), self.facts.facts.os_name.clone());
+        custom_facts.insert(
+            "os_version".to_string(),
+            self.facts.facts.os_version.clone(),
+        );
 
         NodeAttributes {
             id: self.id.clone(),

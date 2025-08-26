@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use oasis_core::error::CoreError;
-use serde::{Deserialize, Serialize};
+use prost::Message;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
@@ -10,16 +10,6 @@ use crate::domain::models::file::{FileInfo, FileUploadResult};
 use crate::infrastructure::persistence::utils as persist;
 
 const OS_META_PREFIX: &str = "__meta"; // sidecar metadata objects to avoid large downloads
-
-/// 文件元数据，存储在 KV Store 中
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FileMetadata {
-    name: String,
-    size: u64,
-    checksum: String,
-    content_type: String,
-    uploaded_at: i64,
-}
 
 /// 文件仓储实现 - 基于NATS对象存储
 pub struct NatsFileRepository {
@@ -112,38 +102,35 @@ impl FileRepository for NatsFileRepository {
             .await
             .map_err(persist::map_nats_err)?;
 
-        // 存储文件元数据到 KV Store
-        let metadata = FileMetadata {
+        // 存储文件元数据到 KV Store（Protobuf）
+        let meta_msg = oasis_core::proto::FileMetadataMsg {
             name: name.to_string(),
             size: data.len() as u64,
             checksum: checksum_hex.clone(),
             content_type: "application/octet-stream".to_string(),
             uploaded_at: chrono::Utc::now().timestamp(),
         };
-
-        let metadata_json = serde_json::to_string(&metadata).map_err(|e| CoreError::Nats {
-            message: format!("Failed to serialize metadata: {}", e),
-        })?;
-
+        let meta_bytes = oasis_core::proto_impls::encoding::to_vec(&meta_msg);
         metadata_store
-            .put(name, metadata_json.into())
+            .put(name, meta_bytes.into())
             .await
             .map_err(persist::map_nats_err)?;
 
         // 额外写入对象存储的元数据 sidecar，避免 KV 缺失时需要下载大文件
         // 路径示例："__meta/<name>.json"
-        let meta_object_name = format!("{}/{}.json", OS_META_PREFIX, name);
-        if let Ok(meta_reader_vec) = serde_json::to_vec(&metadata) {
-            let mut meta_reader = meta_reader_vec.as_slice();
-            // 注意：ObjectStore::put 的第一个参数要求实现 Into<ObjectMetadata>，&str 满足该约束
-            if let Err(e) = store.put(meta_object_name.as_str(), &mut meta_reader).await {
-                tracing::warn!(
-                    file = %name,
-                    sidecar = %meta_object_name,
-                    error = %e,
-                    "Failed to write object-store metadata sidecar"
-                );
-            }
+        let meta_object_name = format!("{}/{}.bin", OS_META_PREFIX, name);
+        let meta_reader = oasis_core::proto_impls::encoding::to_vec(&meta_msg);
+        let mut meta_reader_slice = meta_reader.as_slice();
+        if let Err(e) = store
+            .put(meta_object_name.as_str(), &mut meta_reader_slice)
+            .await
+        {
+            tracing::warn!(
+                file = %name,
+                sidecar = %meta_object_name,
+                error = %e,
+                "Failed to write object-store metadata sidecar"
+            );
         }
 
         Ok(FileUploadResult {
@@ -159,27 +146,27 @@ impl FileRepository for NatsFileRepository {
 
         // 首先尝试从 KV Store 获取元数据（性能最优）
         if let Ok(Some(entry)) = metadata_store.get(name).await {
-            if let Ok(metadata) = serde_json::from_slice::<FileMetadata>(&entry) {
+            if let Ok(p) = oasis_core::proto::FileMetadataMsg::decode(entry.as_ref()) {
                 return Ok(Some(FileInfo {
-                    name: metadata.name,
-                    size: metadata.size,
-                    checksum: metadata.checksum,
-                    content_type: metadata.content_type,
+                    name: p.name,
+                    size: p.size,
+                    checksum: p.checksum,
+                    content_type: p.content_type,
                 }));
             }
         }
 
         // 其次尝试从对象存储的 sidecar 元数据读取（避免下载大文件）
-        let meta_object_name = format!("{}/{}.json", OS_META_PREFIX, name);
+        let meta_object_name = format!("{}/{}.bin", OS_META_PREFIX, name);
         if let Ok(mut meta_obj) = store.get(meta_object_name.as_str()).await {
             let mut meta_buf = Vec::new();
             if meta_obj.read_to_end(&mut meta_buf).await.is_ok() {
-                if let Ok(metadata) = serde_json::from_slice::<FileMetadata>(&meta_buf) {
+                if let Ok(p) = oasis_core::proto::FileMetadataMsg::decode(meta_buf.as_ref()) {
                     return Ok(Some(FileInfo {
-                        name: metadata.name,
-                        size: metadata.size,
-                        checksum: metadata.checksum,
-                        content_type: metadata.content_type,
+                        name: p.name,
+                        size: p.size,
+                        checksum: p.checksum,
+                        content_type: p.content_type,
                     }));
                 }
             }

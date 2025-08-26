@@ -246,7 +246,6 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
 
     // 使用智能解析器统一处理目标
     let target_selector = TargetSelector::parse(&args.target)?;
-    let target_selector = TargetSelector::parse(&args.target)?;
     let target_msg = TaskTargetMsg {
         target: Some(task_target_msg::Target::Selector(
             target_selector.expression().to_string(),

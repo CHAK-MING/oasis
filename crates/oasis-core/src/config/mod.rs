@@ -31,8 +31,9 @@ impl OasisConfig {
 
         let (content, base_dir): (String, std::path::PathBuf) = if let Some(p) = path {
             let p = Path::new(p);
-            let content = std::fs::read_to_string(p)
-                .map_err(|e| anyhow::anyhow!("Failed to read config file at {}: {}", p.display(), e))?;
+            let content = std::fs::read_to_string(p).map_err(|e| {
+                anyhow::anyhow!("Failed to read config file at {}: {}", p.display(), e)
+            })?;
             let base = p.parent().unwrap_or_else(|| Path::new("."));
             (content, base.to_path_buf())
         } else {
@@ -40,7 +41,10 @@ impl OasisConfig {
             if default_path.exists() {
                 let content = std::fs::read_to_string(default_path)
                     .map_err(|e| anyhow::anyhow!("Failed to read config file oasis.toml: {}", e))?;
-                (content, std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()))
+                (
+                    content,
+                    std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
+                )
             } else {
                 return Ok(OasisConfig::default());
             }

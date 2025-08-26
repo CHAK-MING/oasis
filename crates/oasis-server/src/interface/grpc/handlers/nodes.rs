@@ -36,9 +36,11 @@ impl NodeHandlers {
             .get_node_facts(agent_id)
             .await
             .map_err(map_core_error)?;
-        Ok(Response::new(oasis_core::proto::GetNodeFactsResponse {
-            facts_json: facts.map(|nf| nf.facts).unwrap_or_else(|| "{}".to_string()),
-        }))
+        let facts_proto = facts.map(|f| {
+            let af = f.facts;
+            oasis_core::proto::AgentFacts::from(&af)
+        });
+        Ok(Response::new(oasis_core::proto::GetNodeFactsResponse { facts: facts_proto }))
     }
 
     pub async fn list_nodes(
@@ -56,13 +58,16 @@ impl NodeHandlers {
         let ttl_sec = srv.online_ttl_sec();
         let node_infos: Vec<oasis_core::proto::NodeInfo> = nodes
             .into_iter()
-            .map(|node| oasis_core::proto::NodeInfo {
+            .map(|node| {
+                let facts_proto = Some(oasis_core::proto::AgentFacts::from(&node.facts.facts));
+                oasis_core::proto::NodeInfo {
                 agent_id: Some(oasis_core::proto::AgentId {
                     value: node.id.to_string(),
                 }),
                 is_online: node.is_online(ttl_sec),
-                facts_json: node.facts.facts.clone(),
+                facts: facts_proto,
                 labels: node.labels.labels.clone(),
+            }
             })
             .collect();
 
