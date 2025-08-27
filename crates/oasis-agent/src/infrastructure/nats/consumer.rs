@@ -36,6 +36,10 @@ impl NatsConsumer {
                     filter_subject,
                     deliver_policy: jetstream::consumer::DeliverPolicy::All,
                     ack_policy: jetstream::consumer::AckPolicy::Explicit,
+                    max_deliver: oasis_core::constants::DEFAULT_MAX_DELIVER,
+                    // 提高 ack_wait 以覆盖长耗时任务
+                    ack_wait: std::time::Duration::from_secs(120),
+                    max_ack_pending: oasis_core::constants::DEFAULT_MAX_ACK_PENDING,
                     ..Default::default()
                 },
                 constants::JS_STREAM_TASKS,

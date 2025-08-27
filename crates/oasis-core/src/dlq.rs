@@ -36,7 +36,8 @@ impl DeadLetterEntry {
 
     /// 生成通知主题
     pub fn notification_subject(&self) -> String {
-        format!("oasis.dlq.{}", self.agent_id)
+        use crate::constants::dlq_subject_for;
+        dlq_subject_for(&format!("{}.{}", self.agent_id, self.task.id))
     }
 }
 
@@ -58,22 +59,43 @@ pub async fn handle_dead_letter(
     let proto: crate::proto::DeadLetterEntryMsg = entry.into();
     let payload = crate::proto_impls::encoding::to_vec(&proto);
 
-    kv_store
-        .put(&entry.dlq_key(), payload.into())
-        .await
-        .map_err(|e| CoreError::Nats {
-            message: format!("Failed to store DLQ entry: {}", e),
-        })?;
+    // KV 写入加入退避重试，仅对瞬态 NATS 错误重试
+    let backoff = crate::backoff::kv_operations_backoff();
+    crate::backoff::execute_with_backoff_selective(
+        || {
+            let kv = kv_store.clone();
+            let key = entry.dlq_key();
+            let buf: bytes::Bytes = payload.clone().into();
+            async move {
+                kv.put(&key, buf).await.map_err(|e| CoreError::Nats {
+                    message: format!("Failed to store DLQ entry: {}", e),
+                })
+            }
+        },
+        backoff,
+        std::sync::Arc::new(|err: &CoreError| err.is_retriable()),
+    )
+    .await?;
 
     // 发布通知（Protobuf）
     let notification_payload = crate::proto_impls::encoding::to_vec(&proto);
 
-    js_context
-        .publish(entry.notification_subject(), notification_payload.into())
-        .await
-        .map_err(|e| CoreError::Nats {
-            message: format!("Failed to publish DLQ notification: {}", e),
-        })?;
+    // 使用 publish-with-ack 和 backoff 重试
+    let backoff = crate::backoff::network_publish_backoff();
+    crate::backoff::execute_with_backoff(
+        || {
+            let js = js_context.clone();
+            let subject = entry.notification_subject();
+            let payload = notification_payload.clone();
+            async move {
+                js.publish(subject, payload.into())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to publish DLQ notification: {}", e))
+            }
+        },
+        backoff,
+    )
+    .await?;
 
     debug!(
         task_id = %entry.task.id,
@@ -93,12 +115,22 @@ pub async fn publish_dlq(
     let proto: crate::proto::DeadLetterEntryMsg = entry.into();
     let payload = crate::proto_impls::encoding::to_vec(&proto);
 
-    js_context
-        .publish(entry.notification_subject(), payload.into())
-        .await
-        .map_err(|e| CoreError::Nats {
-            message: format!("Failed to publish DLQ: {}", e),
-        })?;
+    // 使用 publish-with-ack 和 backoff 重试
+    let backoff = crate::backoff::network_publish_backoff();
+    crate::backoff::execute_with_backoff(
+        || {
+            let js = js_context.clone();
+            let subject = entry.notification_subject();
+            let payload = payload.clone();
+            async move {
+                js.publish(subject, payload.into())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to publish DLQ: {}", e))
+            }
+        },
+        backoff,
+    )
+    .await?;
 
     debug!(
         task_id = %entry.task.id,

@@ -1,7 +1,11 @@
 use async_nats::HeaderMap;
 use async_trait::async_trait;
 use futures::StreamExt;
-use oasis_core::{error::CoreError, types::TaskExecution};
+use oasis_core::{
+    error::CoreError,
+    rate_limit::{RateLimiterCollection, rate_limited_operation},
+    types::TaskExecution,
+};
 use prost::Message;
 
 use crate::application::ports::repositories::{ResultConsumer, TaskRepository};
@@ -11,178 +15,18 @@ use crate::infrastructure::persistence::utils as persist;
 /// 任务仓储实现 - 基于JetStream
 pub struct NatsTaskRepository {
     jetstream: async_nats::jetstream::Context,
+    limiters: std::sync::Arc<RateLimiterCollection>,
 }
 
 impl NatsTaskRepository {
-    pub fn new(jetstream: async_nats::jetstream::Context) -> Self {
-        Self { jetstream }
-    }
-
-    /// 确保任务流存在
-    async fn ensure_task_stream(&self) -> Result<(), CoreError> {
-        // 首先确保 DLQ 流存在
-        self.ensure_dlq_stream().await?;
-
-        if self
-            .jetstream
-            .get_stream(oasis_core::JS_STREAM_TASKS)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::stream::Config {
-                name: oasis_core::JS_STREAM_TASKS.to_string(),
-                subjects: vec![
-                    "tasks.exec.default".to_string(),
-                    "tasks.exec.agent.>".to_string(),
-                    "tasks.exec.group.>".to_string(),
-                ],
-                retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
-                max_age: std::time::Duration::from_secs(3600), // 1小时
-                duplicate_window: std::time::Duration::from_secs(30),
-                num_replicas: 1,
-                storage: async_nats::jetstream::stream::StorageType::File,
-                max_messages: 10000,
-                max_bytes: 1024 * 1024 * 1024, // 1GB
-                ..Default::default()
-            };
-
-            // 带重试的流创建
-            let mut last_error = None;
-            for attempt in 0..3 {
-                match self.jetstream.create_stream(cfg.clone()).await {
-                    Ok(_) => return Ok(()),
-                    Err(e) => {
-                        last_error = Some(e);
-                        if attempt < 2 {
-                            let backoff = oasis_core::backoff::network_publish_backoff();
-                            let delay = oasis_core::backoff::delay_for_attempt(&backoff, attempt);
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                error = %last_error.as_ref().unwrap(),
-                                delay_ms = delay.as_millis(),
-                                "Retrying task stream creation"
-                            );
-                            tokio::time::sleep(delay).await;
-                        }
-                    }
-                }
-            }
-
-            return Err(CoreError::Nats {
-                message: format!(
-                    "Failed to create task stream after retries: {}",
-                    last_error.unwrap()
-                ),
-            });
+    pub fn new(
+        jetstream: async_nats::jetstream::Context,
+        limiters: std::sync::Arc<RateLimiterCollection>,
+    ) -> Self {
+        Self {
+            jetstream,
+            limiters,
         }
-        Ok(())
-    }
-
-    /// 确保 DLQ 流存在
-    async fn ensure_dlq_stream(&self) -> Result<(), CoreError> {
-        if self
-            .jetstream
-            .get_stream(oasis_core::JS_STREAM_TASKS_DLQ)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::stream::Config {
-                name: oasis_core::JS_STREAM_TASKS_DLQ.to_string(),
-                subjects: vec![oasis_core::JS_STREAM_TASKS_DLQ.to_string()],
-                retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
-                max_age: std::time::Duration::from_secs(24 * 3600), // 24小时
-                num_replicas: 1,
-                storage: async_nats::jetstream::stream::StorageType::File,
-                max_messages: 1000,
-                max_bytes: 100 * 1024 * 1024, // 100MB
-                ..Default::default()
-            };
-
-            // 带重试的流创建
-            let mut last_error = None;
-            for attempt in 0..3 {
-                match self.jetstream.create_stream(cfg.clone()).await {
-                    Ok(_) => {
-                        tracing::info!("DLQ stream created successfully");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        last_error = Some(e);
-                        if attempt < 2 {
-                            let backoff = oasis_core::backoff::network_publish_backoff();
-                            let delay = oasis_core::backoff::delay_for_attempt(&backoff, attempt);
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                error = %last_error.as_ref().unwrap(),
-                                delay_ms = delay.as_millis(),
-                                "Retrying DLQ stream creation"
-                            );
-                            tokio::time::sleep(delay).await;
-                        }
-                    }
-                }
-            }
-
-            return Err(CoreError::Nats {
-                message: format!(
-                    "Failed to create DLQ stream after retries: {}",
-                    last_error.unwrap()
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    /// 确保结果流存在
-    async fn ensure_result_stream(&self) -> Result<(), CoreError> {
-        if self
-            .jetstream
-            .get_stream(oasis_core::JS_STREAM_RESULTS)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::stream::Config {
-                name: oasis_core::JS_STREAM_RESULTS.to_string(),
-                subjects: vec!["results.>".to_string()],
-                retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
-                max_age: std::time::Duration::from_secs(24 * 3600), // 24小时
-                num_replicas: 1,
-                storage: async_nats::jetstream::stream::StorageType::File,
-                max_messages: 100000,
-                max_bytes: 1024 * 1024 * 1024, // 1GB
-                ..Default::default()
-            };
-
-            // 带重试的流创建
-            let mut last_error = None;
-            for attempt in 0..3 {
-                match self.jetstream.create_stream(cfg.clone()).await {
-                    Ok(_) => return Ok(()),
-                    Err(e) => {
-                        last_error = Some(e);
-                        if attempt < 2 {
-                            let backoff = oasis_core::backoff::network_publish_backoff();
-                            let delay = oasis_core::backoff::delay_for_attempt(&backoff, attempt);
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                error = %last_error.as_ref().unwrap(),
-                                delay_ms = delay.as_millis(),
-                                "Retrying result stream creation"
-                            );
-                            tokio::time::sleep(delay).await;
-                        }
-                    }
-                }
-            }
-
-            return Err(CoreError::Nats {
-                message: format!(
-                    "Failed to create result stream after retries: {}",
-                    last_error.unwrap()
-                ),
-            });
-        }
-        Ok(())
     }
 
     /// 确保任务KV存储存在
@@ -258,36 +102,59 @@ impl TaskRepository for NatsTaskRepository {
         task_id: &str,
         agent_id: &str,
     ) -> Result<Option<TaskResult>, CoreError> {
-        self.ensure_result_stream().await?;
+        crate::infrastructure::messaging::streams::ensure_streams(&self.jetstream)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to ensure streams: {}", e),
+            })?;
 
         // 创建临时消费者来获取特定结果（避免资源泄漏）
         let filter_subject = format!("results.{}.{}", task_id, agent_id);
 
-        let consumer = self
-            .jetstream
-            .create_consumer_on_stream(
-                async_nats::jetstream::consumer::pull::Config {
-                    durable_name: None, // 使用临时消费者，避免资源泄漏
-                    filter_subject: filter_subject.clone(),
-                    deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::LastPerSubject,
-                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                    max_deliver: 1,
-                    ..Default::default()
-                },
-                oasis_core::JS_STREAM_RESULTS,
-            )
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to create consumer: {}", e),
-            })?;
+        let consumer = rate_limited_operation(
+            &self.limiters.nats,
+            || async {
+                self.jetstream
+                    .create_consumer_on_stream(
+                        async_nats::jetstream::consumer::pull::Config {
+                            durable_name: None, // 使用临时消费者，避免资源泄漏
+                            filter_subject: filter_subject.clone(),
+                            deliver_policy:
+                                async_nats::jetstream::consumer::DeliverPolicy::LastPerSubject,
+                            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                            max_deliver: 1,
+                            ..Default::default()
+                        },
+                        oasis_core::JS_STREAM_RESULTS,
+                    )
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: e.to_string(),
+                    })
+            },
+            None,
+            "results.consumer.create",
+        )
+        .await?;
 
         // 获取结果
-        let fetch_result = consumer
-            .fetch()
-            .max_messages(1)
-            .expires(std::time::Duration::from_millis(100))
-            .messages()
-            .await;
+        let fetch_result = rate_limited_operation(
+            &self.limiters.nats,
+            || async {
+                consumer
+                    .fetch()
+                    .max_messages(1)
+                    .expires(std::time::Duration::from_millis(100))
+                    .messages()
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: e.to_string(),
+                    })
+            },
+            None,
+            "results.fetch",
+        )
+        .await;
 
         match fetch_result {
             Ok(mut batch) => {
@@ -332,7 +199,11 @@ impl TaskRepository for NatsTaskRepository {
         &self,
         task_agent_pairs: &[(String, String)],
     ) -> Result<Vec<Option<TaskResult>>, CoreError> {
-        self.ensure_result_stream().await?;
+        crate::infrastructure::messaging::streams::ensure_streams(&self.jetstream)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to ensure streams: {}", e),
+            })?;
 
         use futures::stream::{self, StreamExt as _};
 
@@ -344,31 +215,36 @@ impl TaskRepository for NatsTaskRepository {
                 let js = js.clone();
                 async move {
                     let filter_subject = format!("results.{}.{}", task_id, agent_id);
-                    let consumer = match js
-                        .create_consumer_on_stream(
-                            async_nats::jetstream::consumer::pull::Config {
-                                durable_name: None,
-                                filter_subject: filter_subject.clone(),
-                                deliver_policy:
-                                    async_nats::jetstream::consumer::DeliverPolicy::LastPerSubject,
-                                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                                max_deliver: 1,
-                                ..Default::default()
-                            },
-                            oasis_core::JS_STREAM_RESULTS,
-                        )
-                        .await
-                    {
+                    let consumer = match rate_limited_operation(&self.limiters.nats, || async {
+                        js
+                            .create_consumer_on_stream(
+                                async_nats::jetstream::consumer::pull::Config {
+                                    durable_name: None,
+                                    filter_subject: filter_subject.clone(),
+                                    deliver_policy:
+                                        async_nats::jetstream::consumer::DeliverPolicy::LastPerSubject,
+                                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                                    max_deliver: 1,
+                                    ..Default::default()
+                                },
+                                oasis_core::JS_STREAM_RESULTS,
+                            )
+                            .await
+                            .map_err(|e| CoreError::Nats { message: e.to_string() })
+                    }, None, "results.consumer.create").await {
                         Ok(c) => c,
                         Err(_) => return Ok(None),
                     };
 
-                    let fetch_result = consumer
-                        .fetch()
-                        .max_messages(1)
-                        .expires(std::time::Duration::from_millis(100))
-                        .messages()
-                        .await;
+                    let fetch_result = rate_limited_operation(&self.limiters.nats, || async {
+                        consumer
+                            .fetch()
+                            .max_messages(1)
+                            .expires(std::time::Duration::from_millis(100))
+                            .messages()
+                            .await
+                            .map_err(|e| CoreError::Nats { message: e.to_string() })
+                    }, None, "results.fetch").await;
 
                     match fetch_result {
                         Ok(mut batch) => {
@@ -427,38 +303,57 @@ impl TaskRepository for NatsTaskRepository {
     }
 
     async fn stream_results(&self, task_id: &str) -> Result<Vec<TaskResult>, CoreError> {
-        self.ensure_result_stream().await?;
+        crate::infrastructure::messaging::streams::ensure_streams(&self.jetstream)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to ensure streams: {}", e),
+            })?;
 
         // 创建临时消费者来获取所有结果（避免资源泄漏）
         let filter_subject = format!("results.{}.>", task_id);
 
-        let consumer = self
-            .jetstream
-            .create_consumer_on_stream(
-                async_nats::jetstream::consumer::pull::Config {
-                    durable_name: None, // 使用临时消费者，避免资源泄漏
-                    filter_subject: filter_subject.clone(),
-                    deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
-                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                    ..Default::default()
-                },
-                oasis_core::JS_STREAM_RESULTS,
-            )
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to create consumer: {}", e),
-            })?;
+        let consumer = rate_limited_operation(
+            &self.limiters.nats,
+            || async {
+                self.jetstream
+                    .create_consumer_on_stream(
+                        async_nats::jetstream::consumer::pull::Config {
+                            durable_name: None, // 使用临时消费者，避免资源泄漏
+                            filter_subject: filter_subject.clone(),
+                            deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
+                            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                            ..Default::default()
+                        },
+                        oasis_core::JS_STREAM_RESULTS,
+                    )
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: e.to_string(),
+                    })
+            },
+            None,
+            "results.consumer.create",
+        )
+        .await?;
 
         let mut results = Vec::new();
-        let mut batch = consumer
-            .fetch()
-            .max_messages(100)
-            .expires(std::time::Duration::from_millis(2000))
-            .messages()
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to fetch messages: {}", e),
-            })?;
+        let mut batch = rate_limited_operation(
+            &self.limiters.nats,
+            || async {
+                consumer
+                    .fetch()
+                    .max_messages(100)
+                    .expires(std::time::Duration::from_millis(2000))
+                    .messages()
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: e.to_string(),
+                    })
+            },
+            None,
+            "results.fetch",
+        )
+        .await?;
 
         while let Some(Ok(msg)) = batch.next().await {
             if let Ok(proto) = oasis_core::proto::TaskExecutionMsg::decode(msg.payload.as_ref()) {
@@ -504,31 +399,37 @@ impl TaskRepository for NatsTaskRepository {
         &self,
         task_id: &str,
     ) -> Result<Box<dyn ResultConsumer>, CoreError> {
-        self.ensure_result_stream().await?;
+        crate::infrastructure::messaging::streams::ensure_streams(&self.jetstream)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to ensure streams: {}", e),
+            })?;
 
         // 创建消费者配置
         let consumer_name = format!("result-consumer-{}", task_id);
         let filter_subject = format!("results.{}.>", task_id);
 
-        let consumer = self
-            .jetstream
-            .create_consumer_on_stream(
-                async_nats::jetstream::consumer::pull::Config {
-                    durable_name: Some(consumer_name.clone()),
-                    filter_subject: filter_subject.clone(),
-                    deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
-                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                    max_deliver: 3,
-                    ack_wait: std::time::Duration::from_secs(30),
-                    max_ack_pending: 100,
-                    ..Default::default()
-                },
-                oasis_core::JS_STREAM_RESULTS,
-            )
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to create consumer: {}", e),
-            })?;
+        let consumer = rate_limited_operation(
+            &self.limiters.nats,
+            || async {
+                crate::infrastructure::messaging::streams::create_standard_pull_consumer(
+                    &self.jetstream,
+                    oasis_core::JS_STREAM_RESULTS,
+                    consumer_name.clone(),
+                    filter_subject.clone(),
+                    std::time::Duration::from_secs(30),
+                    3,
+                    100,
+                )
+                .await
+                .map_err(|e| CoreError::Nats {
+                    message: e.to_string(),
+                })
+            },
+            None,
+            "results.consumer.create",
+        )
+        .await?;
 
         Ok(Box::new(NatsResultConsumer {
             consumer,
@@ -537,7 +438,12 @@ impl TaskRepository for NatsTaskRepository {
     }
 
     async fn publish(&self, task: Task) -> Result<String, CoreError> {
-        self.ensure_task_stream().await?;
+        // 使用统一的流确保函数，避免重复实现
+        crate::infrastructure::messaging::streams::ensure_streams(&self.jetstream)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to ensure streams: {}", e),
+            })?;
 
         // 使用任务本身的 ID，保持端到端一致
         let task_id = task.id.clone();
@@ -559,12 +465,28 @@ impl TaskRepository for NatsTaskRepository {
 
             // 轻量重试（最多 3 次）并等待 Publish Ack
             let mut last_err: Option<CoreError> = None;
+            // 限流 + 带 ack 的发布 + 失败退避（3 次）
             for attempt in 0..3u32 {
-                match self
-                    .jetstream
-                    .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
-                    .await
-                {
+                let publish_result = rate_limited_operation(
+                    &self.limiters.nats,
+                    || async {
+                        self.jetstream
+                            .publish_with_headers(
+                                subject.clone(),
+                                headers.clone(),
+                                data.clone().into(),
+                            )
+                            .await
+                            .map_err(|e| CoreError::Nats {
+                                message: e.to_string(),
+                            })
+                    },
+                    None,
+                    "tasks.publish",
+                )
+                .await;
+
+                match publish_result {
                     Ok(ack_future) => match ack_future.await {
                         Ok(_) => {
                             last_err = None;
@@ -577,9 +499,7 @@ impl TaskRepository for NatsTaskRepository {
                         }
                     },
                     Err(e) => {
-                        last_err = Some(CoreError::Nats {
-                            message: e.to_string(),
-                        });
+                        last_err = Some(e);
                     }
                 }
 

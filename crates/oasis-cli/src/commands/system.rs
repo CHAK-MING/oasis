@@ -456,7 +456,7 @@ async fn check_certificates_exist() -> Result<bool> {
 async fn find_server_processes() -> Result<Vec<u32>> {
     let output = std::process::Command::new("pgrep")
         .arg("-f")
-        .arg("^.*oasis-server$")
+        .arg("oasis-server")
         .output()
         .context("Failed to find server processes")?;
 

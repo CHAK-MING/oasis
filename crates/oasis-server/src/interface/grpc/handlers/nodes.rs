@@ -40,7 +40,9 @@ impl NodeHandlers {
             let af = f.facts;
             oasis_core::proto::AgentFacts::from(&af)
         });
-        Ok(Response::new(oasis_core::proto::GetNodeFactsResponse { facts: facts_proto }))
+        Ok(Response::new(oasis_core::proto::GetNodeFactsResponse {
+            facts: facts_proto,
+        }))
     }
 
     pub async fn list_nodes(
@@ -61,13 +63,13 @@ impl NodeHandlers {
             .map(|node| {
                 let facts_proto = Some(oasis_core::proto::AgentFacts::from(&node.facts.facts));
                 oasis_core::proto::NodeInfo {
-                agent_id: Some(oasis_core::proto::AgentId {
-                    value: node.id.to_string(),
-                }),
-                is_online: node.is_online(ttl_sec),
-                facts: facts_proto,
-                labels: node.labels.labels.clone(),
-            }
+                    agent_id: Some(oasis_core::proto::AgentId {
+                        value: node.id.to_string(),
+                    }),
+                    is_online: node.is_online(ttl_sec),
+                    facts: facts_proto,
+                    labels: node.labels.labels.clone(),
+                }
             })
             .collect();
 

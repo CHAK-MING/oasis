@@ -4,7 +4,7 @@ use oasis_core::{
     selector::{CelSelector, NodeAttributes},
 };
 
-/// 选择器引擎 - 领域服务（精简版）
+/// 选择器引擎
 #[async_trait]
 pub trait SelectorEngine: Send + Sync {
     async fn resolve(
@@ -14,7 +14,7 @@ pub trait SelectorEngine: Send + Sync {
     ) -> Result<Vec<String>, CoreError>;
 }
 
-/// CEL 选择器引擎（无额外缓存，直接使用 core 的实现与缓存）
+/// CEL 选择器引擎
 #[derive(Default)]
 pub struct CelSelectorEngine;
 

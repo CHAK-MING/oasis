@@ -23,7 +23,7 @@ impl GrpcServiceFactory {
         );
 
         // 使用基础设施DI容器创建应用程序上下文
-        let di_container = InfrastructureDiContainer::new(jetstream.clone(), heartbeat_ttl_sec);
+        let di_container = InfrastructureDiContainer::new(jetstream.clone());
         let context = di_container.create_application_context()?;
 
         let server = crate::interface::grpc::server::OasisServer::new(
@@ -66,6 +66,9 @@ impl GrpcServiceFactory {
             health_service,
         )
         .await?;
+
+        // 将 tonic_health reporter 注册给 HealthService（如果可用）
+        // 实际 reporter 由 server_manager 创建并注入；此处无需重复
 
         let svc = oasis_core::proto::oasis_service_server::OasisServiceServer::new(server);
         Ok(svc)

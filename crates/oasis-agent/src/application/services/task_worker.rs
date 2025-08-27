@@ -11,12 +11,12 @@ use base64::Engine as _;
 use oasis_core::{
     backoff::{execute_with_backoff, network_publish_backoff},
     constants,
-    dlq::{DeadLetterEntry, publish_dlq},
+    dlq::{DeadLetterEntry, handle_dead_letter, publish_dlq},
     rate_limit::RateLimiterCollection,
     task::{TaskExecution, TaskSpec},
+    types::TaskId,
 };
 use prost::Message;
-use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::error;
@@ -29,6 +29,7 @@ pub struct TaskWorker {
     labels_repo: Arc<NatsAttributesRepository>,
     agent_id: String,
     dlq_js: Arc<async_nats::jetstream::Context>,
+    dlq_kv: Arc<RwLock<Option<async_nats::jetstream::kv::Store>>>,
     limiters: Arc<RateLimiterCollection>,
 }
 
@@ -51,14 +52,24 @@ impl TaskWorker {
             labels_repo,
             agent_id,
             dlq_js,
+            dlq_kv: Arc::new(RwLock::new(None)),
             limiters,
         }
     }
 
     /// 安全发布任务结果（包含限流+重试逻辑）
     async fn publish_task_result_safely(&self, result: &TaskExecution) -> Result<()> {
+        // 检查结果是否已发送过
+        {
+            let agent = self.agent.read().await;
+            if agent.is_result_sent(&result.task_id) {
+                tracing::debug!(task_id = %result.task_id, "Result already sent, skipping");
+                return Ok(());
+            }
+        }
+
         let limiters = self.limiters.clone();
-        oasis_core::rate_limit::rate_limited_operation(
+        let publish_result = oasis_core::rate_limit::rate_limited_operation(
             &limiters.task_publish,
             || async {
                 execute_with_backoff(
@@ -78,7 +89,15 @@ impl TaskWorker {
             None,
             "results.publish",
         )
-        .await
+        .await;
+
+        // 如果发布成功，标记结果为已发送
+        if publish_result.is_ok() {
+            let mut agent = self.agent.write().await;
+            agent.mark_result_sent(result.task_id.clone());
+        }
+
+        publish_result
     }
 
     /// 安全确认消息（包含错误日志）
@@ -199,6 +218,17 @@ impl TaskWorker {
         task_spec: &oasis_core::types::TaskSpec,
         msg: &async_nats::jetstream::Message,
     ) -> Result<()> {
+        // 在长 I/O 期间发送 Progress ACK（轻量）
+        let msg_for_progress = msg.clone();
+        let progress_handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                ticker.tick().await;
+                let _ = msg_for_progress
+                    .ack_with(async_nats::jetstream::AckKind::Progress)
+                    .await;
+            }
+        });
         // 解析为 Protobuf ApplyFileRequest（base64 编码的 protobuf）
         let payload_b64 = task_spec.args.get(0).cloned().unwrap_or_default();
         let payload_bytes = match base64::engine::general_purpose::STANDARD.decode(payload_b64) {
@@ -260,7 +290,7 @@ impl TaskWorker {
             return Ok(());
         }
 
-        // 获取允许的根目录列表（硬编码）
+        // TODO：获取允许的根目录列表（硬编码）
         let allowed_roots: Vec<std::path::PathBuf> = vec![
             std::path::PathBuf::from("/tmp"),
             std::path::PathBuf::from("/var/tmp"),
@@ -303,6 +333,7 @@ impl TaskWorker {
             duration_ms: 0,
         };
         self.publish_task_result_safely(&result).await?;
+        progress_handle.abort();
         self.ack_message_safely(msg).await;
         Ok(())
     }
@@ -316,6 +347,18 @@ impl TaskWorker {
         let mut task = Task::new(task_spec.clone());
         task.start()?;
         let start_time = std::time::Instant::now();
+
+        // 在长任务期间周期性发送 Progress ACK，防止处理中被重投递
+        let msg_for_progress = msg.clone();
+        let progress_handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                ticker.tick().await;
+                let _ = msg_for_progress
+                    .ack_with(async_nats::jetstream::AckKind::Progress)
+                    .await;
+            }
+        });
 
         let (exit_code, stdout, stderr) = {
             match self
@@ -365,6 +408,8 @@ impl TaskWorker {
             duration_ms,
         };
         self.publish_task_result_safely(&result).await?;
+        // 停止进度 ACK 发送
+        progress_handle.abort();
         self.ack_message_safely(msg).await;
         Ok(())
     }
@@ -375,11 +420,58 @@ impl TaskWorker {
             Err(_) => return Ok(()), // 错误已在deserialize_task_spec中处理
         };
 
+        // 检查任务是否已处理过
+        {
+            let agent = self.agent.read().await;
+            if agent.is_task_processed(&task_spec.id) {
+                tracing::info!(task_id = %task_spec.id, "Task already processed, skipping");
+                self.ack_message_safely(&msg).await;
+                return Ok(());
+            }
+        }
+
+        // 标记任务为已处理（在开始处理前）
+        {
+            let mut agent = self.agent.write().await;
+            agent.mark_task_processed(task_spec.id.clone());
+        }
+
+        // 保存任务开始状态到 KV（可选，用于恢复）
+        let _ = self.save_task_state(&task_spec.id, "started").await;
+
         match task_spec.command.as_str() {
             constants::CMD_LABELS_UPDATE => self.handle_labels_update(&task_spec, &msg).await,
             constants::CMD_FILE_APPLY => self.handle_file_apply(&task_spec, &msg).await,
             _ => self.handle_shell_command(&task_spec, &msg).await,
         }
+    }
+
+    /// 保存任务状态到 KV 存储（用于恢复）
+    async fn save_task_state(&self, task_id: &TaskId, state: &str) -> Result<()> {
+        let key = oasis_core::constants::kv_key_task_state(&self.agent_id, task_id.as_str());
+        let state_data = serde_json::json!({
+            "agent_id": self.agent_id,
+            "task_id": task_id.as_str(),
+            "state": state,
+            "timestamp": chrono::Utc::now().timestamp()
+        });
+
+        if let Ok(kv) = self
+            .dlq_js
+            .get_key_value(oasis_core::JS_KV_TASK_STATE)
+            .await
+        {
+            let _ = kv
+                .put(
+                    &key,
+                    serde_json::to_string(&state_data)
+                        .unwrap_or_default()
+                        .into(),
+                )
+                .await;
+        }
+
+        Ok(())
     }
 
     async fn send_dlq(&self, task_spec: &TaskSpec, error_msg: &str) -> Result<()> {
@@ -389,11 +481,52 @@ impl TaskWorker {
             oasis_core::types::AgentId::from(self.agent_id.clone()),
             0,
         );
-        publish_dlq(&self.dlq_js, &entry)
+        // 确保 KV 绑定（惰性获取）
+        {
+            let mut guard = self.dlq_kv.write().await;
+            if guard.is_none() {
+                match self.dlq_js.get_key_value(oasis_core::JS_KV_DLQ).await {
+                    Ok(kv) => {
+                        *guard = Some(kv);
+                    }
+                    Err(e) => {
+                        // 如果 KV 不存在或绑定失败，回退到仅发布 DLQ
+                        tracing::warn!("DLQ KV not available: {}. Fallback to publish only.", e);
+                    }
+                }
+            }
+        }
+
+        // 限流后优先写入 KV + 发布通知；如果 KV 不可用则仅发布
+        if let Some(kv) = self.dlq_kv.read().await.clone() {
+            oasis_core::rate_limit::rate_limited_operation(
+                &self.limiters.nats,
+                || async {
+                    handle_dead_letter(&kv, &self.dlq_js, &entry)
+                        .await
+                        .map_err(|e| CoreError::Nats {
+                            message: e.to_string(),
+                        })
+                },
+                None,
+                "dlq.handle",
+            )
             .await
-            .map_err(|e| CoreError::Nats {
-                message: e.to_string(),
-            })
+        } else {
+            oasis_core::rate_limit::rate_limited_operation(
+                &self.limiters.nats,
+                || async {
+                    publish_dlq(&self.dlq_js, &entry)
+                        .await
+                        .map_err(|e| CoreError::Nats {
+                            message: e.to_string(),
+                        })
+                },
+                None,
+                "dlq.publish",
+            )
+            .await
+        }
     }
 
     async fn send_dlq_minimal(

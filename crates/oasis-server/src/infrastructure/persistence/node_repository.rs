@@ -17,76 +17,23 @@ use crate::infrastructure::persistence::utils as persist;
 /// 节点仓储实现 - 基于NATS KV存储
 pub struct NatsNodeRepository {
     jetstream: async_nats::jetstream::Context,
-    heartbeat_ttl_sec: u64,
     kv_initialized: OnceCell<()>,
 }
 
 impl NatsNodeRepository {
-    pub fn new(jetstream: async_nats::jetstream::Context, heartbeat_ttl_sec: u64) -> Self {
+    pub fn new(jetstream: async_nats::jetstream::Context) -> Self {
         Self {
             jetstream,
-            heartbeat_ttl_sec,
             kv_initialized: OnceCell::const_new(),
         }
     }
 
-    /// 确保KV存储存在
+    /// 统一在系统启动阶段保证 KV 存在；此处不再创建，仅做一次性标记
     async fn ensure_kv_stores(&self) -> Result<(), CoreError> {
         if self.kv_initialized.get().is_some() {
             return Ok(());
         }
         let _ = self.kv_initialized.get_or_init(|| async { () }).await;
-        // 确保心跳KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_HEARTBEAT)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::kv::Config {
-                bucket: JS_KV_NODE_HEARTBEAT.to_string(),
-                description: "Agent heartbeat (TTL-based cleanup)".to_string(),
-                max_age: std::time::Duration::from_secs(self.heartbeat_ttl_sec),
-                history: 1,
-                ..Default::default()
-            };
-            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
-        }
-
-        // 确保facts KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_FACTS)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::kv::Config {
-                bucket: JS_KV_NODE_FACTS.to_string(),
-                description: "Agent facts (versioned, no TTL)".to_string(),
-                history: 50,
-                max_value_size: 65536,
-                ..Default::default()
-            };
-            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
-        }
-
-        // 确保labels KV存储存在
-        if self
-            .jetstream
-            .get_key_value(JS_KV_NODE_LABELS)
-            .await
-            .is_err()
-        {
-            let cfg = async_nats::jetstream::kv::Config {
-                bucket: JS_KV_NODE_LABELS.to_string(),
-                description: "Agent labels (versioned, no TTL)".to_string(),
-                history: 50,
-                max_value_size: 65536,
-                ..Default::default()
-            };
-            persist::ensure_kv_with_config(&self.jetstream, cfg).await?;
-        }
-
         Ok(())
     }
 

@@ -8,7 +8,7 @@ pub struct CommandExecutor {
 impl CommandExecutor {
     pub fn new() -> Self {
         Self {
-            command_timeout_sec: 300, // 硬编码 5 分钟超时
+            command_timeout_sec: 300, 
         }
     }
 

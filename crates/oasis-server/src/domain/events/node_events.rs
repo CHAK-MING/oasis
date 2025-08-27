@@ -16,10 +16,6 @@ pub enum NodeEvent {
         timestamp: DateTime<Utc>,
     },
     /// 节点心跳更新
-    HeartbeatUpdated {
-        node_id: String,
-        timestamp: DateTime<Utc>,
-    },
     /// 节点标签更新
     LabelsUpdated {
         node_id: String,

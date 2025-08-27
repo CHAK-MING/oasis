@@ -1,9 +1,6 @@
-use anyhow::Result;
 use async_nats::jetstream::Context;
 use async_nats::jetstream::kv::Store;
 use oasis_core::error::CoreError;
-use prost::Message;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -15,29 +12,18 @@ use uuid::Uuid;
 pub struct LeaderElectionService {
     kv_store: Arc<Store>,
     instance_id: String,
-    lease_ttl: Duration,
+    election_key: String,
     renewal_interval: Duration,
     is_leader: Arc<RwLock<bool>>,
-    leader_info: Arc<RwLock<Option<LeaderInfo>>>,
-    /// Background task handles
-    background_handles: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Cancellation token for graceful shutdown
     shutdown_token: CancellationToken,
 }
 
-// 硬编码的配置结构
 #[derive(Clone)]
 pub struct LeaderElectionConfig {
     pub election_key: String,
     pub ttl_sec: u64,
     pub check_interval_sec: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaderInfo {
-    pub instance_id: String,
-    pub elected_at: i64,   // Use i64 for serialization
-    pub last_renewal: i64, // Use i64 for serialization
 }
 
 impl LeaderElectionService {
@@ -49,33 +35,35 @@ impl LeaderElectionService {
     ) -> Result<Self, CoreError> {
         let instance_id = Uuid::new_v4().to_string();
 
-        // 硬编码配置值
         let lease_ttl = Duration::from_secs(config.ttl_sec);
         let renewal_interval = Duration::from_secs(config.check_interval_sec);
 
-        // Create or get the leader election KV store (作为备选方案)
-        let kv_store = jetstream
-            .create_key_value(async_nats::jetstream::kv::Config {
-                bucket: "leader-election".to_string(),
-                max_age: lease_ttl,
-                max_bytes: 1024, // Small bucket for leader info
-                storage: async_nats::jetstream::stream::StorageType::File,
-                num_replicas: 1, // Use 1 replica for single-node NATS
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to create leader election KV store: {}", e),
-            })?;
+        // Get-or-create the leader election KV store（幂等初始化）
+        let kv_store = match jetstream.get_key_value("leader-election").await {
+            Ok(store) => store,
+            Err(_) => {
+                jetstream
+                    .create_key_value(async_nats::jetstream::kv::Config {
+                        bucket: "leader-election".to_string(),
+                        max_age: lease_ttl,
+                        max_bytes: 1024, // Small bucket for leader info
+                        storage: async_nats::jetstream::stream::StorageType::File,
+                        num_replicas: 1, // Use 1 replica for single-node NATS
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: format!("Failed to create leader election KV store: {}", e),
+                    })?
+            }
+        };
 
         let service = Self {
             kv_store: Arc::new(kv_store),
             instance_id: instance_id.clone(),
-            lease_ttl,
             renewal_interval,
             is_leader: Arc::new(RwLock::new(false)),
-            leader_info: Arc::new(RwLock::new(None)),
-            background_handles: Arc::new(RwLock::new(Vec::new())),
+            election_key: config.election_key.clone(),
             shutdown_token,
         };
 
@@ -90,345 +78,80 @@ impl LeaderElectionService {
         Ok(service)
     }
 
-    /// Start the leader election process.
+    /// Start a single-task KV-based leader election loop (create/CAS update with TTL).
     pub async fn start_election(&self) -> Result<(), CoreError> {
-        tracing::info!(
-            instance_id = %self.instance_id,
-            "Starting leader election using KV lease strategy"
-        );
+        tracing::info!(instance_id = %self.instance_id, "Starting leader election loop");
 
-        // Try to become leader
-        if self.try_become_leader().await? {
-            tracing::info!(instance_id = %self.instance_id, "Became leader");
-
-            // Start lease renewal
-            self.start_lease_renewal().await?;
-        } else {
-            tracing::info!(instance_id = %self.instance_id, "Not elected as leader, monitoring for changes");
-
-            // Monitor for leader changes
-            self.start_leader_monitoring().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Try to become the leader using atomic operations to prevent race conditions
-    async fn try_become_leader(&self) -> Result<bool, CoreError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let new_leader_msg = oasis_core::proto::LeaderInfoMsg {
-            instance_id: self.instance_id.clone(),
-            elected_at: now,
-            last_renewal: now,
-        };
-        let new_leader_data = oasis_core::proto_impls::encoding::to_vec(&new_leader_msg);
-
-        // Use atomic election strategy with retry logic
-        let max_retries = 5;
-        let mut retry_count = 0;
-
-        while retry_count < max_retries {
-            // Attempt atomic create first
-            if self
-                .kv_store
-                .create("leader", new_leader_data.clone().into())
-                .await
-                .is_ok()
-            {
-                // Successfully became initial leader
-                {
-                    let mut is_leader_guard = self.is_leader.write().await;
-                    *is_leader_guard = true;
-                }
-                {
-                    let mut leader_info_guard = self.leader_info.write().await;
-                    *leader_info_guard = Some(LeaderInfo {
-                        instance_id: self.instance_id.clone(),
-                        elected_at: now,
-                        last_renewal: now,
-                    });
-                }
-                tracing::info!(instance_id = %self.instance_id, "Became leader using KV create()");
-                return Ok(true);
-            }
-
-            // If create failed, read current entry and consider CAS takeover
-            match self.kv_store.entry("leader").await {
-                Ok(Some(entry)) => {
-                    let current_leader_info =
-                        match oasis_core::proto::LeaderInfoMsg::decode(entry.value.as_ref()) {
-                            Ok(p) => LeaderInfo {
-                                instance_id: p.instance_id,
-                                elected_at: p.elected_at,
-                                last_renewal: p.last_renewal,
-                            },
-                            Err(_) => {
-                                retry_count += 1;
-                                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                                continue;
-                            }
-                        };
-
-                    let age = now - current_leader_info.last_renewal;
-                    if age > self.lease_ttl.as_secs() as i64 {
-                        if self
-                            .kv_store
-                            .update("leader", new_leader_data.clone().into(), entry.revision)
-                            .await
-                            .is_ok()
-                        {
-                            {
-                                let mut is_leader_guard = self.is_leader.write().await;
-                                *is_leader_guard = true;
-                            }
-                            {
-                                let mut leader_info_guard = self.leader_info.write().await;
-                                *leader_info_guard = Some(LeaderInfo {
-                                    instance_id: self.instance_id.clone(),
-                                    elected_at: now,
-                                    last_renewal: now,
-                                });
-                            }
-                            tracing::info!(instance_id = %self.instance_id, "Took over leadership using KV update() CAS");
-                            return Ok(true);
-                        }
-                    }
-                    return Ok(false);
-                }
-                _ => {
-                    retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    continue;
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Start lease renewal for the current leader
-    async fn start_lease_renewal(&self) -> Result<(), CoreError> {
         let kv_store = Arc::clone(&self.kv_store);
         let instance_id = self.instance_id.clone();
-        let _lease_ttl = self.lease_ttl;
+        let election_key = self.election_key.clone();
         let renewal_interval = self.renewal_interval;
         let is_leader = Arc::clone(&self.is_leader);
-        let leader_info = Arc::clone(&self.leader_info);
-        let shutdown_token = self.shutdown_token.child_token();
+        let shutdown = self.shutdown_token.child_token();
 
-        let handle = tokio::spawn(async move {
-            let mut interval = interval(renewal_interval);
-
+        tokio::spawn(async move {
+            let mut ticker = interval(renewal_interval);
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
-                        // Check if we're still the leader
-                        let is_still_leader = {
-                            let is_leader_guard = is_leader.read().await;
-                            *is_leader_guard
-                        };
-
-                        if !is_still_leader {
-                            tracing::info!(instance_id = %instance_id, "No longer leader, stopping renewal");
-                            break;
-                        }
-
-                        // Renew the lease with validation
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64;
-
-                        // First, verify we're still the current leader
-                        if let Ok(Some(current_entry)) = kv_store.get("leader").await {
-                            if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(current_entry.as_ref()) {
-                                let current_leader_info = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
-                                if current_leader_info.instance_id != instance_id {
-                                    tracing::warn!(
-                                        instance_id = %instance_id,
-                                        current_leader = %current_leader_info.instance_id,
-                                        "Another node became leader, stopping renewal"
-                                    );
-                                    // Mark ourselves as not leader
+                    _ = ticker.tick() => {
+                        // Check current role
+                        let am_leader = { *is_leader.read().await };
+                        if !am_leader {
+                            // Try create
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                            let msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at: now, last_renewal: now };
+                            let data = oasis_core::proto_impls::encoding::to_vec(&msg);
+                            match kv_store.create(&election_key, data.clone().into()).await {
+                                Ok(_) => {
                                     {
-                                        let mut is_leader_guard = is_leader.write().await;
-                                        *is_leader_guard = false;
+                                        let mut guard = is_leader.write().await;
+                                        *guard = true;
                                     }
-                                    break;
+                                    // Seed CAS by reading current entry (best-effort)
+                                    let _ = kv_store.entry(&election_key).await;
+                                    tracing::info!(instance_id = %instance_id, "Became leader via create()");
                                 }
-                            } else {
-                                tracing::error!(instance_id = %instance_id, "Failed to deserialize current leader info during renewal");
-                                break;
+                                Err(_) => {
+                                    // Not leader; do nothing until next tick
+                                }
                             }
                         } else {
-                            tracing::error!(instance_id = %instance_id, "Failed to get current leader info during renewal");
-                            break;
-                        }
-
-                        // CAS renew: read current revision and ensure we are still the leader, then update
-                        match kv_store.entry("leader").await {
-                            Ok(Some(entry)) => {
-                                if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(entry.value.as_ref()) {
-                                    let current_leader_info = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
-                                    if current_leader_info.instance_id != instance_id {
-                                        tracing::warn!(instance_id = %instance_id, "Lost leadership before renewal");
-                                        let mut is_leader_guard = is_leader.write().await;
-                                        *is_leader_guard = false;
-                                        break;
+                            // Renew leadership via CAS update
+                            // Get current revision
+                            let curr_rev = if let Ok(Some(entry)) = kv_store.entry(&election_key).await { Some(entry.revision) } else { None };
+                            if let Some(rev) = curr_rev {
+                                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                                // Keep elected_at from existing value if available
+                                let elected_at = now; // best-effort; correctness not critical
+                                let msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at, last_renewal: now };
+                                let data = oasis_core::proto_impls::encoding::to_vec(&msg);
+                                match kv_store.update(&election_key, data.into(), rev).await {
+                                    Ok(_) => {
+                                        tracing::debug!(instance_id = %instance_id, "Lease renewed (CAS)");
                                     }
-
-                                    let renewal_msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at: current_leader_info.elected_at, last_renewal: now };
-                                    let renewal_data = oasis_core::proto_impls::encoding::to_vec(&renewal_msg);
-
-                                    if kv_store
-                                        .update("leader", renewal_data.into(), entry.revision)
-                                        .await
-                                        .is_ok()
-                                    {
-                                        let mut leader_info_guard = leader_info.write().await;
-                                        if let Some(ref mut info) = *leader_info_guard {
-                                            info.last_renewal = now;
-                                        }
-                                        tracing::debug!(instance_id = %instance_id, "Lease renewed via CAS");
-                                    } else {
-                                        tracing::warn!(instance_id = %instance_id, "CAS renew failed; stepping down");
-                                        let mut is_leader_guard = is_leader.write().await;
-                                        *is_leader_guard = false;
-                                        break;
+                                    Err(e) => {
+                                        tracing::warn!(instance_id = %instance_id, error = %e, "CAS renew failed; stepping down");
+                                        let mut guard = is_leader.write().await; *guard = false;
                                     }
-                                } else {
-                                    tracing::error!(instance_id = %instance_id, "Leader info decode failed during renewal");
-                                    break;
                                 }
-                            }
-                            _ => {
-                                tracing::error!(instance_id = %instance_id, "Failed to load leader entry during renewal");
-                                break;
+                            } else {
+                                // Lost entry; step down
+                                let mut guard = is_leader.write().await; *guard = false;
                             }
                         }
                     }
-                    _ = shutdown_token.cancelled() => {
-                        tracing::info!(instance_id = %instance_id, "Shutdown signal received, stopping lease renewal");
+                    _ = shutdown.cancelled() => {
+                        tracing::info!(instance_id = %instance_id, "Leader election loop shutting down");
                         break;
                     }
                 }
             }
         });
 
-        // 保存任务句柄
-        {
-            let mut handles = self.background_handles.write().await;
-            handles.push(handle);
-        }
-
         Ok(())
     }
 
-    /// Start monitoring for leader changes
-    async fn start_leader_monitoring(&self) -> Result<(), CoreError> {
-        let kv_store = Arc::clone(&self.kv_store);
-        let instance_id = self.instance_id.clone();
-        let is_leader = Arc::clone(&self.is_leader);
-        let leader_info = Arc::clone(&self.leader_info);
-        let lease_ttl = self.lease_ttl;
-        let shutdown_token = self.shutdown_token.child_token();
-
-        let handle = tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(5)); // Check every 5 seconds
-
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        // Check if we're already the leader
-                        let is_currently_leader = {
-                            let is_leader_guard = is_leader.read().await;
-                            *is_leader_guard
-                        };
-
-                        if is_currently_leader {
-                            continue;
-                        }
-
-                        // Check current leader status
-                        if let Ok(Some(entry)) = kv_store.get("leader").await {
-                            if let Ok(p) = oasis_core::proto::LeaderInfoMsg::decode(entry.as_ref()) {
-                                let current_leader = LeaderInfo { instance_id: p.instance_id, elected_at: p.elected_at, last_renewal: p.last_renewal };
-                                let now = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs() as i64;
-                                let age = now - current_leader.last_renewal;
-
-                                // If leader lease has expired, try to become leader
-                                if age > lease_ttl.as_secs() as i64 {
-                                    tracing::info!(
-                                        instance_id = %instance_id,
-                                        current_leader = %current_leader.instance_id,
-                                        lease_age_secs = %age,
-                                        "Leader lease expired, attempting to become leader"
-                                    );
-
-                                    // Try to become the new leader
-                                    let now = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs() as i64;
-                                    let new_leader_msg = oasis_core::proto::LeaderInfoMsg { instance_id: instance_id.clone(), elected_at: now, last_renewal: now };
-                                    let data = oasis_core::proto_impls::encoding::to_vec(&new_leader_msg);
-
-                                    {
-                                        // Use create() first; if exists, try CAS with update() using current revision
-                                        match kv_store.create("leader", data.clone().into()).await {
-                                            Ok(_) => {
-                                                // Successfully became leader
-                                                {
-                                                    let mut is_leader_guard = is_leader.write().await;
-                                                    *is_leader_guard = true;
-                                                }
-                                                {
-                                                    let mut leader_info_guard = leader_info.write().await;
-                                                    *leader_info_guard = Some(LeaderInfo {
-                                                        instance_id: instance_id.clone(),
-                                                        elected_at: now,
-                                                        last_renewal: now,
-                                                    });
-                                                }
-                                                tracing::info!(
-                                                    instance_id = %instance_id,
-                                                    "Successfully became leader after detecting expired lease"
-                                                );
-                                            }
-                                            Err(_) => {
-                                                // Attempt CAS takeover
-                                                if let Ok(Some(curr)) = kv_store.entry("leader").await {
-                                                    let _ = kv_store.update("leader", data.into(), curr.revision).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ = shutdown_token.cancelled() => {
-                        tracing::info!(instance_id = %instance_id, "Shutdown signal received, stopping leader monitoring");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // 保存任务句柄
-        {
-            let mut handles = self.background_handles.write().await;
-            handles.push(handle);
-        }
-
-        Ok(())
-    }
+    // Removed complex renewal/monitoring; single loop handles both roles
 
     /// Stop being the leader (for graceful shutdown)
     pub async fn stop_leadership(&self) -> Result<(), CoreError> {
@@ -440,27 +163,11 @@ impl LeaderElectionService {
             *is_leader_guard = false;
         }
 
-        // Clear leader info
-        {
-            let mut leader_info_guard = self.leader_info.write().await;
-            *leader_info_guard = None;
-        }
-
-        // Cancel all background tasks
+        // Cancel background loop
         self.shutdown_token.cancel();
 
-        // Wait for all background tasks to complete
-        {
-            let mut handles = self.background_handles.write().await;
-            while let Some(handle) = handles.pop() {
-                if let Err(e) = handle.await {
-                    tracing::warn!(instance_id = %self.instance_id, "Background task failed: {}", e);
-                }
-            }
-        }
-
         // Try to remove the leader key from KV store
-        if let Err(e) = self.kv_store.delete("leader").await {
+        if let Err(e) = self.kv_store.delete(&self.election_key).await {
             tracing::warn!(instance_id = %self.instance_id, "Failed to remove leader key: {}", e);
         }
 

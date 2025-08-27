@@ -140,4 +140,3 @@ pub struct TaskExecution {
     pub timestamp: i64,
     pub duration_ms: u64,
 }
-

@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         oasis_core::selector::NodeAttributes::new(agent_id.clone()),
     )));
 
-    // 创建命令执行器（使用硬编码配置）
+    // 创建命令执行器
     let command_executor = Arc::new(CommandExecutor::new());
 
     let system_monitor = Arc::new(SystemMonitor::new());

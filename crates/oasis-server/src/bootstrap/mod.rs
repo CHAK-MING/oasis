@@ -79,7 +79,7 @@ impl ServerBootstrapper {
             use crate::application::services::RolloutManager;
             use crate::infrastructure::di_container::InfrastructureDiContainer;
 
-            let di_container = InfrastructureDiContainer::new(jetstream.clone(), 60);
+            let di_container = InfrastructureDiContainer::new(jetstream.clone());
             let context = di_container.create_application_context()?;
             let rollout_manager = RolloutManager::new(
                 context.rollout_repo,
@@ -176,7 +176,6 @@ impl ServerBootstrapper {
     ) -> Result<LeaderElectionService> {
         info!("Initializing leader election service...");
 
-        // 硬编码选主配置
         let leader_election_config =
             crate::infrastructure::services::leader_election::LeaderElectionConfig {
                 election_key: "oasis.leader".to_string(),
@@ -208,13 +207,9 @@ impl ServerBootstrapper {
     ) -> Result<Arc<crate::interface::health::HealthService>> {
         info!("Initializing health service...");
 
-        // 硬编码心跳 TTL
-        let heartbeat_ttl_sec = 60;
-
         // 创建 NodeRepository
         let node_repo = Arc::new(crate::infrastructure::persistence::NatsNodeRepository::new(
             jetstream.clone(),
-            heartbeat_ttl_sec,
         ))
             as Arc<dyn crate::application::ports::repositories::NodeRepository>;
 
@@ -225,7 +220,7 @@ impl ServerBootstrapper {
 
         // 启动健康检查监控
         health_service
-            .start_monitoring(jetstream.clone(), node_repo, heartbeat_ttl_sec)
+            .start_monitoring(jetstream.clone(), node_repo, 60)
             .await;
 
         info!("Health service initialized successfully");
@@ -235,7 +230,7 @@ impl ServerBootstrapper {
     /// 启动 KV Watchers
     async fn start_kv_watchers(
         &self,
-        _jetstream: &async_nats::jetstream::Context,
+        jetstream: &async_nats::jetstream::Context,
         health_service: &Arc<crate::interface::health::HealthService>,
     ) -> Result<(
         Vec<tokio::task::JoinHandle<()>>,
@@ -243,18 +238,10 @@ impl ServerBootstrapper {
     )> {
         let (event_sender, _) = broadcast::channel(1000);
 
-        // 硬编码配置
-        let config = crate::infrastructure::services::kv_watcher::ServerConfig {
-            server: crate::infrastructure::services::kv_watcher::ServerSection {
-                heartbeat_ttl_sec: 60,
-            },
-        };
-
         let kv_watcher = crate::infrastructure::services::kv_watcher::KvWatcherService::new(
-            _jetstream.clone(),
+            jetstream.clone(),
             event_sender.clone(),
             self.shutdown.child_token(),
-            config,
         );
 
         let handles = kv_watcher.start_watching().await?;
@@ -293,9 +280,6 @@ impl ServerBootstrapper {
                             crate::domain::events::NodeEvent::Offline { node_id, .. } => {
                                 health_service.update_agent_status(&node_id, false).await;
                             }
-                            crate::domain::events::NodeEvent::HeartbeatUpdated { node_id, .. } => {
-                                health_service.update_agent_status(&node_id, true).await;
-                            }
                             crate::domain::events::NodeEvent::LabelsUpdated { node_id, labels, timestamp } => {
                                 info!(node_id = %node_id, labels = ?labels, timestamp = %timestamp, "Node labels updated");
                             }
@@ -328,28 +312,28 @@ impl ServerBootstrapper {
         let shutdown_clone = shutdown_token.clone(); // clone用于移动到闭包
         let health_clone = health_service.clone();
 
-        // 硬编码流配置
         let streaming_config = crate::interface::grpc::server::StreamingBackoffSection {
             initial_delay_ms: 100,
             max_delay_ms: 5000,
             max_retries: 10,
         };
 
-        // 硬编码心跳 TTL
         let heartbeat_ttl = 60;
 
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = GrpcServerManager::run_loop(
                 addr,
                 || {
-                    futures::executor::block_on(GrpcServiceFactory::create_service_wrapper(
-                        js_clone.clone(),
-                        shutdown_clone.child_token(), // 使用clone的token创建子token
-                        heartbeat_ttl,
-                        streaming_config.clone(),
-                        Some(health_clone.clone()),
-                    ))
-                    .expect("create svc")
+                    let svc =
+                        futures::executor::block_on(GrpcServiceFactory::create_service_wrapper(
+                            js_clone.clone(),
+                            shutdown_clone.child_token(), // 使用clone的token创建子token
+                            heartbeat_ttl,
+                            streaming_config.clone(),
+                            Some(health_clone.clone()),
+                        ))
+                        .expect("create svc");
+                    (svc, Some(health_clone.clone()))
                 },
                 Some(tls_service_clone),
                 shutdown_token, // 移动原始token

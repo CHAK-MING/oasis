@@ -8,6 +8,7 @@ use crate::infrastructure::{
     system::{executor::CommandExecutor, file_apply_handler::FileApplyHandler},
 };
 use futures::StreamExt;
+use oasis_core::backoff::{execute_with_backoff, network_publish_backoff};
 use oasis_core::{
     constants,
     rate_limit::{RateLimiterCollection, rate_limited_operation},
@@ -58,26 +59,38 @@ impl TaskProcessor {
         info!("Starting task processor for agent: {}", agent_id);
 
         // 绑定消费者
-        let consumer = loop {
-            match consumer_api.consume_tasks(agent_id.as_str()).await {
+        let consumer = {
+            let shutdown = self.shutdown.clone();
+            let agent_id_cl = agent_id.clone();
+            let backoff = network_publish_backoff();
+            let result = execute_with_backoff(
+                || async {
+                    if shutdown.is_cancelled() {
+                        return Err(anyhow::anyhow!("shutdown"));
+                    }
+                    consumer_api
+                        .consume_tasks(agent_id_cl.as_str())
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                },
+                backoff,
+            )
+            .await;
+            match result {
                 Ok(c) => {
                     info!("Successfully created task consumer for agent: {}", agent_id);
-                    break c;
+                    c
                 }
                 Err(e) => {
-                    warn!("Failed to create task consumer: {}, retrying in 5s...", e);
-                    if self.shutdown.is_cancelled() {
-                        error!("Shutdown signal received, stopping task processor");
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    error!("Failed to create task consumer after retries: {}", e);
+                    return;
                 }
             }
         };
 
-        // 硬编码的并发上限和缓冲区
-        let max_concurrent: usize = 4; 
-        let channel_buffer: usize = max_concurrent.saturating_mul(2);
+        // 并发与缓冲（与 fetch 批量对齐：并发×4）
+        let max_concurrent: usize = 4;
+        let channel_buffer: usize = max_concurrent.saturating_mul(4);
 
         // 创建有界通道
         let (tx, rx) = mpsc::channel::<async_nats::jetstream::Message>(channel_buffer);
@@ -132,6 +145,7 @@ impl TaskProcessor {
         }
 
         // 生产者循环：使用 select! 模式，确保可以即时响应 shutdown 信号
+        let mut last_cleanup = std::time::Instant::now();
         loop {
             // 优先检查 shutdown 信号
             if self.shutdown.is_cancelled() {
@@ -144,6 +158,14 @@ impl TaskProcessor {
             if !can_accept_tasks {
                 warn!("Agent is draining; stop fetching new tasks and wait for workers to finish.");
                 break;
+            }
+
+            // 定期清理过期的任务记录（每小时一次）
+            if last_cleanup.elapsed() > std::time::Duration::from_secs(3600) {
+                let mut agent = self.agent.write().await;
+                agent.cleanup_old_records();
+                last_cleanup = std::time::Instant::now();
+                debug!("Cleaned up old task records");
             }
 
             // 使用 select! 优雅地处理消息拉取和关闭信号
@@ -167,7 +189,8 @@ impl TaskProcessor {
 
                     consumer
                         .fetch()
-                        .max_messages(constants::DEFAULT_FETCH_MAX_MESSAGES)
+                        // 将批量与并发对齐（并发×4）以避免占满 pending
+                        .max_messages(max_concurrent.saturating_mul(4))
                         .expires(std::time::Duration::from_millis(
                             constants::DEFAULT_FETCH_EXPIRES_MS,
                         ))
@@ -210,15 +233,15 @@ impl TaskProcessor {
                             }
                         }
                         Err(e) => {
-                            error!("Failed to fetch messages: {}. Retrying after delay...", e);
-                            // 在拉取失败后等待，避免快速失败循环
-                            // 使用 select! 确保在等待期间也能响应 shutdown 信号
+                            error!("Failed to fetch messages: {}. Backing off before retry...", e);
+                            // 更清晰的退避语义：根据尝试次数计算延迟，并在休眠期间保持对关机的响应
+                            let cfg = network_publish_backoff();
+                            // 这里简单采用 max_interval 作为一次等待上限，避免携带 attempt 计数状态
+                            let wait = cfg.max_interval;
                             tokio::select! {
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                                    // 正常等待完成，继续循环
-                                }
+                                _ = tokio::time::sleep(wait) => {}
                                 _ = self.shutdown.cancelled() => {
-                                    info!("Shutdown received during fetch retry delay, exiting.");
+                                    info!("Shutdown received during backoff sleep, exiting.");
                                     return;
                                 }
                             }

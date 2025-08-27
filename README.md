@@ -13,7 +13,7 @@ oasis-cli system init --output-dir . --force
 2. 启动 NATS
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 3. 启动服务器
@@ -150,17 +150,10 @@ oasis-cli rollout abort my-rollout
 oasis-cli rollout rollback my-rollout
 ```
 
-### storage：存储管理
-
-```bash
-# 查看存储信息
-oasis-cli storage info
-
-# 设置存储容量
-oasis-cli storage set-capacity --size-gb 100
 ```
 
 ## 输出说明
 - CLI 输出使用中文，支持彩色显示
 - 默认启用 ANSI 颜色（可通过 `CLICOLOR_FORCE=0` 关闭）
 - 服务器日志重定向到文件（守护模式）
+```

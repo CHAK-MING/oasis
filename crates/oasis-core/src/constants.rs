@@ -16,9 +16,21 @@ pub const NATS_ATTRIBUTES_PATCH_SUBJECT_PREFIX: &str = "agent.attributes.patch";
 // 未来扩展的 KV buckets
 pub const JS_KV_LEADER: &str = "OASIS-LEADER"; // 选主协调
 pub const JS_KV_CONFIG: &str = "OASIS-CONFIG"; // 统一配置管理
+/// DLQ 条目的 KV 存储桶
+pub const JS_KV_DLQ: &str = "OASIS-DLQ"; // 存储 DeadLetterEntry 二进制
 
 // Object Store（文件分发）
 pub const JS_OBJ_ARTIFACTS: &str = "OASIS-ARTIFACTS";
+/// 任务状态 KV 存储（Agent 侧持久化任务状态）
+pub const JS_KV_TASK_STATE: &str = "OASIS-TASKS-STATE";
+/// 灰度发布 Rollouts KV 存储
+pub const JS_KV_ROLLOUTS: &str = "OASIS-ROLLOUTS";
+
+// ---------- Stream duplicate window 策略（统一管理） ----------
+/// TASKS 流去重窗口（秒）
+pub const DUPLICATE_WINDOW_TASKS_SECS: u64 = 30;
+/// RESULTS 流去重窗口（秒）
+pub const DUPLICATE_WINDOW_RESULTS_SECS: u64 = 60;
 
 // 内置命令（由 Agent 内部处理，不通过外部进程）
 pub const CMD_FILE_APPLY: &str = "oasis:file-apply";
@@ -34,7 +46,7 @@ pub const TASKS_PUBLISH_SUBJECT: &str = "tasks.exec.default"; // Server 无目�
 pub const RESULTS_SUBJECT_PREFIX: &str = "results";
 pub const TASKS_DLQ_SUBJECT_PREFIX: &str = "tasks.dlq";
 
-// 统一管理的消费者命名常量（避免散落的硬编码）
+// 统一管理的消费者命名常量
 pub const DEFAULT_CONSUMER_NAME: &str = "oasis-workers-default-new";
 pub const UNICAST_CONSUMER_PREFIX_VERSION: &str = "v2";
 pub const UNICAST_CONSUMER_PREFIX: &str = "oasis-agent-"; // 最终名称将携带版本
@@ -89,7 +101,7 @@ pub fn unicast_consumer_name(agent_id: &str) -> String {
     format!(
         "{}{}-{}",
         UNICAST_CONSUMER_PREFIX, UNICAST_CONSUMER_PREFIX_VERSION, agent_id
-    ) // 统一版本位与前缀，避免散落硬编码
+    )
 }
 
 // ---------- KV 键名生成 helpers ----------
@@ -122,6 +134,15 @@ pub fn kv_key_heartbeat(agent_id: &str) -> String {
 /// 生成 Agent labels 键名（单层，避免通配符问题）
 pub fn kv_key_labels(agent_id: &str) -> String {
     normalize_agent_id_for_kv(agent_id)
+}
+
+/// 生成任务状态 KV 键：task:state:<agentId>:<taskId>
+pub fn kv_key_task_state(agent_id: &str, task_id: &str) -> String {
+    format!(
+        "task:state:{}:{}",
+        normalize_agent_id_for_kv(agent_id),
+        task_id
+    )
 }
 
 /// Agent 配置键的统一前缀

@@ -22,7 +22,13 @@ impl NatsRolloutRepository {
 
     /// 确保rollout KV存储存在
     async fn ensure_rollout_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        persist::ensure_kv(&self.jetstream, "rollouts", "Rollout state storage").await
+        // 统一入口 ensure_kv_buckets() 已在系统启动阶段被调用；此处仅获取
+        self.jetstream
+            .get_key_value(oasis_core::JS_KV_ROLLOUTS)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: e.to_string(),
+            })
     }
 }
 
@@ -122,8 +128,7 @@ impl RolloutRepository for NatsRolloutRepository {
                 let store = self.jetstream.clone();
                 let id = rollout_id.to_string();
                 tasks.push(async move {
-                    let kv = persist::ensure_kv(&store, "rollouts", "Rollout state storage").await;
-                    match kv {
+                    match store.get_key_value(oasis_core::JS_KV_ROLLOUTS).await {
                         Ok(kv) => match kv.get(&format!("rollout.{}", id)).await {
                             Ok(Some(entry)) => proto::RolloutMsg::decode(entry.as_ref())
                                 .ok()

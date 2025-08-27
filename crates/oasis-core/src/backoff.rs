@@ -70,6 +70,37 @@ where
     retry(backoff, wrapped_operation).await
 }
 
+/// 带错误分类的重试：仅对被判定为“瞬态”的错误进行重试；否则立即失败
+pub async fn execute_with_backoff_selective<F, Fut, T, E>(
+    mut operation: F,
+    backoff: ExponentialBackoff,
+    is_transient: std::sync::Arc<dyn Fn(&E) -> bool + Send + Sync + 'static>,
+) -> std::result::Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display + Send + 'static,
+{
+    let wrapped_operation = move || {
+        let fut = operation();
+        let classify = is_transient.clone();
+        async move {
+            match fut.await {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    if (classify)(&e) {
+                        Err(BackoffError::transient(e))
+                    } else {
+                        Err(BackoffError::permanent(e))
+                    }
+                }
+            }
+        }
+    };
+
+    retry(backoff, wrapped_operation).await
+}
+
 pub fn delay_for_attempt(cfg: &ExponentialBackoff, attempt: u32) -> Duration {
     // 使用毫秒为单位进行浮点计算，再裁剪到上限
     let base_ms = cfg.initial_interval.as_millis() as f64;

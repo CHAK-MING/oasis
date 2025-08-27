@@ -1,4 +1,6 @@
+use futures::future::pending;
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::InMemoryState};
+use std::pin::Pin;
 use std::{num::NonZeroU32, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -85,54 +87,28 @@ impl CancellableRateLimiter {
         cancellation_token: Option<CancellationToken>,
         operation_name: &str,
     ) -> Result<()> {
-        // 快速路径：立即检查
-        if self.limiter.check().is_ok() {
-            debug!(operation = operation_name, "Rate limit passed");
-            return Ok(());
-        }
+        let mut wait_fut = Box::pin(self.limiter.until_ready());
+        let mut timeout_fut = match self.max_wait_time {
+            Some(dur) => Box::pin(tokio::time::sleep(dur))
+                as Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            None => Box::pin(pending()) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        };
+        let mut cancel_fut = match cancellation_token {
+            Some(token) => Box::pin(token.cancelled_owned())
+                as Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            None => Box::pin(pending()) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        };
 
-        let wait_future = self.limiter.until_ready();
-
-        match (self.max_wait_time, cancellation_token) {
-            (Some(max_wait), Some(token)) => {
-                let timeout_fut = tokio::time::sleep(max_wait);
-                tokio::pin!(timeout_fut);
-                tokio::select! {
-                    _ = wait_future => Ok(()),
-                    _ = &mut timeout_fut => {
-                        warn!(operation = operation_name, "Rate limit timeout");
-                        Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
-                    }
-                    _ = token.cancelled() => {
-                        debug!(operation = operation_name, "Rate limit cancelled");
-                        Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
-                    }
-                }
-            }
-            (Some(max_wait), None) => {
-                let timeout_fut = tokio::time::sleep(max_wait);
-                tokio::pin!(timeout_fut);
-                tokio::select! {
-                    _ = wait_future => Ok(()),
-                    _ = &mut timeout_fut => {
-                        warn!(operation = operation_name, "Rate limit timeout");
-                        Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
-                    }
-                }
-            }
-            (None, Some(token)) => {
-                tokio::select! {
-                    _ = wait_future => Ok(()),
-                    _ = token.cancelled() => {
-                        debug!(operation = operation_name, "Rate limit cancelled");
-                        Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
-                    }
-                }
-            }
-            (None, None) => {
-                wait_future.await;
-                Ok(())
-            }
+        tokio::select! {
+            _ = &mut wait_fut => Ok(()),
+            _ = &mut timeout_fut => {
+                warn!(operation = operation_name, "Rate limit timeout");
+                Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
+            },
+            _ = &mut cancel_fut => {
+                debug!(operation = operation_name, "Rate limit cancelled");
+                Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
+            },
         }
     }
 

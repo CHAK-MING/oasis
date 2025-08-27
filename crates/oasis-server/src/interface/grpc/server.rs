@@ -19,7 +19,6 @@ use oasis_core::proto::{
     oasis_service_server,
 };
 
-// 硬编码的配置结构
 #[derive(Clone)]
 pub struct StreamingBackoffSection {
     pub initial_delay_ms: u64,

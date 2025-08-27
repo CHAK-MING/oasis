@@ -6,6 +6,7 @@ use oasis_core::{
 };
 
 use super::client::NatsClient;
+use async_nats::HeaderMap;
 
 pub struct NatsPublisher {
     client: NatsClient,
@@ -18,24 +19,13 @@ impl NatsPublisher {
 
     pub async fn publish_heartbeat(&self, hb: &AgentHeartbeat) -> Result<()> {
         // Heartbeat 写入 KV（短 TTL 由 bucket 配置控制）
-        let kv = match self
+        // 由服务器统一 ensure；Agent 仅获取，不再创建
+        let kv = self
             .client
             .jetstream
             .get_key_value(JS_KV_NODE_HEARTBEAT)
             .await
-        {
-            Ok(kv) => kv,
-            Err(_) => self
-                .client
-                .jetstream
-                .create_key_value(async_nats::jetstream::kv::Config {
-                    bucket: JS_KV_NODE_HEARTBEAT.to_string(),
-                    history: 1,
-                    ..Default::default()
-                })
-                .await
-                .context("create heartbeat kv")?,
-        };
+            .context("bind heartbeat kv")?;
 
         let key = constants::kv_key_heartbeat(hb.agent_id.as_str());
         let proto: oasis_core::proto::AgentHeartbeat = hb.into();
@@ -52,13 +42,18 @@ impl NatsPublisher {
         let proto: oasis_core::proto::TaskExecutionMsg = exec.into();
         let data = oasis_core::proto_impls::encoding::to_vec(&proto);
 
-        // 发布并等待 ACK 确认，确保消息成功写入 JetStream
+        // 设置 Nats-Msg-Id 以启用 JetStream 去重
+        let mut headers = HeaderMap::new();
+        let dedupe_key = format!("{}@{}", exec.task_id.as_str(), subject);
+        headers.insert("Nats-Msg-Id", dedupe_key);
+
+        // 发布并等待 ACK 确认，确保消息成功写入 JetStream（带 headers）
         let ack = self
             .client
             .jetstream
-            .publish(subject.clone(), data.into())
+            .publish_with_headers(subject.clone(), headers, data.into())
             .await
-            .context("publish task execution")?;
+            .context("publish task execution with headers")?;
 
         // 等待 ACK 确认
         ack.await.context("wait for publish ack")?;

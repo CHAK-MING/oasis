@@ -12,40 +12,6 @@ pub mod utils {
             message: e.to_string(),
         }
     }
-
-
-    pub async fn ensure_kv(
-        js: &async_nats::jetstream::Context,
-        bucket: &str,
-        description: &str,
-    ) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        match js.get_key_value(bucket).await {
-            Ok(store) => Ok(store),
-            Err(_) => {
-                let cfg = async_nats::jetstream::kv::Config {
-                    bucket: bucket.to_string(),
-                    description: description.to_string(),
-                    max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
-                    max_bytes: 1024 * 1024 * 1024,
-                    storage: async_nats::jetstream::stream::StorageType::File,
-                    num_replicas: 1,
-                    ..Default::default()
-                };
-                js.create_key_value(cfg).await.map_err(map_nats_err)
-            }
-        }
-    }
-
-    pub async fn ensure_kv_with_config(
-        js: &async_nats::jetstream::Context,
-        cfg: async_nats::jetstream::kv::Config,
-    ) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        let bucket = cfg.bucket.clone();
-        match js.get_key_value(&bucket).await {
-            Ok(store) => Ok(store),
-            Err(_) => js.create_key_value(cfg).await.map_err(map_nats_err),
-        }
-    }
 }
 
 pub use file_repository::*;

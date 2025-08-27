@@ -18,6 +18,8 @@ pub struct HealthService {
     agents_healthy: std::sync::Arc<tokio::sync::RwLock<bool>>,
     online_agents: std::sync::Arc<tokio::sync::RwLock<HashMap<String, NodeAttributes>>>,
     node_repo: std::sync::Arc<dyn NodeRepository>,
+    reporter: std::sync::Arc<tokio::sync::Mutex<Option<tonic_health::server::HealthReporter>>>,
+    min_online_agents: std::sync::Arc<tokio::sync::RwLock<usize>>,
 }
 
 impl HealthService {
@@ -28,6 +30,34 @@ impl HealthService {
             agents_healthy: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
             online_agents: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             node_repo,
+            reporter: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            min_online_agents: std::sync::Arc::new(tokio::sync::RwLock::new(1)),
+        }
+    }
+
+    /// 注册 tonic_health reporter 以便运行期动态更新标准健康状态
+    pub async fn register_reporter(&self, reporter: tonic_health::server::HealthReporter) {
+        let mut guard = self.reporter.lock().await;
+        *guard = Some(reporter);
+    }
+
+    pub async fn set_serving_oasis(&self) {
+        if let Some(ref mut rep) = *self.reporter.lock().await {
+            let _ = rep
+                .set_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
+                    crate::interface::grpc::server::OasisServer,
+                >>()
+                .await;
+        }
+    }
+
+    pub async fn set_not_serving_oasis(&self) {
+        if let Some(ref mut rep) = *self.reporter.lock().await {
+            let _ = rep
+                .set_not_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
+                    crate::interface::grpc::server::OasisServer,
+                >>()
+                .await;
         }
     }
 
@@ -46,7 +76,12 @@ impl HealthService {
         self.online_agents.read().await.len()
     }
 
-    // 已移除：获取在线 Agent 列表（当前未对外提供）
+    /// 配置在线 Agent 数阈值（默认 1）
+    pub async fn set_min_online_agents(&self, min: usize) {
+        let mut guard = self.min_online_agents.write().await;
+        *guard = min.max(1);
+    }
+
 
     /// 更新 Agent 状态
     pub async fn update_agent_status(&self, agent_id: &str, is_online: bool) {
@@ -90,9 +125,10 @@ impl HealthService {
             // 如果 Agent 本来就不在线，则什么都不做
         }
 
-        // 更新整体健康状态
+        // 更新整体健康状态（达到最小在线阈值）
+        let required = *self.min_online_agents.read().await;
         let mut agents_healthy = self.agents_healthy.write().await;
-        *agents_healthy = !agents_guard.is_empty();
+        *agents_healthy = agents_guard.len() >= required;
     }
 
     /// 获取总体健康状态
@@ -112,7 +148,8 @@ impl HealthService {
         let nats_healthy = self.nats_healthy.clone();
         let agents_healthy = self.agents_healthy.clone();
         let online_agents = self.online_agents.clone();
-
+        let reporter = self.reporter.clone();
+        let min_online_agents = self.min_online_agents.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
@@ -126,12 +163,28 @@ impl HealthService {
                             let mut status = nats_healthy.write().await;
                             *status = true;
                         }
+                        // 更新标准健康状态为 Serving
+                        if let Some(ref mut rep) = *reporter.lock().await {
+                            let _ = rep
+                                .set_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
+                                    crate::interface::grpc::server::OasisServer,
+                                >>()
+                                .await;
+                        }
                         tracing::debug!("NATS health check passed");
                     }
                     Err(e) => {
                         {
                             let mut status = nats_healthy.write().await;
                             *status = false;
+                        }
+                        // 更新标准健康状态为 NotServing
+                        if let Some(ref mut rep) = *reporter.lock().await {
+                            let _ = rep
+                                .set_not_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
+                                    crate::interface::grpc::server::OasisServer,
+                                >>()
+                                .await;
                         }
                         tracing::warn!("NATS health check failed: {}", e);
                     }
@@ -140,8 +193,9 @@ impl HealthService {
                 // 这里只更新整体健康状态，基于当前内存中的 online_agents 状态
                 {
                     let online_agents_guard = online_agents.read().await;
+                    let required = *min_online_agents.read().await;
                     let mut status = agents_healthy.write().await;
-                    *status = !online_agents_guard.is_empty();
+                    *status = online_agents_guard.len() >= required;
                 }
             }
         });
@@ -152,33 +206,15 @@ impl HealthService {
 
 /// 检查 NATS JetStream 健康状态
 async fn check_nats(jetstream: &Context, _heartbeat_ttl_sec: u64) -> Result<(), CoreError> {
-    // 检查必需的 KV bucket 是否存在
-    let _heartbeat_kv = jetstream
+    // 简化：只检查心跳 bucket 可访问即可证明 JetStream 健康
+    let _ = jetstream
         .get_key_value(oasis_core::JS_KV_NODE_HEARTBEAT)
         .await
         .map_err(|e| CoreError::Nats {
-            message: format!("Failed to get heartbeat KV store: {}", e),
+            message: format!("Failed to access heartbeat KV store: {}", e),
         })?;
 
-    // 检查 facts KV bucket
-    let _facts_kv = jetstream
-        .get_key_value(oasis_core::JS_KV_NODE_FACTS)
-        .await
-        .map_err(|e| CoreError::Nats {
-            message: format!("Failed to get facts KV store: {}", e),
-        })?;
-
-    // 检查 labels KV bucket
-    let _labels_kv = jetstream
-        .get_key_value(oasis_core::JS_KV_NODE_LABELS)
-        .await
-        .map_err(|e| CoreError::Nats {
-            message: format!("Failed to get labels KV store: {}", e),
-        })?;
-
-    // 简化：只检查 bucket 是否存在，不检查配置
-    tracing::debug!("All required NATS KV buckets are accessible");
-
+    tracing::debug!("NATS heartbeat KV is accessible");
     Ok(())
 }
 

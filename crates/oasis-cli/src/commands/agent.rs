@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, ContentArrangement, Table};
+use comfy_table::{presets::UTF8_FULL, Attribute, Cell, ContentArrangement, Table, Color};
 use console::style;
 use std::path::PathBuf;
 
@@ -433,25 +433,19 @@ async fn list_agents(verbose: bool) -> Result<()> {
                 .map(|f| f.hostname.clone())
                 .unwrap_or_else(|| "未知".to_string());
 
+            // 使用 comfy_table 的内置着色，避免 ANSI 转义序列导致宽度计算错误（中英文混排下会出现边框错位）
+            let status_cell = if is_online {
+                Cell::new("在线").fg(Color::Green)
+            } else {
+                Cell::new("离线").fg(Color::Red)
+            };
+
             table.add_row(vec![
                 Cell::new(agent_id),
                 Cell::new(hostname),
-                Cell::new(if is_online {
-                    style("在线").green().to_string()
-                } else {
-                    style("离线").red().to_string()
-                }),
-                Cell::new(if labels.is_empty() {
-                    "-".to_string()
-                } else {
-                    labels
-                }),
+                status_cell,
+                Cell::new(if labels.is_empty() { "-".to_string() } else { labels }),
             ]);
-        }
-
-        // 将“状态”列（索引为 2）设置为居中对齐，以修复中英文混合显示问题
-        if let Some(column) = table.column_mut(2) {
-            column.set_cell_alignment(CellAlignment::Center);
         }
 
         println!("{}", table);

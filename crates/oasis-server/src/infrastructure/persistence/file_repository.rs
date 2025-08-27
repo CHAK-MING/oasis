@@ -51,7 +51,13 @@ impl NatsFileRepository {
 
     /// 确保文件元数据 KV Store 存在
     async fn ensure_metadata_store(&self) -> Result<async_nats::jetstream::kv::Store, CoreError> {
-        persist::ensure_kv(&self.jetstream, "file-metadata", "File metadata storage").await
+        // 统一入口 ensure_kv_buckets() 已在系统启动阶段被调用；此处仅获取
+        self.jetstream
+            .get_key_value("file-metadata")
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: e.to_string(),
+            })
     }
 
     // 内部辅助删除方法
