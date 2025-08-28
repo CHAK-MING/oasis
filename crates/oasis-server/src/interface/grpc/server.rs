@@ -8,7 +8,7 @@ use crate::application::context::ApplicationContext;
 use crate::application::use_cases::commands::{
     ClearFilesUseCase, ExecuteTaskUseCase, RolloutDeployUseCase, UploadFileUseCase,
 };
-use crate::application::use_cases::queries::ManageNodesUseCase;
+use crate::application::use_cases::queries::ManageAgentsUseCase;
 use crate::interface::health::HealthService;
 use oasis_core::proto::{
     AbortRolloutRequest, AbortRolloutResponse, CheckAgentsRequest, CheckAgentsResponse,
@@ -33,7 +33,7 @@ pub struct OasisServer {
     online_ttl_sec: u64,
     stream_backoff: StreamingBackoffSection,
     execute_task_use_case: Arc<ExecuteTaskUseCase>,
-    manage_nodes_use_case: Arc<ManageNodesUseCase>,
+    manage_agents_use_case: Arc<ManageAgentsUseCase>,
     rollout_deploy_use_case: Arc<RolloutDeployUseCase>,
     upload_file_use_case: Arc<UploadFileUseCase>,
     clear_files_use_case: Arc<ClearFilesUseCase>,
@@ -52,21 +52,23 @@ impl OasisServer {
         let context_arc = Arc::new(context);
         let execute_uc = Arc::new(ExecuteTaskUseCase::new(
             context_clone.task_repo.clone(),
-            context_clone.node_repo.clone(),
+            context_clone.agent_repo.clone(),
         ));
+        // 创建 ManageAgentsUseCase
+        let manage_agents_use_case = ManageAgentsUseCase::new(
+            context_clone.agent_repo.clone(),
+            context_clone.selector_engine.clone(),
+        );
+
         Self {
             context: context_arc,
             shutdown_token,
             online_ttl_sec,
             stream_backoff,
             execute_task_use_case: execute_uc.clone(),
-            manage_nodes_use_case: Arc::new(ManageNodesUseCase::new(
-                context_clone.node_repo.clone(),
-                context_clone.selector_engine.clone(),
-            )),
+            manage_agents_use_case: Arc::new(manage_agents_use_case),
             rollout_deploy_use_case: Arc::new(RolloutDeployUseCase::new(
                 context_clone.rollout_repo.clone(),
-                context_clone.node_repo.clone(),
                 context_clone.selector_engine.clone(),
             )),
             upload_file_use_case: Arc::new(UploadFileUseCase::new(
@@ -101,8 +103,8 @@ impl OasisServer {
         &self.execute_task_use_case
     }
 
-    pub(crate) fn manage_nodes_use_case(&self) -> &Arc<ManageNodesUseCase> {
-        &self.manage_nodes_use_case
+    pub(crate) fn manage_agents_use_case(&self) -> &Arc<ManageAgentsUseCase> {
+        &self.manage_agents_use_case
     }
 
     pub(crate) fn rollout_deploy_use_case(&self) -> &Arc<RolloutDeployUseCase> {
@@ -163,8 +165,8 @@ impl oasis_service_server::OasisService for OasisServer {
     ) -> Result<Response<CheckAgentsResponse>, Status> {
         let req = request.into_inner();
         let agent_ids: Vec<String> = req.agent_ids.iter().map(|id| id.value.clone()).collect();
-        let statuses = self
-            .manage_nodes_use_case()
+                  let statuses = self
+            .manage_agents_use_case()
             .check_agents(agent_ids)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -252,27 +254,27 @@ impl oasis_service_server::OasisService for OasisServer {
     // delete_node_labels removed (not in proto)
 
     #[instrument(skip_all)]
-    async fn get_node_labels(
+    async fn get_agent_labels(
         &self,
-        request: Request<oasis_core::proto::GetNodeLabelsRequest>,
-    ) -> Result<Response<oasis_core::proto::GetNodeLabelsResponse>, Status> {
-        crate::interface::grpc::handlers::NodeHandlers::get_node_labels(self, request).await
+        request: Request<oasis_core::proto::GetAgentLabelsRequest>,
+    ) -> Result<Response<oasis_core::proto::GetAgentLabelsResponse>, Status> {
+        crate::interface::grpc::handlers::AgentHandlers::get_agent_labels(self, request).await
     }
 
     #[instrument(skip_all)]
-    async fn get_node_facts(
+    async fn get_agent_facts(
         &self,
-        request: Request<oasis_core::proto::GetNodeFactsRequest>,
-    ) -> Result<Response<oasis_core::proto::GetNodeFactsResponse>, Status> {
-        crate::interface::grpc::handlers::NodeHandlers::get_node_facts(self, request).await
+        request: Request<oasis_core::proto::GetAgentFactsRequest>,
+    ) -> Result<Response<oasis_core::proto::GetAgentFactsResponse>, Status> {
+        crate::interface::grpc::handlers::AgentHandlers::get_agent_facts(self, request).await
     }
 
     #[instrument(skip_all)]
-    async fn list_nodes(
+    async fn list_agents(
         &self,
-        request: Request<oasis_core::proto::ListNodesRequest>,
-    ) -> Result<Response<oasis_core::proto::ListNodesResponse>, Status> {
-        crate::interface::grpc::handlers::NodeHandlers::list_nodes(self, request).await
+        request: Request<oasis_core::proto::ListAgentsRequest>,
+    ) -> Result<Response<oasis_core::proto::ListAgentsResponse>, Status> {
+        crate::interface::grpc::handlers::AgentHandlers::list_agents(self, request).await
     }
 
     #[instrument(skip_all)]

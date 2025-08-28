@@ -2,20 +2,20 @@ use std::sync::Arc;
 
 use oasis_core::{error::CoreError, task::TaskSpec};
 
-use crate::application::ports::repositories::{NodeRepository, TaskRepository};
+use crate::application::ports::repositories::{AgentRepository, TaskRepository};
 use crate::domain::models::task::Task;
 
 /// 任务执行用例
 pub struct ExecuteTaskUseCase {
     task_repo: Arc<dyn TaskRepository>,
-    node_repo: Arc<dyn NodeRepository>,
+    agent_repo: Arc<dyn AgentRepository>,
 }
 
 impl ExecuteTaskUseCase {
-    pub fn new(task_repo: Arc<dyn TaskRepository>, node_repo: Arc<dyn NodeRepository>) -> Self {
+    pub fn new(task_repo: Arc<dyn TaskRepository>, agent_repo: Arc<dyn AgentRepository>) -> Self {
         Self {
             task_repo,
-            node_repo,
+            agent_repo,
         }
     }
 
@@ -107,7 +107,7 @@ impl ExecuteTaskUseCase {
         Ok(())
     }
 
-    /// 解析目标规格，支持 agent:、default 格式
+    /// 解析目标规格，支持 agent: 格式
     async fn resolve_targets(&self, targets: &[String]) -> Result<Vec<String>, CoreError> {
         use std::collections::HashSet;
         let mut resolved_set: HashSet<String> = HashSet::new();
@@ -124,8 +124,8 @@ impl ExecuteTaskUseCase {
                         })?;
                 resolved_set.insert(agent_id.to_string());
             } else if target == "default" || target.is_empty() {
-                // 默认：使用默认队列，这里简化为所有在线节点
-                let online_agents = self.node_repo.list_online().await?;
+                // 默认：使用所有在线 Agent
+                let online_agents = self.agent_repo.list_online().await?;
                 for agent_id in online_agents {
                     resolved_set.insert(agent_id);
                 }
@@ -144,16 +144,16 @@ impl ExecuteTaskUseCase {
     /// 验证节点的在线状态
     async fn validate_agents(&self, agent_ids: &[String]) -> Result<Vec<String>, CoreError> {
         // 使用批量获取方法优化性能
-        let nodes = self.node_repo.get_nodes_batch(agent_ids).await?;
+        let agents = self.agent_repo.get_agents_batch(agent_ids).await?;
 
         let mut online_agents = Vec::new();
-        for node in nodes {
+        for agent in agents {
             // 使用更宽松的 TTL 来匹配健康检查服务的逻辑
             // 健康检查服务使用 90 秒的 TTL，这里使用相同的值
-            if node.is_online(90) {
-                online_agents.push(node.id.to_string());
+            if agent.is_online(90) {
+                online_agents.push(agent.id.as_str().to_string());
             } else {
-                tracing::warn!(agent_id = %node.id, "Agent is offline");
+                tracing::warn!(agent_id = %agent.id, "Agent is offline");
             }
         }
 

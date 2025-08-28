@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use oasis_core::{
     agent::AgentHeartbeat,
-    constants::{self, JS_KV_NODE_HEARTBEAT},
+    constants::{self, JS_KV_AGENT_HEARTBEAT},
     task::TaskExecution,
 };
 
@@ -23,7 +23,7 @@ impl NatsPublisher {
         let kv = self
             .client
             .jetstream
-            .get_key_value(JS_KV_NODE_HEARTBEAT)
+            .get_key_value(JS_KV_AGENT_HEARTBEAT)
             .await
             .context("bind heartbeat kv")?;
 

@@ -4,7 +4,6 @@ use console::style;
 use oasis_core::config::OasisConfig;
 mod client;
 mod commands;
-mod common;
 mod precheck;
 
 #[tokio::main]

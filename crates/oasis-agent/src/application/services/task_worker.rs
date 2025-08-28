@@ -182,18 +182,11 @@ impl TaskWorker {
         }
 
         {
-            let mut agent_w = self.agent.write().await;
-            // 合并到 attributes.labels 中
-            for (k, v) in new_labels.iter() {
-                agent_w.attributes.labels.insert(k.clone(), v.clone());
-            }
-            // 将完整的 attributes 发布到 KV
-            let attrs = agent_w.attributes.clone();
-            drop(agent_w);
+            // 直接发布 labels（Agent 模型不再持有 info）
             self.labels_repo
                 .publish_attributes(
                     &oasis_core::types::AgentId::from(self.agent_id.clone()),
-                    &attrs,
+                    &new_labels,
                 )
                 .await?;
         }

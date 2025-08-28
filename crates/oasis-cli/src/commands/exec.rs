@@ -1,4 +1,3 @@
-use crate::common::target::TargetSelector;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use console::style;
@@ -8,17 +7,17 @@ use oasis_core::proto::{
 };
 use std::collections::HashMap;
 
-/// 通过 CEL 选择器在目标 Agent 上执行命令
+/// 通过选择器在目标 Agent 上执行命令
 #[derive(Parser, Debug)]
 #[command(
     name = "exec",
-    about = "在匹配到的 Agent 上执行命令（支持 CEL 选择器或逗号分隔的 ID 列表）",
+    about = "在匹配到的 Agent 上执行命令（支持选择器语法）",
     after_help = r#"示例：
   # 在生产环境的前端服务器上执行 uptime
-  oasis-cli exec --target 'labels[\"environment\"] == \"prod\" && \"frontend\" in groups' -- /usr/bin/uptime
+  oasis-cli exec --target 'labels["environment"] == "prod" && "frontend" in groups' -- /usr/bin/uptime
 
   # 在所有 Web 服务器上运行 ps aux
-  oasis-cli exec --target 'labels[\"role\"] == \"web\"' -- /usr/bin/ps aux
+  oasis-cli exec --target 'labels["role"] == "web"' -- /usr/bin/ps aux
 
   # 对指定 agent 传入环境变量
   oasis-cli exec --target agent-1 --env DEBUG=true --env LOG_LEVEL=info -- /usr/bin/echo $DEBUG
@@ -30,8 +29,8 @@ use std::collections::HashMap;
   oasis-cli exec --target true --stream -- /bin/echo hi"#
 )]
 pub struct ExecArgs {
-    /// 目标（CEL 选择器或逗号分隔的 Agent ID）
-    #[arg(long, short = 't', help = "目标（CEL 选择器或逗号分隔的 Agent ID）")]
+    /// 目标（选择器语法）
+    #[arg(long, short = 't', help = "目标（选择器语法）")]
     pub target: String,
 
     /// 传递给命令的环境变量，格式 KEY=VALUE，可多次指定
@@ -83,12 +82,8 @@ pub async fn run_exec(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("命令不能为空"))?;
 
-    // 使用智能解析器统一处理目标
-    let target_selector = TargetSelector::parse(&args.target)?;
     let target_msg = TaskTargetMsg {
-        target: Some(task_target_msg::Target::Selector(
-            target_selector.expression().to_string(),
-        )),
+        target: Some(task_target_msg::Target::Selector(args.target.clone())),
     };
 
     let mut env_map: HashMap<String, String> = HashMap::new();

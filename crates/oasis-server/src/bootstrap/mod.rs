@@ -7,6 +7,7 @@ use tracing::info;
 pub mod lifecycle;
 
 use crate::bootstrap::lifecycle::ServiceLifecycleManager;
+use crate::infrastructure::di_container::InfrastructureDiContainer;
 use crate::infrastructure::resource_manager::InfrastructureResourceManager;
 use crate::infrastructure::services::leader_election::LeaderElectionService;
 use crate::infrastructure::tls::TlsService;
@@ -64,28 +65,31 @@ impl ServerBootstrapper {
         let leader_election_service = self.initialize_leader_election_service(&jetstream).await?;
         lifecycle_manager.register_leader_election(leader_election_service);
 
+        // 创建 DI 容器和应用程序上下文
+        let di_container = InfrastructureDiContainer::new(jetstream.clone());
+        let context = di_container.create_application_context()?;
+
         // 初始化健康服务
-        let health_service = self.initialize_health_service(&jetstream).await?;
+        let health_service = self.initialize_health_service(&jetstream, &context).await?;
         lifecycle_manager.register_health_service(health_service.clone());
 
         // 启动 KV Watchers
-        let (kv_watcher_handles, event_processor_handle) =
-            self.start_kv_watchers(&jetstream, &health_service).await?;
+        let (kv_watcher_handles, event_processor_handle, index_updater_handle) = self
+            .start_kv_watchers(&jetstream, &health_service, context.selector_engine.clone())
+            .await?;
         lifecycle_manager.register_tasks("kv_watchers".to_string(), kv_watcher_handles, 3);
         lifecycle_manager.register_task("event_processor".to_string(), event_processor_handle, 3);
+        lifecycle_manager.register_task("index_updater".to_string(), index_updater_handle, 3);
 
         // 启动 RolloutManager（统一纳入生命周期管理）
         {
             use crate::application::services::RolloutManager;
-            use crate::infrastructure::di_container::InfrastructureDiContainer;
 
-            let di_container = InfrastructureDiContainer::new(jetstream.clone());
-            let context = di_container.create_application_context()?;
             let rollout_manager = RolloutManager::new(
-                context.rollout_repo,
-                context.node_repo,
-                context.task_repo,
-                context.selector_engine,
+                context.rollout_repo.clone(),
+                context.task_repo.clone(),
+                context.agent_repo.clone(),
+                context.selector_engine.clone(),
                 self.shutdown.child_token(),
             );
             let rollout_arc = Arc::new(rollout_manager);
@@ -98,7 +102,7 @@ impl ServerBootstrapper {
 
         // 启动 gRPC 服务器
         let grpc_handle = self
-            .start_grpc_server(&jetstream, &health_service, &tls_service)
+            .start_grpc_server(&jetstream, &health_service, &tls_service, &context)
             .await?;
         lifecycle_manager.register_task("grpc_server".to_string(), grpc_handle, 1);
 
@@ -204,24 +208,24 @@ impl ServerBootstrapper {
     async fn initialize_health_service(
         &self,
         jetstream: &async_nats::jetstream::Context,
+        context: &crate::application::context::ApplicationContext,
     ) -> Result<Arc<crate::interface::health::HealthService>> {
         info!("Initializing health service...");
 
-        // 创建 NodeRepository
-        let node_repo = Arc::new(crate::infrastructure::persistence::NatsNodeRepository::new(
-            jetstream.clone(),
-        ))
-            as Arc<dyn crate::application::ports::repositories::NodeRepository>;
+        // 创建健康检查服务
+        let health_check_service = Arc::new(
+            crate::application::services::health_check_service::AgentHealthCheckService::new(
+                context.agent_repo.clone(),
+            ),
+        );
 
         // 创建 HealthService
         let health_service = Arc::new(crate::interface::health::HealthService::new(
-            node_repo.clone(),
+            health_check_service,
         ));
 
         // 启动健康检查监控
-        health_service
-            .start_monitoring(jetstream.clone(), node_repo, 60)
-            .await;
+        health_service.start_monitoring(jetstream.clone(), 60).await;
 
         info!("Health service initialized successfully");
         Ok(health_service)
@@ -232,8 +236,10 @@ impl ServerBootstrapper {
         &self,
         jetstream: &async_nats::jetstream::Context,
         health_service: &Arc<crate::interface::health::HealthService>,
+        selector_engine: Arc<crate::application::selector::SelectorEngine>,
     ) -> Result<(
         Vec<tokio::task::JoinHandle<()>>,
+        tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
     )> {
         let (event_sender, _) = broadcast::channel(1000);
@@ -244,21 +250,26 @@ impl ServerBootstrapper {
             self.shutdown.child_token(),
         );
 
-        let handles = kv_watcher.start_watching().await?;
-
-        // 启动事件处理循环
+        // 先启动订阅者（事件处理器与索引更新器）再启动 Watchers，避免错过 watch_all 的回放事件
         let event_processor_handle = self
-            .start_event_processor(event_sender, health_service.clone())
+            .start_event_processor(event_sender.clone(), health_service.clone())
             .await?;
 
-        info!("KV watchers started successfully");
-        Ok((handles, event_processor_handle))
+        let index_updater_handle = self
+            .start_index_updater(event_sender.clone(), selector_engine)
+            .await?;
+
+        // 最后启动 KV Watchers（此时订阅者已就绪，可以接收快照与后续事件）
+        let handles = kv_watcher.start_watching().await?;
+
+        info!("KV watchers and index updater started successfully");
+        Ok((handles, event_processor_handle, index_updater_handle))
     }
 
     /// 启动事件处理器
     async fn start_event_processor(
         &self,
-        event_sender: broadcast::Sender<crate::domain::events::NodeEvent>,
+        event_sender: broadcast::Sender<crate::domain::events::AgentEvent>,
         health_service: Arc<crate::interface::health::HealthService>,
     ) -> Result<tokio::task::JoinHandle<()>> {
         let mut event_receiver = event_sender.subscribe();
@@ -274,17 +285,23 @@ impl ServerBootstrapper {
                     }
                     Ok(event) = event_receiver.recv() => {
                         match event {
-                            crate::domain::events::NodeEvent::Online { node_id, .. } => {
-                                health_service.update_agent_status(&node_id, true).await;
+                            crate::domain::events::AgentEvent::Online { agent_id, .. } => {
+                                health_service.update_agent_status(agent_id.as_str(), true).await;
                             }
-                            crate::domain::events::NodeEvent::Offline { node_id, .. } => {
-                                health_service.update_agent_status(&node_id, false).await;
+                            crate::domain::events::AgentEvent::Offline { agent_id, .. } => {
+                                health_service.update_agent_status(agent_id.as_str(), false).await;
                             }
-                            crate::domain::events::NodeEvent::LabelsUpdated { node_id, labels, timestamp } => {
-                                info!(node_id = %node_id, labels = ?labels, timestamp = %timestamp, "Node labels updated");
+                            crate::domain::events::AgentEvent::LabelsUpdated { agent_id, labels, timestamp } => {
+                                info!(agent_id = %agent_id, labels = ?labels, timestamp = %timestamp, "Agent labels updated");
                             }
-                            crate::domain::events::NodeEvent::FactsUpdated { node_id, facts, timestamp } => {
-                                tracing::debug!(node_id = %node_id, facts = ?facts, timestamp = %timestamp, "Node facts updated");
+                            crate::domain::events::AgentEvent::GroupsUpdated { agent_id, groups, timestamp } => {
+                                info!(agent_id = %agent_id, groups = ?groups, timestamp = %timestamp, "Agent groups updated");
+                            }
+                            crate::domain::events::AgentEvent::FactsUpdated { agent_id, facts, timestamp } => {
+                                tracing::debug!(agent_id = %agent_id, facts = ?facts, timestamp = %timestamp, "Agent facts updated");
+                            }
+                            crate::domain::events::AgentEvent::HeartbeatUpdated { agent_id, timestamp } => {
+                                tracing::debug!(agent_id = %agent_id, timestamp = %timestamp, "Agent heartbeat updated");
                             }
                         }
                     }
@@ -297,20 +314,47 @@ impl ServerBootstrapper {
         Ok(handle)
     }
 
+    /// 启动索引更新服务
+    async fn start_index_updater(
+        &self,
+        event_sender: broadcast::Sender<crate::domain::events::AgentEvent>,
+        selector_engine: Arc<crate::application::selector::SelectorEngine>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        let event_receiver = event_sender.subscribe();
+        let shutdown_token = self.shutdown.child_token();
+
+        // 创建索引更新服务
+        let mut index_updater =
+            crate::infrastructure::services::index_updater::IndexUpdaterService::new(
+                selector_engine,
+                event_receiver,
+                shutdown_token,
+            );
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = index_updater.run().await {
+                tracing::error!("Index updater error: {}", e);
+            }
+        });
+
+        Ok(handle)
+    }
+
     /// 启动 gRPC 服务器
     async fn start_grpc_server(
         &self,
         jetstream: &async_nats::jetstream::Context,
         health_service: &Arc<crate::interface::health::HealthService>,
         tls_service: &TlsService,
+        app_context: &crate::application::context::ApplicationContext,
     ) -> Result<tokio::task::JoinHandle<()>> {
         let tls_service_clone = tls_service.clone();
 
         let addr = self.config.listen_addr.parse()?;
-        let js_clone = jetstream.clone();
         let shutdown_token = self.shutdown.child_token(); // 创建子token
         let shutdown_clone = shutdown_token.clone(); // clone用于移动到闭包
         let health_clone = health_service.clone();
+        let app_ctx_clone = app_context.clone();
 
         let streaming_config = crate::interface::grpc::server::StreamingBackoffSection {
             initial_delay_ms: 100,
@@ -318,7 +362,7 @@ impl ServerBootstrapper {
             max_retries: 10,
         };
 
-        let heartbeat_ttl = 60;
+        let heartbeat_ttl = self.config.server.heartbeat_ttl_sec as u64;
 
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = GrpcServerManager::run_loop(
@@ -326,7 +370,7 @@ impl ServerBootstrapper {
                 || {
                     let svc =
                         futures::executor::block_on(GrpcServiceFactory::create_service_wrapper(
-                            js_clone.clone(),
+                            std::sync::Arc::new(app_ctx_clone.clone()),
                             shutdown_clone.child_token(), // 使用clone的token创建子token
                             heartbeat_ttl,
                             streaming_config.clone(),

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_nats::jetstream;
-use oasis_core::{agent::AgentLabels, constants, selector::NodeAttributes, types::AgentId};
+use oasis_core::{agent::AgentLabels, constants, types::AgentId};
+use std::collections::HashMap;
 
 pub struct NatsAttributesRepository {
     js: jetstream::Context,
@@ -16,19 +17,19 @@ impl NatsAttributesRepository {
     pub async fn publish_attributes(
         &self,
         agent_id: &AgentId,
-        attributes: &NodeAttributes,
+        labels: &HashMap<String, String>,
     ) -> Result<()> {
         let kv = self
             .js
-            .get_key_value(constants::JS_KV_NODE_LABELS)
+            .get_key_value(constants::JS_KV_AGENT_LABELS)
             .await
             .context("bind to node labels KV bucket")?;
 
-        // 将 NodeAttributes 中的 labels 以 AgentLabels 结构（Protobuf）写入
+        // 将 labels 以 AgentLabels 结构（Protobuf）写入
         let key = constants::kv_key_labels(agent_id.as_str());
         let agent_labels = AgentLabels {
             agent_id: agent_id.clone(),
-            labels: attributes.labels.clone(),
+            labels: labels.clone(),
             updated_at: chrono::Utc::now().timestamp(),
             updated_by: "oasis-agent".to_string(),
         };

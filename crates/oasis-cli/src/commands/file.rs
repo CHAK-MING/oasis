@@ -1,4 +1,3 @@
-use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::Parser;
 use console::style;
@@ -13,10 +12,10 @@ use oasis_core::proto::{
     about = "分发文件到 Agent 并管理对象存储",
     after_help = r#"示例：
   # 向 Web 服务器分发 nginx 配置
-  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels[\"role\"] == \"web\"'
+  oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
 
   # 原子替换并设置权限/属主
-  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels[\"environment\"] == \"prod\"' --atomic --owner root:root --mode 0644
+  oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --atomic --owner root:root --mode 0644
 
   # 指定多个 agent ID
   oasis-cli file apply --src ./config.conf --dest /etc/config.conf --target agent-1,agent-2,agent-3
@@ -30,13 +29,8 @@ pub enum FileArgs {
         /// 本地文件路径
         #[arg(long, value_name = "FILE_PATH", help = "本地文件路径")]
         src: String,
-        /// 目标（CEL 选择器或逗号分隔的 Agent ID）
-        #[arg(
-            long,
-            short = 't',
-            value_name = "TARGET",
-            help = "目标（CEL 选择器或 Agent ID）"
-        )]
+        /// 目标（选择器语法）
+        #[arg(long, short = 't', value_name = "TARGET", help = "目标（选择器语法）")]
         target: String,
         /// 目标机器上的目标路径
         #[arg(long, value_name = "DEST_PATH", help = "目标路径（远端）")]
@@ -88,12 +82,8 @@ pub async fn run_file(
                 style(&dest).cyan()
             );
 
-            // 使用智能解析器统一处理目标
-            let target_selector = TargetSelector::parse(&target)?;
             let target_msg = TaskTargetMsg {
-                target: Some(task_target_msg::Target::Selector(
-                    target_selector.expression().to_string(),
-                )),
+                target: Some(task_target_msg::Target::Selector(target.clone())),
             };
 
             // 依据源文件名推断对象存储名称
@@ -125,13 +115,13 @@ pub async fn run_file(
                     "  {} {} {}",
                     style("✔").green(),
                     style("文件已成功下发到").dim(),
-                    style(format!("{} 个节点", resp.applied_nodes.len()))
+                    style(format!("{} 个节点", resp.applied_agents.len()))
                         .dim()
                         .bold()
                 );
-                if !resp.failed_nodes.is_empty() {
+                if !resp.failed_agents.is_empty() {
                     let ids = resp
-                        .failed_nodes
+                        .failed_agents
                         .into_iter()
                         .map(|id| id.value)
                         .collect::<Vec<_>>()

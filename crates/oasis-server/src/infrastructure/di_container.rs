@@ -3,15 +3,16 @@ use std::sync::Arc;
 
 use crate::application::context::{ApplicationContext, ApplicationContextBuilder};
 use crate::application::ports::repositories::{
-    FileRepository, NodeRepository, RolloutRepository, TaskRepository,
+    AgentRepository, FileRepository, RolloutRepository, TaskRepository,
 };
-use crate::domain::services::SelectorEngine;
 use oasis_core::rate_limit::RateLimiterCollection;
 
 /// 基础设施依赖注入容器 - 负责创建具体实现
 pub struct InfrastructureDiContainer {
     jetstream: async_nats::jetstream::Context,
     limiters: std::sync::Arc<RateLimiterCollection>,
+    /// 共享的选择器索引实例，确保 SelectorEngine 与 IndexUpdater 使用同一份索引
+    shared_selector_index: std::sync::Arc<crate::application::selector::InvertedIndex>,
 }
 
 impl InfrastructureDiContainer {
@@ -20,19 +21,22 @@ impl InfrastructureDiContainer {
         Self {
             jetstream,
             limiters: std::sync::Arc::new(RateLimiterCollection::default()),
+            shared_selector_index: std::sync::Arc::new(
+                crate::application::selector::InvertedIndex::new(),
+            ),
         }
     }
 
     /// 创建完整的应用程序上下文，包含所有具体实现
     pub fn create_application_context(&self) -> Result<ApplicationContext> {
-        let node_repo = self.create_node_repository();
+        let agent_repo = self.create_agent_repository();
         let task_repo = self.create_task_repository();
         let rollout_repo = self.create_rollout_repository();
         let file_repo = self.create_file_repository();
         let selector_engine = self.create_selector_engine();
 
         ApplicationContextBuilder::new()
-            .with_node_repo(node_repo)
+            .with_agent_repo(agent_repo)
             .with_task_repo(task_repo)
             .with_rollout_repo(rollout_repo)
             .with_file_repo(file_repo)
@@ -40,11 +44,13 @@ impl InfrastructureDiContainer {
             .build()
     }
 
-    /// 创建节点仓储实现
-    fn create_node_repository(&self) -> Arc<dyn NodeRepository> {
-        Arc::new(crate::infrastructure::persistence::NatsNodeRepository::new(
-            self.jetstream.clone(),
-        )) as Arc<dyn NodeRepository>
+    /// 创建 Agent 仓储实现
+    fn create_agent_repository(&self) -> Arc<dyn AgentRepository> {
+        Arc::new(
+            crate::infrastructure::persistence::agent_repository::NatsAgentRepository::new(
+                self.jetstream.clone(),
+            ),
+        ) as Arc<dyn AgentRepository>
     }
 
     /// 创建任务仓储实现
@@ -69,9 +75,15 @@ impl InfrastructureDiContainer {
         )) as Arc<dyn FileRepository>
     }
 
-    /// 创建选择器引擎实现
-    fn create_selector_engine(&self) -> Arc<dyn SelectorEngine> {
-        Arc::new(crate::domain::services::selector_engine::CelSelectorEngine::new())
-            as Arc<dyn SelectorEngine>
+    /// 创建选择器引擎
+    fn create_selector_engine(&self) -> Arc<crate::application::selector::SelectorEngine> {
+        Arc::new(crate::application::selector::SelectorEngine::new(
+            self.shared_selector_index.clone(),
+        ))
+    }
+
+    /// 获取共享的索引实例（用于 IndexUpdaterService）
+    pub fn get_shared_index(&self) -> Arc<crate::application::selector::InvertedIndex> {
+        self.shared_selector_index.clone()
     }
 }

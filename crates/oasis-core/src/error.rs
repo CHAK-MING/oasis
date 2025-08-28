@@ -40,6 +40,21 @@ pub enum CoreError {
     #[error("NATS error: {message}")]
     Nats { message: String },
 
+    // === 数据相关错误 ===
+    #[error("Entity not found: {entity_type} with id {entity_id}")]
+    NotFound {
+        entity_type: String,
+        entity_id: String,
+    },
+
+    #[error("Version conflict for {entity_type} with id {entity_id}")]
+    VersionConflict {
+        entity_type: String,
+        entity_id: String,
+        expected_version: u64,
+        actual_version: u64,
+    },
+
     // === 文件和存储错误 ===
     #[error("File error: {path} - {message}")]
     File { path: String, message: String },
@@ -142,8 +157,6 @@ impl CoreError {
 
 /// Core 操作的 Result 类型别名
 pub type Result<T> = std::result::Result<T, CoreError>;
-
-
 
 impl From<std::io::Error> for CoreError {
     fn from(err: std::io::Error) -> Self {

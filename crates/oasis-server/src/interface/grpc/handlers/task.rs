@@ -34,7 +34,7 @@ impl TaskHandlers {
                 if s.is_empty() {
                     return Err(Status::invalid_argument("Selector cannot be empty"));
                 }
-                srv.manage_nodes_use_case()
+                srv.manage_agents_use_case()
                     .resolve_selector(s)
                     .await
                     .map_err(map_core_error)?
@@ -173,8 +173,8 @@ impl TaskHandlers {
             None => return Err(Status::invalid_argument("Target is required")),
         };
 
-        let response = srv
-            .manage_nodes_use_case()
+                  let response = srv
+            .manage_agents_use_case()
             .resolve_selector(&target_selector)
             .await
             .map_err(map_core_error)?;
@@ -183,8 +183,8 @@ impl TaskHandlers {
             return Ok(Response::new(ApplyFileResponse {
                 success: false,
                 message: format!("No nodes matched selector: {}", target_selector),
-                applied_nodes: Vec::new(),
-                failed_nodes: Vec::new(),
+                applied_agents: Vec::new(),
+                failed_agents: Vec::new(),
             }));
         }
 
@@ -214,11 +214,11 @@ impl TaskHandlers {
         Ok(Response::new(ApplyFileResponse {
             success: true,
             message: format!("File apply task created: {}", task_id),
-            applied_nodes: response
+            applied_agents: response
                 .iter()
                 .map(|id| oasis_core::proto::AgentId { value: id.clone() })
                 .collect(),
-            failed_nodes: Vec::new(),
+            failed_agents: Vec::new(),
         }))
     }
 

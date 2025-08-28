@@ -18,29 +18,24 @@ use tonic::transport::{Channel, Endpoint};
     version,
     about,
     long_about = None,
-    after_help = r#"Examples:
-  # Execute commands on agents (target supports CEL or comma-separated IDs)
+    after_help = r#"示例：
+  # 在节点上执行命令
   oasis-cli exec -t 'labels["environment"] == "prod"' -- /usr/bin/ps aux
-  oasis-cli exec -t 'agent-1,agent-2' -- /usr/bin/uptime
-  oasis-cli exec -t 'true' -- /usr/bin/uptime
+  oasis-cli exec -t "agent-1,agent-2" -- /usr/bin/uptime
+  oasis-cli exec -t "true" -- /usr/bin/uptime
 
-  # Manage files across agents
+  # 管理文件
   oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf -t 'labels["role"] == "web"'
   oasis-cli file clear
 
-  # Manage cluster nodes (still support --selector)
-  oasis-cli node ls --output table
-  oasis-cli node ls --selector 'labels["environment"] == "prod"' --verbose
-  oasis-cli node facts --selector 'labels["role"] == "db"' --output table
-
-  # Task results
-  oasis-cli task get --id <task_id> --wait-ms 5000
-  oasis-cli task watch --id <task_id>
+  # 管理 agent 节点
+  oasis-cli agent list --target 'labels["environment"] == "prod"' --verbose
+  oasis-cli agent list --target 'labels["role"] == "db"' --verbose
 
 For detailed options:
   oasis-cli exec --help
   oasis-cli file --help
-  oasis-cli node --help"#
+  oasis-cli agent --help"#
 )]
 pub struct Cli {
     /// Configuration file path (handled in main.rs for telemetry)
@@ -110,10 +105,8 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
 async fn create_grpc_client(
     config: &oasis_core::config::OasisConfig,
 ) -> Result<OasisServiceClient<Channel>> {
-    // 使用配置中的服务器地址，强制使用 TLS
-    // 将 0.0.0.0 替换为 localhost 以匹配证书的 SAN
-    let server_addr = config.listen_addr.replace("0.0.0.0", "localhost");
-    let server_url = format!("https://{}", server_addr);
+    // 使用配置中的 gRPC 外部 URL
+    let server_url = config.grpc.url.clone();
 
     println!("› 正在连接 Oasis 服务器: {}", style(&server_url).cyan());
 

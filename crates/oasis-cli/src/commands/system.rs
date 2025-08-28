@@ -385,19 +385,17 @@ log_no_ansi = false
 # NATS 服务器地址
 url = "tls://127.0.0.1:4222"
 
+# gRPC 配置（对外 URL）
+[grpc]
+url = "https://127.0.0.1:50051"
+
 # 服务器配置
 [server]
 # 心跳超时时间（秒）
 heartbeat_ttl_sec = 60
-# 租约超时时间（秒）
-lease_ttl_sec = 30
-# 续约间隔时间（秒）
-renewal_interval_sec = 5
 
 # Agent 配置
 [agent]
-# 服务器 URL
-server_url = "https://127.0.0.1:50051"
 # 心跳间隔时间（秒）
 heartbeat_interval_sec = 30
 # 事实收集间隔时间（秒）
@@ -454,21 +452,33 @@ async fn check_certificates_exist() -> Result<bool> {
 }
 
 async fn find_server_processes() -> Result<Vec<u32>> {
+    // 使用精确匹配进程名，避免误匹配包含 "oasis-server" 的其他命令行
     let output = std::process::Command::new("pgrep")
-        .arg("-f")
+        .arg("-x")
         .arg("oasis-server")
         .output()
         .context("Failed to find server processes")?;
 
-    if output.status.success() {
-        let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect();
-        Ok(pids)
-    } else {
-        Ok(vec![])
+    if !output.status.success() {
+        return Ok(vec![]);
     }
+
+    // 解析 PID，并通过 kill -0 校验进程仍然存活
+    let mut alive_pids: Vec<u32> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Ok(pid) = line.trim().parse::<u32>() {
+            let status = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status();
+            if let Ok(st) = status {
+                if st.success() {
+                    alive_pids.push(pid);
+                }
+            }
+        }
+    }
+    Ok(alive_pids)
 }
 
 fn find_server_binary() -> Result<PathBuf> {

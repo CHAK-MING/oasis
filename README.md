@@ -22,17 +22,19 @@ docker compose up -d
 oasis-cli system start --daemon
 ```
 
-4. 启动本机 Agent（使用 `./certs` 证书）
+4. 启动本机 Agent（使用 `./certs` 证书，带 labels/groups 示例）
 
 ```bash
 OASIS_NATS_URL=tls://127.0.0.1:4222 \
 OASIS_NATS_CA=certs/nats-ca.pem \
 OASIS_NATS_CLIENT_CERT=certs/nats-client.pem \
 OASIS_NATS_CLIENT_KEY=certs/nats-client-key.pem \
-OASIS_SERVER_URL=https://127.0.0.1:50051 \
+OASIS_GRPC__URL=https://127.0.0.1:50051 \
 OASIS_GRPC_CA=certs/grpc-ca.pem \
 OASIS_GRPC_CLIENT_CERT=certs/grpc-client.pem \
 OASIS_GRPC_CLIENT_KEY=certs/grpc-client-key.pem \
+OASIS_AGENT_LABELS="role=web,env=dev,zone=az1" \
+OASIS_AGENT_GROUPS="frontend,blue" \
 ./target/debug/oasis-agent
 ```
 
@@ -73,8 +75,10 @@ cd deploy && ./install.sh
 
 `agent.env`（自动生成）中的关键变量：
 
-- OASIS_SERVER_URL：Server 的 gRPC 地址（必须为 https）
+- OASIS_GRPC\_\_URL：Server 的 gRPC 地址（必须为 https）
 - OASIS_NATS_URL：NATS 地址（必须为 tls）
+- OASIS_AGENT_LABELS：Agent 启动时的标签（逗号分隔，如 `k1=v1,k2=v2`）
+- OASIS_AGENT_GROUPS：Agent 启动时的分组（逗号分隔，如 `g1,g2`）
 - 证书路径默认在 `/opt/oasis/certs/`，安装脚本会从 `deploy/certs/` 拷贝过去
 
 ## CLI 用法
@@ -102,10 +106,10 @@ oasis-cli system stop
 oasis-cli exec --target 'labels["role"] == "web"' -- /usr/bin/uptime
 
 # 等待结果（5秒超时）
-oasis-cli exec --target true --wait-ms 5000 -- /bin/echo hi
+oasis-cli exec --target "true" --wait-ms 5000 -- /bin/echo hi
 
 # 流式查看结果
-oasis-cli exec --target true --stream -- /bin/echo hi
+oasis-cli exec --target "true" --stream -- /bin/echo hi
 ```
 
 ### file：分发文件

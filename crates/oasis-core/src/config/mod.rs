@@ -17,6 +17,8 @@ pub struct OasisConfig {
     #[serde(default)]
     pub nats: NatsConfig,
     #[serde(default)]
+    pub grpc: GrpcConfig,
+    #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
     pub server: ServerConfig,
@@ -25,35 +27,41 @@ pub struct OasisConfig {
 }
 
 impl OasisConfig {
-    /// 从指定路径或当前目录中的 oasis.toml 加载配置；如果文件不存在则返回默认配置
+    /// 从指定路径或当前目录中的 oasis.toml 加载配置；支持以 OASIS_ 为前缀的环境变量覆盖（Figment）
     pub fn load_config(path: Option<&str>) -> Result<Self, anyhow::Error> {
+        use figment::{Figment, providers::Env, providers::Format, providers::Toml};
         use std::path::Path;
 
-        let (content, base_dir): (String, std::path::PathBuf) = if let Some(p) = path {
+        // 基础：默认配置
+        let mut figment = Figment::from(figment::providers::Serialized::defaults(
+            OasisConfig::default(),
+        ));
+
+        // 文件层：显式路径优先，否则尝试工作目录下 oasis.toml
+        let base_dir: std::path::PathBuf;
+        if let Some(p) = path {
             let p = Path::new(p);
-            let content = std::fs::read_to_string(p).map_err(|e| {
-                anyhow::anyhow!("Failed to read config file at {}: {}", p.display(), e)
-            })?;
-            let base = p.parent().unwrap_or_else(|| Path::new("."));
-            (content, base.to_path_buf())
+            base_dir = p.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+            figment = figment.merge(Toml::file(p));
         } else {
             let default_path = Path::new("oasis.toml");
             if default_path.exists() {
-                let content = std::fs::read_to_string(default_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read config file oasis.toml: {}", e))?;
-                (
-                    content,
-                    std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
-                )
+                base_dir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+                figment = figment.merge(Toml::file(default_path));
             } else {
-                return Ok(OasisConfig::default());
+                base_dir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
             }
-        };
+        }
 
-        let mut cfg: OasisConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse oasis.toml: {}", e))?;
+        // 环境变量层：使用前缀 OASIS_CFG__，分隔符 __ 用于嵌套字段（如 OASIS_CFG__GRPC__URL）
+        figment = figment.merge(Env::prefixed("OASIS_CFG__").split("__"));
 
-        // Resolve relative paths against base_dir
+        // 提取并解析
+        let mut cfg: OasisConfig = figment
+            .extract()
+            .map_err(|e| anyhow::anyhow!("Failed to load config via Figment: {}", e))?;
+
+        // 解析相对路径
         cfg.resolve_relative_paths(&base_dir);
         Ok(cfg)
     }
@@ -100,6 +108,22 @@ impl Default for NatsConfig {
     }
 }
 
+/// gRPC configuration (shared by server listen and agent connect URL)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcConfig {
+    #[serde(default = "default_grpc_url")]
+    pub url: String,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            url: default_grpc_url(),
+        }
+    }
+}
+
 /// TLS configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,18 +158,12 @@ impl Default for TlsConfig {
 pub struct ServerConfig {
     #[serde(default = "default_heartbeat_ttl")]
     pub heartbeat_ttl_sec: u64,
-    #[serde(default = "default_lease_ttl")]
-    pub lease_ttl_sec: u64,
-    #[serde(default = "default_renewal_interval")]
-    pub renewal_interval_sec: u64,
 }
 
 /// Agent-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
-    #[serde(default = "default_server_url")]
-    pub server_url: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_sec: u64,
     #[serde(default = "default_fact_collection_interval")]
@@ -214,15 +232,7 @@ fn default_heartbeat_ttl() -> u64 {
     60
 }
 
-fn default_lease_ttl() -> u64 {
-    30
-}
-
-fn default_renewal_interval() -> u64 {
-    5
-}
-
-fn default_server_url() -> String {
+fn default_grpc_url() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 

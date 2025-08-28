@@ -7,9 +7,9 @@ pub const JS_STREAM_CONFIG: &str = "OASIS-CONFIG"; // 配置更新Stream
 
 // KV 存储结构重构 - 分离不同生命周期的数据
 // 新架构：三个独立的 KV buckets，支持独立的 TTL 和版本管理
-pub const JS_KV_NODE_FACTS: &str = "OASIS-NODE-FACTS"; // facts (版本化，非TTL)
-pub const JS_KV_NODE_HEARTBEAT: &str = "OASIS-NODE-HB"; // heartbeat (TTL=2x心跳)
-pub const JS_KV_NODE_LABELS: &str = "OASIS-NODE-LABELS"; // labels (Server/CLI可变更)
+pub const JS_KV_AGENT_FACTS: &str = "OASIS-AGENT-FACTS"; // facts (版本化，非TTL)
+pub const JS_KV_AGENT_HEARTBEAT: &str = "OASIS-AGENT-HB"; // heartbeat (TTL=2x心跳)
+pub const JS_KV_AGENT_LABELS: &str = "OASIS-AGENT-LABELS"; // labels (Server/CLI可变更)
 // 增量属性更新（JSON Patch）主题前缀
 pub const NATS_ATTRIBUTES_PATCH_SUBJECT_PREFIX: &str = "agent.attributes.patch";
 
@@ -91,7 +91,6 @@ pub fn tasks_unicast_subject(agent_id: &str) -> String {
 
 /// 生成默认工作队列消费者名称（共享）
 /// 注意：默认消费者是共享的，在工作队列流上同一个 subject 只能有一个消费者
-/// 使用新名称以支持 DeliverPolicy 更新（从 All 改为 New）
 pub fn default_consumer_name() -> &'static str {
     DEFAULT_CONSUMER_NAME
 }

@@ -1,7 +1,6 @@
 //! 灰度发布命令
 //! 覆盖灰度的发起、监控、控制与回滚全流程。
 
-use crate::common::target::TargetSelector;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, ContentArrangement, Table};
@@ -82,12 +81,12 @@ pub struct StartArgs {
     #[arg(short, long, default_value = "canary")]
     pub strategy: String,
 
-    /// 目标（CEL 选择器或逗号分隔的 Agent ID）
+    /// 目标（选择器语法）
     #[arg(
         long,
         short = 't',
         value_name = "<TARGET>",
-        help = "目标（CEL 选择器或 Agent ID）"
+        help = "目标（选择器语法，如 'labels[\"role\"] == \"web\"' )"
     )]
     pub target: String,
 
@@ -110,10 +109,6 @@ pub struct StartArgs {
     /// 自动推进
     #[arg(long)]
     pub auto_advance: bool,
-
-    /// 健康检查配置
-    #[arg(long)]
-    pub health_check: Option<String>,
 
     /// 超时（秒）
     #[arg(long, default_value = "3600")]
@@ -244,12 +239,8 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
     }
     println!("  {} 解析任务标签", style("✔").green());
 
-    // 使用智能解析器统一处理目标
-    let target_selector = TargetSelector::parse(&args.target)?;
     let target_msg = TaskTargetMsg {
-        target: Some(task_target_msg::Target::Selector(
-            target_selector.expression().to_string(),
-        )),
+        target: Some(task_target_msg::Target::Selector(args.target.clone())),
     };
     println!("  {} 解析目标选择器", style("✔").green());
 
@@ -313,7 +304,7 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
         strategy: Some(strategy),
         timeout_seconds: args.timeout,
         auto_advance: args.auto_advance,
-        health_check: args.health_check.unwrap_or_default(),
+        health_check: String::new(),
         labels: labels.clone(),
     };
 
@@ -324,9 +315,7 @@ async fn start_rollout(args: StartArgs, mut client: OasisServiceClient<Channel>)
             config: Some(config_msg),
             labels,
             target: Some(TaskTargetMsg {
-                target: Some(task_target_msg::Target::Selector(
-                    target_selector.expression().to_string(),
-                )),
+                target: Some(task_target_msg::Target::Selector(args.target.clone())),
             }),
         })
         .await?;
@@ -389,8 +378,8 @@ async fn show_rollout_status(
                         "  {:<10} {} {}/{}, {:.1}%",
                         "进度:",
                         style(progress_bar).cyan(),
-                        p.processed_nodes,
-                        p.total_nodes,
+                        p.processed_agents,
+                        p.total_agents,
                         p.completion_rate * 100.0
                     );
                 }
@@ -515,8 +504,8 @@ async fn list_rollouts(args: ListArgs, mut client: OasisServiceClient<Channel>) 
             .map(|p| {
                 format!(
                     "{}/{} ({:.0}%)",
-                    p.processed_nodes,
-                    p.total_nodes,
+                    p.processed_agents,
+                    p.total_agents,
                     p.completion_rate * 100.0
                 )
             })

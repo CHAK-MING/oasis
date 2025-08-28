@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, ContentArrangement, Table, Color};
+use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use console::style;
 use std::path::PathBuf;
 
@@ -16,7 +16,7 @@ pub enum AgentCommands {
         #[arg(short, long)]
         key: Option<PathBuf>,
 
-        /// Agent 连接的 Server URL
+        /// Agent 连接的 Server URL（等价于 grpc.url 覆盖）
         #[arg(short, long, default_value = "https://127.0.0.1:50051")]
         server_url: String,
 
@@ -27,6 +27,24 @@ pub enum AgentCommands {
         /// 部署文件输出目录
         #[arg(short, long, default_value = "./deploy")]
         output_dir: PathBuf,
+
+        /// Agent 标签，格式 KEY=VALUE，可多次指定
+        #[arg(
+            long,
+            value_name = "KEY=VALUE",
+            action = clap::ArgAction::Append,
+            help = "Agent 标签（可重复）",
+        )]
+        labels: Vec<String>,
+
+        /// Agent 组，可多次指定
+        #[arg(
+            long,
+            value_name = "GROUP",
+            action = clap::ArgAction::Append,
+            help = "Agent 组（可重复）",
+        )]
+        groups: Vec<String>,
     },
 
     /// 列出已部署的 agents
@@ -34,6 +52,10 @@ pub enum AgentCommands {
         /// 显示详细信息（包括 facts）
         #[arg(short, long)]
         verbose: bool,
+
+        /// 目标选择器
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
     },
 
     /// 从远端移除 agent
@@ -56,8 +78,15 @@ pub async fn run_agent(cmd: AgentCommands) -> Result<()> {
             server_url,
             nats_url,
             output_dir,
-        } => deploy_agent(target, key, server_url, nats_url, output_dir).await,
-        AgentCommands::List { verbose } => list_agents(verbose).await,
+            labels,
+            groups,
+        } => {
+            deploy_agent(
+                target, key, server_url, nats_url, output_dir, labels, groups,
+            )
+            .await
+        }
+        AgentCommands::List { verbose, target } => list_agents(verbose, target).await,
         AgentCommands::Remove { target, key } => remove_agent(target, key).await,
     }
 }
@@ -68,6 +97,8 @@ async fn deploy_agent(
     server_url: String,
     nats_url: String,
     output_dir: PathBuf,
+    labels: Vec<String>,
+    groups: Vec<String>,
 ) -> Result<()> {
     println!(
         "{} {}",
@@ -84,7 +115,7 @@ async fn deploy_agent(
     println!("  {} {}", style("✔").green(), style("生成部署脚本").dim());
 
     // 生成环境变量文件
-    let env_file = generate_env_file(&server_url, &nats_url)?;
+    let env_file = generate_env_file(&server_url, &nats_url, &labels, &groups)?;
     let env_path = output_dir.join("agent.env");
     std::fs::write(&env_path, env_file)?;
     println!(
@@ -186,13 +217,34 @@ echo "  查看日志: sudo journalctl -u oasis-agent -f"
     Ok(script)
 }
 
-fn generate_env_file(server_url: &str, nats_url: &str) -> Result<String> {
+fn generate_env_file(
+    server_url: &str,
+    nats_url: &str,
+    labels: &[String],
+    groups: &[String],
+) -> Result<String> {
+    // 解析标签
+    let labels_env = if labels.is_empty() {
+        String::new()
+    } else {
+        let labels_str = labels.join(",");
+        format!("\n# Agent 标签\nOASIS_AGENT_LABELS={labels_str}")
+    };
+
+    // 解析组
+    let groups_env = if groups.is_empty() {
+        String::new()
+    } else {
+        let groups_str = groups.join(",");
+        format!("\n# Agent 组\nOASIS_AGENT_GROUPS={groups_str}")
+    };
+
     let env = format!(
         r#"# Oasis Agent 环境变量
 # 该文件由工具自动生成，请勿手工修改
 
 # Server 配置
-OASIS_SERVER_URL={server_url}
+OASIS_GRPC__URL={server_url}
 
 # NATS 配置
 OASIS_NATS_URL={nats_url}
@@ -208,7 +260,7 @@ OASIS_GRPC_CLIENT_KEY=/opt/oasis/certs/grpc-client-key.pem
 # Agent 配置
 OASIS_LOG_LEVEL=info
 OASIS_HEARTBEAT_INTERVAL_SEC=30
-OASIS_FACT_COLLECTION_INTERVAL_SEC=300
+OASIS_FACT_COLLECTION_INTERVAL_SEC=300{labels_env}{groups_env}
 
 # 性能配置
 OASIS_MAX_CONCURRENT_TASKS=10
@@ -296,22 +348,19 @@ echo "  查看状态: ssh {key_arg} {target} 'sudo systemctl status oasis-agent'
     Ok(script)
 }
 
-async fn list_agents(verbose: bool) -> Result<()> {
+async fn list_agents(verbose: bool, target: Option<String>) -> Result<()> {
     println!("{}", style("列出所有已连接的 Agent...").bold());
 
-    // 复用 node 命令的逻辑来获取 Agent 列表
     let config = oasis_core::config::OasisConfig::load_config(None)?;
-    let server_addr = config.listen_addr;
-    let server_url = format!("https://{}", server_addr);
+    let server_url = config.grpc.url.clone();
 
     let endpoint =
         tonic::transport::Endpoint::from_shared(server_url).context("Invalid server URL")?;
 
-    // 加载客户端证书
-    let certs_dir = std::env::current_dir()?.join("certs");
-    let ca_cert = tokio::fs::read(certs_dir.join("grpc-ca.pem")).await?;
-    let client_cert = tokio::fs::read(certs_dir.join("grpc-client.pem")).await?;
-    let client_key = tokio::fs::read(certs_dir.join("grpc-client-key.pem")).await?;
+    // 加载客户端证书（使用配置中的路径，确保与服务端匹配）
+    let ca_cert = tokio::fs::read(&config.tls.grpc_ca_path).await?;
+    let client_cert = tokio::fs::read(&config.tls.grpc_client_cert_path).await?;
+    let client_key = tokio::fs::read(&config.tls.grpc_client_key_path).await?;
 
     let tls_config = tonic::transport::ClientTlsConfig::new()
         .ca_certificate(tonic::transport::Certificate::from_pem(ca_cert))
@@ -328,32 +377,30 @@ async fn list_agents(verbose: bool) -> Result<()> {
 
     let mut client = oasis_core::proto::oasis_service_client::OasisServiceClient::new(channel);
 
+    // 优先使用新的 target 字段，如果为空则回退到 selector
     // 调用服务器 API 获取节点列表
     let response = client
-        .list_nodes(oasis_core::proto::ListNodesRequest {
-            selector: Some(String::new()),
-            verbose: false,
-        })
+        .list_agents(oasis_core::proto::ListAgentsRequest { target, verbose })
         .await
         .context("Failed to get nodes from server")?;
 
-    let nodes = response.into_inner().nodes;
+    let agents = response.into_inner().agents;
 
-    if nodes.is_empty() {
+    if agents.is_empty() {
         println!("  {}", style("没有已连接的 Agent").yellow());
         return Ok(());
     }
 
     if verbose {
         // 详细模式：显示 facts 信息
-        for node in nodes {
-            let agent_id = node
+        for agent in agents {
+            let agent_id = agent
                 .agent_id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
-            let is_online = node.is_online;
-            let labels = node
+            let is_online = agent.is_online;
+            let labels = agent
                 .labels
                 .into_iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -381,7 +428,7 @@ async fn list_agents(verbose: bool) -> Result<()> {
             );
 
             // 解析并显示 facts（来自 Protobuf 结构）
-            if let Some(facts) = node.facts {
+            if let Some(facts) = agent.facts {
                 println!("  {}:", style("系统信息").dim());
                 println!("    {}: {}", style("操作系统").dim(), facts.os_name);
                 println!("    {}: {}", style("版本").dim(), facts.os_version);
@@ -412,14 +459,14 @@ async fn list_agents(verbose: bool) -> Result<()> {
             Cell::new("标签").add_attribute(Attribute::Bold),
         ]);
 
-        for node in nodes {
-            let agent_id = node
+        for agent in agents {
+            let agent_id = agent
                 .agent_id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
-            let is_online = node.is_online;
-            let labels = node
+            let is_online = agent.is_online;
+            let labels = agent
                 .labels
                 .into_iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -427,7 +474,7 @@ async fn list_agents(verbose: bool) -> Result<()> {
                 .join(", ");
 
             // 从 facts 中提取主机名
-            let hostname = node
+            let hostname = agent
                 .facts
                 .as_ref()
                 .map(|f| f.hostname.clone())
@@ -444,7 +491,11 @@ async fn list_agents(verbose: bool) -> Result<()> {
                 Cell::new(agent_id),
                 Cell::new(hostname),
                 status_cell,
-                Cell::new(if labels.is_empty() { "-".to_string() } else { labels }),
+                Cell::new(if labels.is_empty() {
+                    "-".to_string()
+                } else {
+                    labels
+                }),
             ]);
         }
 

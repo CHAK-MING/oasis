@@ -7,7 +7,6 @@ pub mod error;
 pub mod patch;
 pub mod proto_impls;
 pub mod rate_limit;
-pub mod selector;
 pub mod shutdown;
 pub mod task;
 pub mod telemetry;

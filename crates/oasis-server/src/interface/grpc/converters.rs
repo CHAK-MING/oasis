@@ -185,11 +185,6 @@ pub fn from_proto_rollout_config(
         strategy,
         timeout_seconds: msg.timeout_seconds,
         auto_advance: msg.auto_advance,
-        health_check: if msg.health_check.is_empty() {
-            None
-        } else {
-            Some(msg.health_check.clone())
-        },
         labels: msg.labels.clone(),
     })
 }
@@ -232,7 +227,7 @@ pub fn to_proto_rollout_config(cfg: &RolloutConfig) -> oasis_core::proto::Rollou
         strategy,
         timeout_seconds: cfg.timeout_seconds,
         auto_advance: cfg.auto_advance,
-        health_check: cfg.health_check.clone().unwrap_or_default(),
+        health_check: String::new(),
         labels: cfg.labels.clone(),
     }
 }
@@ -242,10 +237,10 @@ pub fn to_proto_progress(
     p: &crate::domain::models::rollout::RolloutProgress,
 ) -> oasis_core::proto::RolloutProgressMsg {
     oasis_core::proto::RolloutProgressMsg {
-        total_nodes: p.total_nodes as u32,
-        processed_nodes: p.processed_nodes as u32,
-        successful_nodes: p.successful_nodes as u32,
-        failed_nodes: p.failed_nodes as u32,
+        total_agents: p.total_agents as u32,
+        processed_agents: p.processed_agents as u32,
+        successful_agents: p.successful_agents as u32,
+        failed_agents: p.failed_agents as u32,
         completion_rate: p.completion_rate,
         current_batch: p.current_batch.unwrap_or(0) as u32,
         total_batches: p.total_batches as u32,
@@ -258,7 +253,7 @@ pub fn to_proto_batch_result(
 ) -> oasis_core::proto::BatchResultMsg {
     oasis_core::proto::BatchResultMsg {
         batch_index: b.batch_index as u32,
-        node_count: b.node_count as u32,
+        agent_count: b.agent_count as u32,
         successful_count: b.successful_count as u32,
         failed_count: b.failed_count as u32,
         duration_secs: b.duration_secs,
@@ -375,8 +370,8 @@ pub fn to_proto_rollout(
         state_data: Some(state_data),
         progress: Some(to_proto_progress(&r.progress)),
         batch_results: r.batch_results.iter().map(to_proto_batch_result).collect(),
-        processed_nodes: r
-            .processed_nodes
+        processed_agents: r
+            .processed_agents
             .iter()
             .map(|id| oasis_core::proto::AgentId { value: id.clone() })
             .collect(),
@@ -386,11 +381,11 @@ pub fn to_proto_rollout(
             .map(|(k, v)| (k.clone(), oasis_core::proto::TaskId { value: v.clone() }))
             .collect(),
         current_batch_started_at: r.current_batch_started_at.unwrap_or(0),
-        cached_target_nodes: r
-            .cached_target_nodes
+        cached_target_agents: r
+            .cached_target_agents
             .as_ref()
-            .map(|nodes| {
-                nodes
+            .map(|agents| {
+                agents
                     .iter()
                     .map(|id| oasis_core::proto::AgentId { value: id.clone() })
                     .collect()
@@ -407,10 +402,10 @@ pub fn from_proto_progress(
     msg: &oasis_core::proto::RolloutProgressMsg,
 ) -> crate::domain::models::rollout::RolloutProgress {
     crate::domain::models::rollout::RolloutProgress {
-        total_nodes: msg.total_nodes as usize,
-        processed_nodes: msg.processed_nodes as usize,
-        successful_nodes: msg.successful_nodes as usize,
-        failed_nodes: msg.failed_nodes as usize,
+        total_agents: msg.total_agents as usize,
+        processed_agents: msg.processed_agents as usize,
+        successful_agents: msg.successful_agents as usize,
+        failed_agents: msg.failed_agents as usize,
         completion_rate: msg.completion_rate,
         current_batch: if msg.current_batch == 0 {
             None
@@ -427,7 +422,7 @@ pub fn from_proto_batch_result(
 ) -> crate::domain::models::rollout::BatchResult {
     crate::domain::models::rollout::BatchResult {
         batch_index: msg.batch_index as usize,
-        node_count: msg.node_count as usize,
+        agent_count: msg.agent_count as usize,
         successful_count: msg.successful_count as usize,
         failed_count: msg.failed_count as usize,
         duration_secs: msg.duration_secs,
@@ -439,7 +434,7 @@ pub fn from_proto_batch_result(
 pub fn from_proto_state(
     state: i32,
     data: &oasis_core::proto::RolloutStateDataMsg,
-    progress: &crate::domain::models::rollout::RolloutProgress,
+    _progress: &crate::domain::models::rollout::RolloutProgress,
 ) -> Result<crate::domain::models::rollout::RolloutState, CoreError> {
     use crate::domain::models::rollout::RolloutState as S;
     match oasis_core::proto::RolloutStateEnum::from_i32(state) {
@@ -526,8 +521,8 @@ pub fn from_proto_rollout(
         .map(from_proto_batch_result)
         .collect::<Vec<_>>();
 
-    let processed_nodes = msg
-        .processed_nodes
+    let processed_agents = msg
+        .processed_agents
         .iter()
         .map(|a| a.value.clone())
         .collect::<std::collections::HashSet<_>>();
@@ -544,15 +539,15 @@ pub fn from_proto_rollout(
         Some(msg.current_batch_started_at)
     };
 
-    let cached_target_nodes_vec = msg
-        .cached_target_nodes
+    let cached_target_agents_vec = msg
+        .cached_target_agents
         .iter()
         .map(|a| a.value.clone())
         .collect::<Vec<_>>();
-    let cached_target_nodes = if cached_target_nodes_vec.is_empty() {
+    let cached_target_agents = if cached_target_agents_vec.is_empty() {
         None
     } else {
-        Some(cached_target_nodes_vec)
+        Some(cached_target_agents_vec)
     };
 
     Ok(DRollout {
@@ -564,10 +559,10 @@ pub fn from_proto_rollout(
         state,
         progress,
         batch_results,
-        processed_nodes,
+        processed_agents,
         current_batch_tasks,
         current_batch_started_at,
-        cached_target_nodes,
+        cached_target_agents,
         created_at: msg.created_at,
         updated_at: msg.updated_at,
         version: msg.version,

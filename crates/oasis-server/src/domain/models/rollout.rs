@@ -73,10 +73,10 @@ pub enum RolloutState {
 /// 发布进度
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutProgress {
-    pub total_nodes: usize,
-    pub processed_nodes: usize,
-    pub successful_nodes: usize,
-    pub failed_nodes: usize,
+    pub total_agents: usize,
+    pub processed_agents: usize,
+    pub successful_agents: usize,
+    pub failed_agents: usize,
     pub completion_rate: f64,
     pub current_batch: Option<usize>,
     pub total_batches: usize,
@@ -86,7 +86,7 @@ pub struct RolloutProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult {
     pub batch_index: usize,
-    pub node_count: usize,
+    pub agent_count: usize,
     pub successful_count: usize,
     pub failed_count: usize,
     pub duration_secs: u64,
@@ -99,7 +99,6 @@ pub struct RolloutConfig {
     pub strategy: RolloutStrategy,
     pub timeout_seconds: u64,
     pub auto_advance: bool,
-    pub health_check: Option<String>,
     pub labels: HashMap<String, String>,
 }
 
@@ -115,13 +114,13 @@ pub struct Rollout {
     pub progress: RolloutProgress,
     pub batch_results: Vec<BatchResult>,
     /// 已处理的节点集合
-    pub processed_nodes: HashSet<String>,
+    pub processed_agents: HashSet<String>,
     /// 当前批次正在运行的任务 (node_id -> task_id)
     pub current_batch_tasks: HashMap<String, String>,
     /// 当前批次开始时间（用于计算批次耗时）
     pub current_batch_started_at: Option<i64>,
     /// 缓存的目标节点列表（避免重复解析选择器）
-    pub cached_target_nodes: Option<Vec<String>>,
+    pub cached_target_agents: Option<Vec<String>>,
     pub created_at: i64,
     pub updated_at: i64,
     pub version: u64,
@@ -144,19 +143,19 @@ impl Rollout {
             config,
             state: RolloutState::Created,
             progress: RolloutProgress {
-                total_nodes: 0,
-                processed_nodes: 0,
-                successful_nodes: 0,
-                failed_nodes: 0,
+                total_agents: 0,
+                processed_agents: 0,
+                successful_agents: 0,
+                failed_agents: 0,
                 completion_rate: 0.0,
                 current_batch: None,
                 total_batches: 0,
             },
             batch_results: Vec::new(),
-            processed_nodes: HashSet::new(),
+            processed_agents: HashSet::new(),
             current_batch_tasks: HashMap::new(),
             current_batch_started_at: None,
-            cached_target_nodes: None,
+            cached_target_agents: None,
             created_at: now,
             updated_at: now,
             version: 1,
@@ -261,12 +260,12 @@ impl Rollout {
 
     /// 标记节点为已处理
     pub fn mark_node_processed(&mut self, node_id: String) {
-        self.processed_nodes.insert(node_id);
+        self.processed_agents.insert(node_id);
     }
 
     /// 检查节点是否已处理
     pub fn is_node_processed(&self, node_id: &str) -> bool {
-        self.processed_nodes.contains(node_id)
+        self.processed_agents.contains(node_id)
     }
 
     /// 获取批次延迟时间（秒）

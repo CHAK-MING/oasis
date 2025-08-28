@@ -159,14 +159,14 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
 /// 统一确保常用 KV buckets 存在
 pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()> {
     use oasis_core::{
-        JS_KV_NODE_FACTS, JS_KV_NODE_HEARTBEAT, JS_KV_NODE_LABELS, JS_KV_ROLLOUTS, JS_KV_TASK_STATE,
+        JS_KV_AGENT_FACTS, JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_LABELS, JS_KV_ROLLOUTS, JS_KV_TASK_STATE,
     };
     let mut kv_specs: Vec<(String, async_nats::jetstream::kv::Config)> = Vec::new();
 
     // 心跳（TTL型）
     {
         let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_NODE_HEARTBEAT.to_string();
+        cfg.bucket = JS_KV_AGENT_HEARTBEAT.to_string();
         cfg.description = "Agent heartbeat (TTL-based cleanup)".to_string();
         cfg.history = 1;
         cfg.max_age = std::time::Duration::from_secs(90);
@@ -176,7 +176,7 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
     // Facts（版本化不TTL）
     {
         let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_NODE_FACTS.to_string();
+        cfg.bucket = JS_KV_AGENT_FACTS.to_string();
         cfg.description = "Agent facts (versioned, no TTL)".to_string();
         cfg.history = 50;
         cfg.max_value_size = 65536;
@@ -186,7 +186,7 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
     // Labels（版本化不TTL）
     {
         let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_NODE_LABELS.to_string();
+        cfg.bucket = JS_KV_AGENT_LABELS.to_string();
         cfg.description = "Agent labels (versioned, no TTL)".to_string();
         cfg.history = 50;
         cfg.max_value_size = 65536;

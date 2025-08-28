@@ -6,12 +6,13 @@ use oasis_agent::{
     domain::{Agent, AgentStatus},
     infrastructure::{
         nats::client::NatsClient,
+        nats::publisher::NatsPublisher,
         system::{executor::CommandExecutor, fact_collector::SystemMonitor},
     },
 };
 use oasis_core::{
-    rate_limit::RateLimiterCollection, shutdown::GracefulShutdown, telemetry::init_tracing_with,
-    types::AgentId,
+    config::OasisConfig, rate_limit::RateLimiterCollection, shutdown::GracefulShutdown,
+    telemetry::init_tracing_with, types::AgentId,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -20,38 +21,41 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let nats_url =
-        std::env::var("OASIS_NATS_URL").unwrap_or_else(|_| "tls://127.0.0.1:4443".to_string());
-    let nats_ca =
-        std::env::var("OASIS_NATS_CA").unwrap_or_else(|_| "certs/nats-ca.pem".to_string());
-    let nats_client_cert = std::env::var("OASIS_NATS_CLIENT_CERT")
-        .unwrap_or_else(|_| "certs/nats-client.pem".to_string());
-    let nats_client_key = std::env::var("OASIS_NATS_CLIENT_KEY")
-        .unwrap_or_else(|_| "certs/nats-client-key.pem".to_string());
+    // 统一配置加载（文件 + 环境变量覆盖）
+    let cfg: OasisConfig = OasisConfig::load_config(None)?;
 
-    let server_url =
-        std::env::var("OASIS_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+    let nats_url = cfg.nats.url.clone();
+    let _nats_ca = cfg.nats.ca_path.to_string_lossy().to_string();
+    let _nats_client_cert = cfg.nats.client_cert_path.to_string_lossy().to_string();
+    let _nats_client_key = cfg.nats.client_key_path.to_string_lossy().to_string();
 
-    let _grpc_ca =
-        std::env::var("OASIS_GRPC_CA").unwrap_or_else(|_| "certs/grpc-ca.pem".to_string());
-    let _grpc_client_cert = std::env::var("OASIS_GRPC_CLIENT_CERT")
-        .unwrap_or_else(|_| "certs/grpc-client.pem".to_string());
-    let _grpc_client_key = std::env::var("OASIS_GRPC_CLIENT_KEY")
-        .unwrap_or_else(|_| "certs/grpc-client-key.pem".to_string());
+    let server_url = cfg.grpc.url.clone();
 
-    let log_level = std::env::var("OASIS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    let _heartbeat_interval_sec = std::env::var("OASIS_HEARTBEAT_INTERVAL_SEC")
-        .unwrap_or_else(|_| "30".to_string())
-        .parse()
-        .unwrap_or(30);
-    let _fact_collection_interval_sec = std::env::var("OASIS_FACT_COLLECTION_INTERVAL_SEC")
-        .unwrap_or_else(|_| "300".to_string())
-        .parse()
-        .unwrap_or(300);
-    let _max_concurrent_tasks = std::env::var("OASIS_MAX_CONCURRENT_TASKS")
-        .unwrap_or_else(|_| "10".to_string())
-        .parse()
-        .unwrap_or(10);
+    let log_level = cfg.telemetry.log_level.clone();
+    let _heartbeat_interval_sec = cfg.agent.heartbeat_interval_sec;
+    let _fact_collection_interval_sec = cfg.agent.fact_collection_interval_sec;
+
+    // 读取 Agent 标签和组配置
+    let labels = std::env::var("OASIS_AGENT_LABELS")
+        .unwrap_or_else(|_| String::new())
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let parts: Vec<&str> = s.splitn(2, '=').collect();
+            if parts.len() == 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                (s.to_string(), "true".to_string())
+            }
+        })
+        .collect::<std::collections::HashMap<String, String>>();
+
+    let groups = std::env::var("OASIS_AGENT_GROUPS")
+        .unwrap_or_else(|_| String::new())
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>();
 
     // 初始化遥测
     init_tracing_with(&oasis_core::telemetry::LogConfig {
@@ -66,19 +70,14 @@ async fn main() -> Result<()> {
     info!("  Log level: {}", log_level);
 
     // 连接到 NATS
-    let nats_client =
-        NatsClient::connect_with_config(&nats_url, &nats_ca, &nats_client_cert, &nats_client_key)
-            .await?;
+    let nats_client = NatsClient::connect_with_oasis_config(&cfg).await?;
 
     // 生成唯一的 Agent ID
     let agent_id = AgentId::from(Uuid::new_v4().to_string());
     info!("Generated Agent ID: {}", agent_id);
 
-    // 创建 Agent 实例
-    let agent = Arc::new(RwLock::new(Agent::new(
-        agent_id.clone(),
-        oasis_core::selector::NodeAttributes::new(agent_id.clone()),
-    )));
+    // 创建 Agent 实例（Agent 模型内部可不再依赖 AgentInfo，仅保留必要运行信息）
+    let agent = Arc::new(RwLock::new(Agent::new(agent_id.clone())));
 
     // 创建命令执行器
     let command_executor = Arc::new(CommandExecutor::new());
@@ -87,7 +86,7 @@ async fn main() -> Result<()> {
     let fact_repository = Arc::new(
         oasis_agent::infrastructure::nats::fact_repository::NatsFactRepository::new(
             nats_client.client.clone(),
-            oasis_core::JS_KV_NODE_FACTS.to_string(),
+            oasis_core::JS_KV_AGENT_FACTS.to_string(),
             oasis_core::kv_key_facts(agent_id.as_str()),
         ),
     );
@@ -111,7 +110,7 @@ async fn main() -> Result<()> {
     );
 
     // 事实采集服务
-    let mut fact_service = FactService::new(
+    let fact_service = FactService::new(
         agent_id.clone(),
         system_monitor.clone(),
         fact_repository.clone(),
@@ -119,36 +118,72 @@ async fn main() -> Result<()> {
 
     info!("Agent started with id: {}", agent_id);
 
+    // 启动时将 labels 与 groups 发布到 KV（groups 通过保留键写入）
+    {
+        let mut publish_labels = labels.clone();
+        if !groups.is_empty() {
+            publish_labels.insert("__groups".to_string(), groups.join(","));
+        }
+        let attrs_repo =
+            oasis_agent::infrastructure::nats::attributes_repository::NatsAttributesRepository::new(
+                &nats_client.client,
+            );
+        if let Err(e) = attrs_repo
+            .publish_attributes(&agent_id, &publish_labels)
+            .await
+        {
+            error!("Failed to publish startup labels/groups: {}", e);
+        } else {
+            info!("Published startup labels/groups to KV");
+        }
+    }
+
     {
         let mut agent_guard = agent.write().await;
         agent_guard.set_status(AgentStatus::Running);
     }
     info!("Agent status set to Running");
 
-    // 启动各服务
+    // 启动后台服务
     let heartbeat_handle = tokio::spawn(heartbeat_service.run());
-    let facts_handle = tokio::spawn(async move {
-        if let Err(e) = fact_service.start().await {
-            error!("Fact service failed: {}", e);
+
+    // 启动 fact 收集服务
+    let facts_handle = tokio::spawn({
+        let mut fact_service_instance = fact_service;
+        let shutdown_clone = shutdown.child_token();
+        async move {
+            if let Err(e) = fact_service_instance.start(shutdown_clone).await {
+                error!("Fact service failed: {}", e);
+            }
         }
     });
     let task_handle = tokio::spawn(task_processor.run());
 
     info!("All services started successfully");
 
-    // 监听 Ctrl+C，并触发 GracefulShutdown（取消令牌）
-    let token = shutdown.token.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        token.cancel();
-    });
-
     // 等待全局关闭信号
     shutdown.wait_for_signal().await;
 
     info!("Shutdown signal received, stopping services...");
 
-    // 等待任务结束（不使用 abort，交由各自内部优雅停机）
+    // 主动发送一次离线心跳（Protobuf），确保 Server 立即感知
+    {
+        use oasis_core::agent::{AgentHeartbeat, AgentStatus as CoreAgentStatus};
+        let publisher = NatsPublisher::new(nats_client.clone());
+        let offline_hb = AgentHeartbeat {
+            agent_id: agent_id.clone(),
+            status: CoreAgentStatus::Offline,
+            last_seen: chrono::Utc::now().timestamp(),
+            sequence: 0,
+        };
+        if let Err(e) = publisher.publish_heartbeat(&offline_hb).await {
+            error!("Failed to publish offline heartbeat: {}", e);
+        } else {
+            info!("Published offline heartbeat");
+        }
+    }
+
+    // 等待任务结束
     let _ = futures::future::join3(heartbeat_handle, task_handle, facts_handle).await;
 
     info!("Agent shut down gracefully");

@@ -7,29 +7,34 @@
 
 use async_nats::jetstream::Context;
 use oasis_core::error::CoreError;
-use oasis_core::selector::NodeAttributes;
+use oasis_core::proto::AgentInfo;
 use std::collections::HashMap;
 
-use crate::application::ports::repositories::NodeRepository;
+/// 健康检查服务接口
+#[async_trait::async_trait]
+pub trait HealthCheckService: Send + Sync {
+    /// 获取在线 Agent 信息
+    async fn get_online_agents(&self) -> Result<Vec<AgentInfo>, CoreError>;
+}
 
 /// 健康检查服务
 pub struct HealthService {
     nats_healthy: std::sync::Arc<tokio::sync::RwLock<bool>>,
     agents_healthy: std::sync::Arc<tokio::sync::RwLock<bool>>,
-    online_agents: std::sync::Arc<tokio::sync::RwLock<HashMap<String, NodeAttributes>>>,
-    node_repo: std::sync::Arc<dyn NodeRepository>,
+    online_agents: std::sync::Arc<tokio::sync::RwLock<HashMap<String, AgentInfo>>>,
+    health_check_service: std::sync::Arc<dyn HealthCheckService>,
     reporter: std::sync::Arc<tokio::sync::Mutex<Option<tonic_health::server::HealthReporter>>>,
     min_online_agents: std::sync::Arc<tokio::sync::RwLock<usize>>,
 }
 
 impl HealthService {
     /// 创建新的健康检查服务
-    pub fn new(node_repo: std::sync::Arc<dyn NodeRepository>) -> Self {
+    pub fn new(health_check_service: std::sync::Arc<dyn HealthCheckService>) -> Self {
         Self {
             nats_healthy: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
             agents_healthy: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
             online_agents: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            node_repo,
+            health_check_service,
             reporter: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             min_online_agents: std::sync::Arc::new(tokio::sync::RwLock::new(1)),
         }
@@ -82,7 +87,6 @@ impl HealthService {
         *guard = min.max(1);
     }
 
-
     /// 更新 Agent 状态
     pub async fn update_agent_status(&self, agent_id: &str, is_online: bool) {
         let mut agents_guard = self.online_agents.write().await;
@@ -90,10 +94,28 @@ impl HealthService {
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 agents_guard.entry(agent_id.to_string())
             {
-                // 只有当 Agent *确实* 不在线时，才去获取它的属性并插入
-                match self.node_repo.get(agent_id).await {
-                    Ok(node) => {
-                        entry.insert(node.to_attributes());
+                // 从健康检查服务获取 Agent 信息
+                match self.health_check_service.get_online_agents().await {
+                    Ok(agents) => {
+                        if let Some(agent_info) = agents.into_iter().find(|a| {
+                            a.agent_id
+                                .as_ref()
+                                .map(|x| x.value.as_str())
+                                == Some(agent_id)
+                        }) {
+                            entry.insert(agent_info);
+                        } else {
+                            // 如果找不到，插入一个空的 AgentInfo
+                            entry.insert(AgentInfo {
+                                agent_id: Some(oasis_core::proto::AgentId {
+                                    value: agent_id.to_string(),
+                                }),
+                                is_online: false,
+                                facts: None,
+                                labels: HashMap::new(),
+                                groups: vec![],
+                            });
+                        }
                         tracing::info!(
                             "Agent {} came online. Total online: {}",
                             agent_id,
@@ -102,12 +124,19 @@ impl HealthService {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Failed to get attributes for new agent {}: {}. It will be marked online with no attributes.",
+                            "Failed to get agent info for {}: {}. Using empty info.",
                             agent_id,
                             e
                         );
-                        // 即使获取属性失败，也插入一个空对象以标记其在线
-                        entry.insert(NodeAttributes::new(agent_id.to_string()));
+                        entry.insert(AgentInfo {
+                            agent_id: Some(oasis_core::proto::AgentId {
+                                value: agent_id.to_string(),
+                            }),
+                            is_online: false,
+                            facts: None,
+                            labels: HashMap::new(),
+                            groups: vec![],
+                        });
                     }
                 }
             }
@@ -139,12 +168,7 @@ impl HealthService {
     }
 
     /// 启动健康检查监控
-    pub async fn start_monitoring(
-        &self,
-        jetstream: Context,
-        _node_repo: std::sync::Arc<dyn NodeRepository>,
-        heartbeat_ttl_sec: u64,
-    ) {
+    pub async fn start_monitoring(&self, jetstream: Context, heartbeat_ttl_sec: u64) {
         let nats_healthy = self.nats_healthy.clone();
         let agents_healthy = self.agents_healthy.clone();
         let online_agents = self.online_agents.clone();
@@ -208,7 +232,7 @@ impl HealthService {
 async fn check_nats(jetstream: &Context, _heartbeat_ttl_sec: u64) -> Result<(), CoreError> {
     // 简化：只检查心跳 bucket 可访问即可证明 JetStream 健康
     let _ = jetstream
-        .get_key_value(oasis_core::JS_KV_NODE_HEARTBEAT)
+                    .get_key_value(oasis_core::JS_KV_AGENT_HEARTBEAT)
         .await
         .map_err(|e| CoreError::Nats {
             message: format!("Failed to access heartbeat KV store: {}", e),

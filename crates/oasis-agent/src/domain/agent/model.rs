@@ -1,5 +1,4 @@
 use super::status::AgentStatus;
-use oasis_core::selector::NodeAttributes;
 use oasis_core::types::{AgentId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,7 +7,6 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
-    pub attributes: NodeAttributes,
     pub status: AgentStatus,
     // 已处理任务与已发送结果的去重记录（task_id -> timestamp）
     processed_tasks: HashMap<TaskId, i64>,
@@ -16,10 +14,9 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(id: AgentId, attributes: NodeAttributes) -> Self {
+    pub fn new(id: AgentId) -> Self {
         Self {
             id,
-            attributes,
             status: AgentStatus::Initializing,
             processed_tasks: HashMap::new(),
             sent_results: HashMap::new(),
@@ -38,9 +35,7 @@ impl Agent {
         matches!(self.status, AgentStatus::Running)
     }
 
-    pub fn update_attributes(&mut self, new_attributes: NodeAttributes) {
-        self.attributes = new_attributes;
-    }
+    // 已移除 info 概念，Agent 内仅保留运行时状态与幂等记录
 
     // ===== 幂等去重：任务处理与结果发送 =====
 

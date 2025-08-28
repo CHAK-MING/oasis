@@ -2,33 +2,33 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::ports::repositories::{
-    FileRepository, NodeRepository, RolloutRepository, TaskRepository,
+    AgentRepository, FileRepository, RolloutRepository, TaskRepository,
 };
-use crate::domain::services::SelectorEngine;
+use crate::application::selector::SelectorEngine;
 
-/// 应用程序上下文 - 管理所有依赖（仅持有抽象）
+/// 应用程序上下文 - 管理所有依赖
 #[derive(Clone)]
 pub struct ApplicationContext {
-    pub node_repo: Arc<dyn NodeRepository>,
+    pub agent_repo: Arc<dyn AgentRepository>,
     pub task_repo: Arc<dyn TaskRepository>,
     pub rollout_repo: Arc<dyn RolloutRepository>,
     pub file_repo: Arc<dyn FileRepository>,
-    pub selector_engine: Arc<dyn SelectorEngine>,
+    pub selector_engine: Arc<SelectorEngine>,
 }
 
-/// 应用程序上下文构建器（仅接受 trait 对象）
+/// 应用程序上下文构建器
 pub struct ApplicationContextBuilder {
-    node_repo: Option<Arc<dyn NodeRepository>>,
+    agent_repo: Option<Arc<dyn AgentRepository>>,
     task_repo: Option<Arc<dyn TaskRepository>>,
     rollout_repo: Option<Arc<dyn RolloutRepository>>,
     file_repo: Option<Arc<dyn FileRepository>>,
-    selector_engine: Option<Arc<dyn SelectorEngine>>,
+    selector_engine: Option<Arc<SelectorEngine>>,
 }
 
 impl ApplicationContextBuilder {
     pub fn new() -> Self {
         Self {
-            node_repo: None,
+            agent_repo: None,
             task_repo: None,
             rollout_repo: None,
             file_repo: None,
@@ -36,8 +36,8 @@ impl ApplicationContextBuilder {
         }
     }
 
-    pub fn with_node_repo(mut self, repo: Arc<dyn NodeRepository>) -> Self {
-        self.node_repo = Some(repo);
+    pub fn with_agent_repo(mut self, repo: Arc<dyn AgentRepository>) -> Self {
+        self.agent_repo = Some(repo);
         self
     }
 
@@ -56,18 +56,16 @@ impl ApplicationContextBuilder {
         self
     }
 
-
-
-    pub fn with_selector_engine(mut self, engine: Arc<dyn SelectorEngine>) -> Self {
+    pub fn with_selector_engine(mut self, engine: Arc<SelectorEngine>) -> Self {
         self.selector_engine = Some(engine);
         self
     }
 
     pub fn build(self) -> Result<ApplicationContext> {
         Ok(ApplicationContext {
-            node_repo: self
-                .node_repo
-                .ok_or_else(|| anyhow::anyhow!("NodeRepository is required"))?,
+            agent_repo: self
+                .agent_repo
+                .ok_or_else(|| anyhow::anyhow!("AgentRepository is required"))?,
             task_repo: self
                 .task_repo
                 .ok_or_else(|| anyhow::anyhow!("TaskRepository is required"))?,

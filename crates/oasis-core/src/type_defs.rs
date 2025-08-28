@@ -52,3 +52,4 @@ define_id_type!(AgentId);
 define_id_type!(TaskId);
 define_id_type!(RolloutId);
 define_id_type!(Subject);
+// 已移除：AgentInfo（改用 proto::AgentInfo 仅在 gRPC 边界使用）

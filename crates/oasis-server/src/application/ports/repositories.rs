@@ -2,33 +2,33 @@ use async_trait::async_trait;
 use oasis_core::error::CoreError;
 
 use crate::domain::models::{
+    agent::Agent,
     file::{FileInfo, FileUploadResult},
-    node::Node,
     rollout::Rollout,
     task::{Task, TaskResult},
 };
 
-/// 节点仓储接口
+/// Agent 仓储接口
 #[async_trait]
-pub trait NodeRepository: Send + Sync {
-    /// 根据ID获取节点
-    async fn get(&self, id: &str) -> Result<Node, CoreError>;
+pub trait AgentRepository: Send + Sync {
+    /// 根据ID获取 Agent
+    async fn get(&self, id: &str) -> Result<Agent, CoreError>;
 
-    /// 列出所有在线节点
+    /// 列出所有在线 Agent
     async fn list_online(&self) -> Result<Vec<String>, CoreError>;
 
-    /// 根据选择器查询节点
-    async fn find_by_selector(&self, selector: &str) -> Result<Vec<Node>, CoreError>;
-
-    /// 更新节点标签
+    /// 更新 Agent 标签
     async fn update_labels(
         &self,
         id: &str,
         labels: std::collections::HashMap<String, String>,
     ) -> Result<(), CoreError>;
 
-    /// 批量获取节点详情，优化 N+1 查询问题
-    async fn get_nodes_batch(&self, agent_ids: &[String]) -> Result<Vec<Node>, CoreError>;
+    /// 更新 Agent 组
+    async fn update_groups(&self, id: &str, groups: Vec<String>) -> Result<(), CoreError>;
+
+    /// 批量获取 Agent 详情，优化 N+1 查询问题
+    async fn get_agents_batch(&self, agent_ids: &[String]) -> Result<Vec<Agent>, CoreError>;
 }
 
 /// 任务仓储接口

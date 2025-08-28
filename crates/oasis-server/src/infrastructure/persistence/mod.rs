@@ -1,5 +1,5 @@
+pub mod agent_repository;
 pub mod file_repository;
-pub mod node_repository;
 pub mod rollout_repository;
 pub mod task_repository;
 
@@ -15,6 +15,6 @@ pub mod utils {
 }
 
 pub use file_repository::*;
-pub use node_repository::*;
+
 pub use rollout_repository::*;
 pub use task_repository::*;

@@ -39,10 +39,10 @@ service OasisService {
   rpc ApplyFile(ApplyFileRequest) returns (ApplyFileResponse);
   rpc ClearFiles(ClearFilesRequest) returns (ClearFilesResponse);
 
-  // 节点查询
-  rpc GetNodeLabels(GetNodeLabelsRequest) returns (GetNodeLabelsResponse);
-  rpc GetNodeFacts(GetNodeFactsRequest) returns (GetNodeFactsResponse);
-  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  // Agent 查询
+  rpc GetAgentLabels(GetAgentLabelsRequest) returns (GetAgentLabelsResponse);
+  rpc GetAgentFacts(GetAgentFactsRequest) returns (GetAgentFactsResponse);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
 
   // 灰度发布管理
   rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
@@ -141,8 +141,8 @@ message ApplyFileRequest {
 message ApplyFileResponse {
   bool success = 1;
   string message = 2;
-  repeated AgentId applied_nodes = 3; // 改为 AgentId
-  repeated AgentId failed_nodes = 4;  // 改为 AgentId
+  repeated AgentId applied_agents = 3;
+  repeated AgentId failed_agents = 4;
 }
 
 message ClearFilesRequest {}
@@ -150,36 +150,37 @@ message ClearFilesResponse { uint64 deleted_count = 1; }
 
 // Removed: SetNodeLabels/DeleteNodeLabels (unused by CLI)
 
-message GetNodeLabelsRequest {
+message GetAgentLabelsRequest {
   AgentId agent_id = 1;
 }
 
-message GetNodeLabelsResponse {
+message GetAgentLabelsResponse {
   map<string, string> labels = 1;
 }
 
-message GetNodeFactsRequest {
+message GetAgentFactsRequest {
   AgentId agent_id = 1;
 }
 
-message GetNodeFactsResponse {
+message GetAgentFactsResponse {
   AgentFacts facts = 1;
 }
 
-message ListNodesRequest {
+message ListAgentsRequest {
   bool verbose = 1;
-  optional string selector = 2; // 标记为 optional
+  optional string target = 2; // 选择器语法
 }
 
-message NodeInfo {
+message AgentInfo {
   AgentId agent_id = 1;
   bool is_online = 2;
   AgentFacts facts = 3;
   map<string, string> labels = 4;
+  repeated string groups = 5; // 添加 groups 字段
 }
 
-message ListNodesResponse {
-  repeated NodeInfo nodes = 1;
+message ListAgentsResponse {
+  repeated AgentInfo agents = 1;
 }
 
 // 灰度发布相关消息
@@ -281,10 +282,10 @@ message RolloutConfigMsg {
 }
 
 message RolloutProgressMsg {
-  uint32 total_nodes = 1;
-  uint32 processed_nodes = 2;
-  uint32 successful_nodes = 3;
-  uint32 failed_nodes = 4;
+  uint32 total_agents = 1;
+  uint32 processed_agents = 2;
+  uint32 successful_agents = 3;
+  uint32 failed_agents = 4;
   double completion_rate = 5;
   uint32 current_batch = 6; // 0 if none
   uint32 total_batches = 7;
@@ -292,7 +293,7 @@ message RolloutProgressMsg {
 
 message BatchResultMsg {
   uint32 batch_index = 1;
-  uint32 node_count = 2;
+  uint32 agent_count = 2;
   uint32 successful_count = 3;
   uint32 failed_count = 4;
   uint64 duration_secs = 5;
@@ -328,10 +329,10 @@ message RolloutMsg {
   RolloutStateDataMsg state_data = 7;
   RolloutProgressMsg progress = 8;
   repeated BatchResultMsg batch_results = 9;
-  repeated AgentId processed_nodes = 10;
+  repeated AgentId processed_agents = 10;
   map<string, TaskId> current_batch_tasks = 11; // 注意：key 是 AgentId 的字符串表示
   int64 current_batch_started_at = 12; // 0 if none
-  repeated AgentId cached_target_nodes = 13;
+  repeated AgentId cached_target_agents = 13;
   int64 created_at = 14;
   int64 updated_at = 15;
   uint64 version = 16;

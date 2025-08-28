@@ -2,7 +2,6 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::infrastructure::di_container::InfrastructureDiContainer;
 use crate::interface::grpc::server::StreamingBackoffSection;
 
 /// gRPC 服务工厂 - 只负责组装服务，不创建具体实现
@@ -11,7 +10,7 @@ pub struct GrpcServiceFactory;
 impl GrpcServiceFactory {
     /// 创建 OasisServer 实例
     pub async fn create_oasis_server(
-        jetstream: async_nats::jetstream::Context,
+        app_context: std::sync::Arc<crate::application::context::ApplicationContext>,
         shutdown_token: CancellationToken,
         heartbeat_ttl_sec: u64,
         streaming_backoff: StreamingBackoffSection,
@@ -22,12 +21,8 @@ impl GrpcServiceFactory {
             heartbeat_ttl_sec
         );
 
-        // 使用基础设施DI容器创建应用程序上下文
-        let di_container = InfrastructureDiContainer::new(jetstream.clone());
-        let context = di_container.create_application_context()?;
-
         let server = crate::interface::grpc::server::OasisServer::new(
-            context.clone(),
+            (*app_context).clone(),
             shutdown_token.clone(),
             heartbeat_ttl_sec,
             streaming_backoff,
@@ -36,10 +31,9 @@ impl GrpcServiceFactory {
 
         // 注意：RolloutManager 的启动改由 ServerBootstrapper 统一管理
         let _ = (
-            context.rollout_repo,
-            context.node_repo,
-            context.task_repo,
-            context.selector_engine,
+            app_context.rollout_repo.clone(),
+            app_context.task_repo.clone(),
+            app_context.selector_engine.clone(),
         );
 
         info!("OasisServer created successfully");
@@ -48,7 +42,7 @@ impl GrpcServiceFactory {
 
     /// 创建 gRPC 服务包装器
     pub async fn create_service_wrapper(
-        jetstream: async_nats::jetstream::Context,
+        app_context: std::sync::Arc<crate::application::context::ApplicationContext>,
         shutdown_token: CancellationToken,
         heartbeat_ttl_sec: u64,
         streaming_backoff: StreamingBackoffSection,
@@ -59,16 +53,13 @@ impl GrpcServiceFactory {
         >,
     > {
         let server = Self::create_oasis_server(
-            jetstream,
+            app_context,
             shutdown_token,
             heartbeat_ttl_sec,
             streaming_backoff,
             health_service,
         )
         .await?;
-
-        // 将 tonic_health reporter 注册给 HealthService（如果可用）
-        // 实际 reporter 由 server_manager 创建并注入；此处无需重复
 
         let svc = oasis_core::proto::oasis_service_server::OasisServiceServer::new(server);
         Ok(svc)

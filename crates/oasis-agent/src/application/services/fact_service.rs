@@ -3,7 +3,8 @@ use crate::application::ports::fact_repository::FactRepositoryPort;
 use crate::domain::models::SystemFacts;
 use oasis_core::{agent::AgentFacts, types::AgentId};
 use std::sync::Arc;
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::error::Result;
@@ -27,7 +28,7 @@ impl FactService {
         }
     }
 
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self, shutdown_token: CancellationToken) -> Result<()> {
         // 先立即发布一次，随后每分钟更新
         if let Err(e) = self.collect_and_publish_facts().await {
             error!(error = %e, "Failed to collect and publish facts initially");
@@ -35,12 +36,21 @@ impl FactService {
         let mut interval = interval(Duration::from_secs(60)); // 每分钟更新一次
 
         loop {
-            interval.tick().await;
-
-            if let Err(e) = self.collect_and_publish_facts().await {
-                error!(error = %e, "Failed to collect and publish facts");
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("FactService received shutdown signal, stopping...");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = self.collect_and_publish_facts().await {
+                        error!(error = %e, "Failed to collect and publish facts");
+                    }
+                }
             }
         }
+        
+        info!("FactService stopped gracefully");
+        Ok(())
     }
 
     async fn collect_and_publish_facts(&mut self) -> Result<()> {

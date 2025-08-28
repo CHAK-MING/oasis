@@ -53,5 +53,15 @@ pub fn map_core_error(error: CoreError) -> Status {
         CoreError::Serialization { message } => {
             Status::internal(format!("Serialization error: {}", message))
         }
+        CoreError::NotFound { entity_type, entity_id } => Status::not_found(format!(
+            "{} not found: {}",
+            entity_type, entity_id
+        )),
+        CoreError::VersionConflict { entity_type, entity_id, expected_version, actual_version } => {
+            Status::aborted(format!(
+                "Version conflict for {} {} (expected {}, actual {})",
+                entity_type, entity_id, expected_version, actual_version
+            ))
+        }
     }
 }

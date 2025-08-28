@@ -4,31 +4,32 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::application::ports::repositories::{NodeRepository, RolloutRepository, TaskRepository};
+use crate::application::ports::repositories::{AgentRepository, RolloutRepository, TaskRepository};
+use crate::application::selector::SelectorEngine;
 use crate::domain::models::rollout::{BatchResult, Rollout, RolloutState};
-use crate::domain::services::SelectorEngine;
+use oasis_core::error::CoreError;
 
 /// 灰度发布管理器 - 负责自动化驱动灰度发布流程
 pub struct RolloutManager {
     rollout_repo: Arc<dyn RolloutRepository>,
-    node_repo: Arc<dyn NodeRepository>,
     task_repo: Arc<dyn TaskRepository>,
-    selector_engine: Arc<dyn SelectorEngine>,
+    agent_repo: Arc<dyn AgentRepository>,
+    selector_engine: Arc<SelectorEngine>,
     shutdown_token: CancellationToken,
 }
 
 impl RolloutManager {
     pub fn new(
         rollout_repo: Arc<dyn RolloutRepository>,
-        node_repo: Arc<dyn NodeRepository>,
         task_repo: Arc<dyn TaskRepository>,
-        selector_engine: Arc<dyn SelectorEngine>,
+        agent_repo: Arc<dyn AgentRepository>,
+        selector_engine: Arc<SelectorEngine>,
         shutdown_token: CancellationToken,
     ) -> Self {
         Self {
             rollout_repo,
-            node_repo,
             task_repo,
+            agent_repo,
             selector_engine,
             shutdown_token,
         }
@@ -196,30 +197,44 @@ impl RolloutManager {
         info!(rollout_id = %rollout.id, batch = current_batch, "Creating batch tasks");
 
         // 获取目标节点（优先使用缓存，避免重复解析选择器）
-        let target_nodes = if let Some(ref cached_nodes) = rollout.cached_target_nodes {
+        let target_nodes = if let Some(ref cached_nodes) = rollout.cached_target_agents {
             cached_nodes.clone()
         } else {
             // 首次解析选择器并缓存结果
-            // 1. 获取所有在线节点的属性
-            let online_ids = self.node_repo.list_online().await?;
-            let nodes_details = self.node_repo.get_nodes_batch(&online_ids).await?;
-            let attrs: Vec<_> = nodes_details
+            // 1. 获取所有在线 Agent 的属性
+            let online_ids = self.agent_repo.list_online().await?;
+            let agents_details = self.agent_repo.get_agents_batch(&online_ids).await?;
+            let _attrs: Vec<oasis_core::proto::AgentInfo> = agents_details
                 .into_iter()
-                .map(|n| n.to_attributes())
+                .map(|a| oasis_core::proto::AgentInfo {
+                    agent_id: Some(oasis_core::proto::AgentId {
+                        value: a.id.to_string(),
+                    }),
+                    is_online: true,
+                    facts: Some(oasis_core::proto::AgentFacts::from(&a.facts)),
+                    labels: a.labels.clone(),
+                    groups: a.groups.clone(),
+                })
                 .collect();
 
-            // 2. 使用节点属性解析选择器
-            let resolved_nodes = self
+            // 2. 使用选择器引擎解析选择器
+            let resolved_nodes: Vec<String> = self
                 .selector_engine
-                .resolve(&rollout.target_selector, &attrs)
-                .await?;
-            rollout.cached_target_nodes = Some(resolved_nodes.clone());
+                .execute(&rollout.target_selector)
+                .map_err(|e| CoreError::InvalidTask {
+                    reason: format!("Failed to execute selector: {}", e),
+                })?
+                .agent_ids
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect();
+            rollout.cached_target_agents = Some(resolved_nodes.clone());
             resolved_nodes
         };
 
         // 初始化进度信息（如果是第一次创建批次）
-        if rollout.progress.total_nodes == 0 {
-            rollout.progress.total_nodes = target_nodes.len();
+        if rollout.progress.total_agents == 0 {
+            rollout.progress.total_agents = target_nodes.len();
 
             // 计算总批次数
             let batch_size = self.calculate_batch_size(rollout, target_nodes.len());
@@ -227,19 +242,19 @@ impl RolloutManager {
 
             info!(
                 rollout_id = %rollout.id,
-                total_nodes = rollout.progress.total_nodes,
+                total_agents = rollout.progress.total_agents,
                 total_batches = rollout.progress.total_batches,
                 "Initialized rollout progress"
             );
         }
 
         // 过滤出未处理的节点
-        let unprocessed_nodes: Vec<String> = target_nodes
+        let unprocessed_agents: Vec<String> = target_nodes
             .into_iter()
             .filter(|node_id| !rollout.is_node_processed(node_id))
             .collect();
 
-        if unprocessed_nodes.is_empty() {
+        if unprocessed_agents.is_empty() {
             // 所有节点都已处理，标记为成功
             rollout.state = RolloutState::Succeeded;
             rollout.updated_at = chrono::Utc::now().timestamp();
@@ -251,8 +266,8 @@ impl RolloutManager {
         }
 
         // 计算当前批次要处理的节点数量
-        let batch_size = self.calculate_batch_size(rollout, unprocessed_nodes.len());
-        let batch_nodes: Vec<String> = unprocessed_nodes.into_iter().take(batch_size).collect();
+        let batch_size = self.calculate_batch_size(rollout, unprocessed_agents.len());
+        let batch_nodes: Vec<String> = unprocessed_agents.into_iter().take(batch_size).collect();
 
         info!(
             rollout_id = %rollout.id,
@@ -274,9 +289,10 @@ impl RolloutManager {
                 .with_env(rollout.task.env.clone())
                 .with_timeout(rollout.task.timeout_seconds);
             let mut task_spec = task_spec;
-            task_spec.target = oasis_core::task::TaskTarget::Agents(vec![oasis_core::types::AgentId::from(
-                node_id.clone(),
-            )]);
+            task_spec.target =
+                oasis_core::task::TaskTarget::Agents(vec![oasis_core::types::AgentId::from(
+                    node_id.clone(),
+                )]);
 
             let task = crate::domain::models::task::Task::from_spec(task_spec);
             let task_id = self.task_repo.publish(task).await?;
@@ -321,7 +337,7 @@ impl RolloutManager {
         // 记录批次结果
         let batch_result = BatchResult {
             batch_index: current_batch,
-            node_count: successful_count + failed_count,
+            agent_count: successful_count + failed_count,
             successful_count,
             failed_count,
             duration_secs,
@@ -330,13 +346,13 @@ impl RolloutManager {
         rollout.batch_results.push(batch_result);
 
         // 更新进度
-        rollout.progress.processed_nodes += successful_count + failed_count;
-        rollout.progress.successful_nodes += successful_count;
-        rollout.progress.failed_nodes += failed_count;
+        rollout.progress.processed_agents += successful_count + failed_count;
+        rollout.progress.successful_agents += successful_count;
+        rollout.progress.failed_agents += failed_count;
         // 重新计算完成比例（0.0~1.0），避免除零
-        if rollout.progress.total_nodes > 0 {
+        if rollout.progress.total_agents > 0 {
             rollout.progress.completion_rate =
-                (rollout.progress.processed_nodes as f64) / (rollout.progress.total_nodes as f64);
+                (rollout.progress.processed_agents as f64) / (rollout.progress.total_agents as f64);
         } else {
             rollout.progress.completion_rate = 0.0;
         }
@@ -349,11 +365,11 @@ impl RolloutManager {
 
         // 检查失败阈值
         let max_failures = rollout.max_failures();
-        if rollout.progress.failed_nodes > max_failures {
+        if rollout.progress.failed_agents > max_failures {
             rollout.state = RolloutState::Failed {
                 error: format!(
                     "Failed nodes ({}) exceeded maximum ({})",
-                    rollout.progress.failed_nodes, max_failures
+                    rollout.progress.failed_agents, max_failures
                 ),
             };
             rollout.updated_at = chrono::Utc::now().timestamp();
@@ -361,7 +377,7 @@ impl RolloutManager {
 
             error!(
                 rollout_id = %rollout.id,
-                failed_nodes = rollout.progress.failed_nodes,
+                failed_agents = rollout.progress.failed_agents,
                 max_failures = max_failures,
                 "Rollout failed due to too many failures"
             );
@@ -369,7 +385,7 @@ impl RolloutManager {
             // 检查是否还有未处理的节点
             // 使用缓存的目标节点列表，避免在发布过程中动态改变目标范围
             let target_nodes = rollout
-                .cached_target_nodes
+                .cached_target_agents
                 .as_ref()
                 .cloned()
                 .unwrap_or_default();
@@ -413,12 +429,12 @@ impl RolloutManager {
     }
 
     /// 计算批次大小
-    fn calculate_batch_size(&self, rollout: &Rollout, total_nodes: usize) -> usize {
+    fn calculate_batch_size(&self, rollout: &Rollout, total_agents: usize) -> usize {
         match &rollout.config.strategy {
             crate::domain::models::rollout::RolloutStrategy::Rolling { batch_size, .. } => {
-                batch_size.compute(total_nodes)
+                batch_size.compute(total_agents)
             }
-            _ => total_nodes, // 其他策略一次性处理所有节点
+            _ => total_agents, // 其他策略一次性处理所有节点
         }
     }
 }
