@@ -1,7 +1,11 @@
 [package]
 name = "oasis-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+
+[[bin]]
+name = "oasis-cli"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -10,8 +14,6 @@ tonic = { workspace = true }
 oasis-core = { path = "../oasis-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-indicatif = "0.17"
 which = "6.0"
 toml = { workspace = true }
 tokio = { workspace = true, features = [
@@ -19,8 +21,12 @@ tokio = { workspace = true, features = [
   "rt-multi-thread",
   "fs",
   "process",
+  "io-std",
 ] }
 console = "0.15"
 comfy-table = "7.1"
 rcgen = "0.12"
 chrono = "0.4"
+time = "0.3"
+futures = "0.3"
+bytesize = "1.3"

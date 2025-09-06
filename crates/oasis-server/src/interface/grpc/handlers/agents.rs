@@ -1,3 +1,6 @@
+use oasis_core::proto::{
+    ListAgentsRequest, ListAgentsResponse, RemoveAgentRequest, RemoveAgentResponse,
+};
 use tonic::{Request, Response, Status};
 
 use crate::interface::grpc::errors::map_core_error;
@@ -6,80 +9,81 @@ use crate::interface::grpc::server::OasisServer;
 pub struct AgentHandlers;
 
 impl AgentHandlers {
-    pub async fn get_agent_labels(
-        srv: &OasisServer,
-        request: Request<oasis_core::proto::GetAgentLabelsRequest>,
-    ) -> Result<Response<oasis_core::proto::GetAgentLabelsResponse>, Status> {
-        let req = request.into_inner();
-        if req.agent_id.is_none() || req.agent_id.as_ref().unwrap().value.trim().is_empty() {
-            return Err(Status::invalid_argument("Agent ID cannot be empty"));
-        }
-        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
-        let labels = srv
-            .manage_agents_use_case()
-            .get_agent_labels(agent_id)
-            .await
-            .map_err(map_core_error)?;
-        Ok(Response::new(oasis_core::proto::GetAgentLabelsResponse {
-            labels,
-        }))
-    }
-
-    pub async fn get_agent_facts(
-        srv: &OasisServer,
-        request: Request<oasis_core::proto::GetAgentFactsRequest>,
-    ) -> Result<Response<oasis_core::proto::GetAgentFactsResponse>, Status> {
-        let req = request.into_inner();
-        let agent_id = req.agent_id.as_ref().unwrap().value.as_str();
-        let facts = srv
-            .manage_agents_use_case()
-            .get_agent_facts(agent_id)
-            .await
-            .map_err(map_core_error)?;
-        let facts_proto = facts.map(|af| oasis_core::proto::AgentFacts::from(&af));
-        Ok(Response::new(oasis_core::proto::GetAgentFactsResponse {
-            facts: facts_proto,
-        }))
-    }
-
     pub async fn list_agents(
         srv: &OasisServer,
-        request: Request<oasis_core::proto::ListAgentsRequest>,
-    ) -> Result<Response<oasis_core::proto::ListAgentsResponse>, Status> {
+        request: Request<ListAgentsRequest>,
+    ) -> std::result::Result<Response<ListAgentsResponse>, Status> {
         let req = request.into_inner();
-        let target = req.target.as_ref().map(|s| s.as_str());
 
-        let agents = srv
-            .manage_agents_use_case()
-            .list_agents(target)
-            .await
-            .map_err(map_core_error)?;
+        let expression = req
+            .target
+            .as_ref()
+            .map(|t| t.expression.clone())
+            .unwrap_or_else(|| "all".to_string());
 
-        tracing::info!(
-            target = ?target,
-            count = agents.len(),
-            "list_agents resolved agents"
-        );
+        let agent_ids = if req.is_online {
+            srv.context()
+                .agent_service
+                .resolve_online(&expression)
+                .await
+                .map_err(map_core_error)?
+        } else {
+            srv.context()
+                .agent_service
+                .resolve_all(&expression)
+                .await
+                .map_err(map_core_error)?
+        };
 
-        let ttl_sec = srv.online_ttl_sec();
-        let agent_infos: Vec<oasis_core::proto::AgentInfo> = agents
+        // 从 AgentInfoMonitor 拿快照信息
+        let infos = srv.context().agent_service.list_agent_infos(&agent_ids);
+
+        // 转 proto
+        let agents = infos
             .into_iter()
-            .map(|agent| {
-                let facts_proto = Some(oasis_core::proto::AgentFacts::from(&agent.facts));
-                oasis_core::proto::AgentInfo {
-                    agent_id: Some(oasis_core::proto::AgentId {
-                        value: agent.id.to_string(),
-                    }),
-                    is_online: agent.is_online(ttl_sec),
-                    facts: facts_proto,
-                    labels: agent.labels.clone(),
-                    groups: agent.groups,
-                }
-            })
+            .map(|info| oasis_core::proto::AgentInfoMsg::from(info))
             .collect();
 
-        Ok(Response::new(oasis_core::proto::ListAgentsResponse {
-            agents: agent_infos,
-        }))
+        Ok(Response::new(ListAgentsResponse { agents }))
+    }
+
+    pub async fn remove_agent(
+        srv: &OasisServer,
+        request: Request<RemoveAgentRequest>,
+    ) -> std::result::Result<Response<RemoveAgentResponse>, Status> {
+        let req = request.into_inner();
+
+        // 验证请求
+        let agent_id = req
+            .id
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("agent_id is required"))?;
+
+        if agent_id.value.is_empty() {
+            return Err(Status::invalid_argument("agent_id cannot be empty"));
+        }
+
+        let agent_id = oasis_core::core_types::AgentId::from(agent_id.value.clone());
+
+        // 调用选择器服务移除 Agent
+        match srv.context().agent_service.remove_agent(&agent_id).await {
+            Ok(removed) => {
+                let message = if removed {
+                    format!("Agent {} 已成功移除", agent_id)
+                } else {
+                    format!("Agent {} 不存在或已移除", agent_id)
+                };
+
+                Ok(Response::new(oasis_core::proto::RemoveAgentResponse {
+                    success: removed,
+                    message,
+                }))
+            }
+            Err(e) => {
+                let error_msg = format!("不能移除 Agent {}: {}", agent_id, e);
+                tracing::error!("{}", error_msg);
+                Err(Status::internal(error_msg))
+            }
+        }
     }
 }

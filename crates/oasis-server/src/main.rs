@@ -2,13 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 
 mod application;
-mod bootstrap;
-mod domain;
 mod infrastructure;
 mod interface;
 
-use crate::bootstrap::ServerBootstrapper;
-use oasis_core::config::OasisConfig;
+use crate::infrastructure::bootstrap::Bootstrap;
 
 #[derive(Parser)]
 #[command(name = "oasis-server")]
@@ -21,31 +18,14 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Load configuration from the single oasis.toml file.
-    let cfg: OasisConfig = OasisConfig::load_config(args.config.as_deref())?;
-
-    // 初始化遥测
-    oasis_core::telemetry::init_tracing_with(&oasis_core::telemetry::LogConfig {
-        level: cfg.telemetry.log_level.clone(),
-        format: "text".to_string(), // Hardcode format
-        no_ansi: false,             // Hardcode no_ansi
-    });
-
-    if let Some(path) = args.config.as_deref() {
-        tracing::info!("Loaded config file: {}", path);
-    } else {
-        tracing::info!("Config: using default search (current dir)");
+    // 使用配置策略启动应用
+    if let Err(e) = Bootstrap::start(args.config.as_deref()).await {
+        tracing::error!("Failed to start OASIS Server: {}", e);
+        std::process::exit(1);
     }
-    tracing::info!("Effective NATS URL: {}", cfg.nats.url);
-    tracing::info!("Effective gRPC listen: {}", cfg.listen_addr);
 
-    // 创建并启动服务器
-    let bootstrapper = ServerBootstrapper::new(cfg);
-    let running_server = bootstrapper.start().await?;
-
-    // 等待关闭信号
-    running_server.wait_for_shutdown().await
+    Ok(())
 }

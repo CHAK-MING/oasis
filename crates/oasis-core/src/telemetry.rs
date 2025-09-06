@@ -52,10 +52,12 @@ pub fn init_tracing_with(cfg: &LogConfig) {
         LogLevel::Error => "error",
     };
 
-    let filter = EnvFilter::new(lvl_str)
-        .add_directive("async_nats=warn".parse().unwrap_or_else(|_| {
+    let filter =
+        EnvFilter::new(lvl_str).add_directive("async_nats=warn".parse().unwrap_or_else(|_| {
             tracing::warn!("Failed to parse async_nats directive, using default");
-            "async_nats=warn".parse().unwrap()
+            "async_nats=warn"
+                .parse()
+                .expect("async_nats=warn is a valid log level")
         }));
 
     let base = fmt::layer().with_target(true).with_ansi(!cfg.no_ansi);

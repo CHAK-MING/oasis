@@ -1,11 +1,9 @@
-use crate::commands::agent::{run_agent, AgentCommands};
-use crate::commands::exec::run_exec;
+use crate::commands::agent::{AgentArgs, run_agent};
 use crate::commands::exec::ExecArgs;
-use crate::commands::file::{run_file, FileArgs};
+use crate::commands::exec::run_exec;
+use crate::commands::file::{FileArgs, run_file};
 
-use crate::commands::rollout::{run_rollout, RolloutCommand};
-use crate::commands::system::{run_system, SystemCommands};
-use crate::precheck;
+use crate::commands::system::{SystemArgs, run_system};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
@@ -48,51 +46,29 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
-    Agent {
-        #[command(subcommand)]
-        cmd: AgentCommands,
-    },
+    Agent(AgentArgs),
     Exec(ExecArgs),
-    File {
-        #[command(subcommand)]
-        args: FileArgs,
-    },
-
-    Rollout {
-        #[command(subcommand)]
-        cmd: RolloutCommand,
-    },
-    System {
-        #[command(subcommand)]
-        cmd: SystemCommands,
-    },
+    File(FileArgs),
+    System(SystemArgs),
 }
 
 pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<()> {
     match cli.command {
-        Commands::System { cmd } => {
+        Commands::System(args) => {
             // System commands don't need gRPC client
-            run_system(cmd).await?
-        }
-        Commands::Agent { cmd } => {
-            // Agent commands don't need gRPC client
-            run_agent(cmd).await?
+            run_system(args).await?
         }
         _ => {
-            // Create gRPC client with configuration for other commands
-            let mut client = create_grpc_client(config)
+            let client = create_grpc_client(config)
                 .await
                 .context("Failed to create gRPC client")?;
 
-            // 在连接成功后立即进行服务器健康检查
-            precheck::precheck_server_health(&mut client).await?;
-
             match cli.command {
                 Commands::Exec(args) => run_exec(client, args).await?,
-                Commands::File { args } => run_file(client, args).await?,
+                Commands::File(args) => run_file(client, args).await?,
+                Commands::Agent(args) => run_agent(client, args).await?,
 
-                Commands::Rollout { cmd } => run_rollout(cmd, client).await?,
-                Commands::System { .. } | Commands::Agent { .. } => {
+                Commands::System(_) => {
                     unreachable!()
                 }
             }
@@ -105,36 +81,71 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
 async fn create_grpc_client(
     config: &oasis_core::config::OasisConfig,
 ) -> Result<OasisServiceClient<Channel>> {
-    // 使用配置中的 gRPC 外部 URL
-    let server_url = config.grpc.url.clone();
+    // 使用配置中的服务器地址作为 gRPC URL，支持 IPv6
+    let server_url = config.build_grpc_url();
 
     println!("› 正在连接 Oasis 服务器: {}", style(&server_url).cyan());
 
     // Parse the endpoint
-    let endpoint = Endpoint::from_shared(server_url.to_string()).context("无效的服务器地址")?;
+    let mut endpoint = Endpoint::from_shared(server_url.to_string()).context("无效的服务器地址")?;
 
-    // Load client certificates for mTLS
-    let client_cert = tokio::fs::read(&config.tls.grpc_client_cert_path)
-        .await
-        .context("读取客户端证书失败")?;
-    let client_key = tokio::fs::read(&config.tls.grpc_client_key_path)
-        .await
-        .context("读取客户端密钥失败")?;
-    let ca_cert = tokio::fs::read(&config.tls.grpc_ca_path)
-        .await
-        .context("读取 CA 证书失败")?;
+    // 默认支持 HTTPS（由 Traefik 终止 TLS），客户端证书为可选
+    if server_url.starts_with("https://") {
+        let mut tls = tonic::transport::ClientTlsConfig::new();
 
-    // Configure TLS
-    let endpoint = endpoint
-        .tls_config(
-            tonic::transport::ClientTlsConfig::new()
-                .identity(tonic::transport::Identity::from_pem(
-                    client_cert,
-                    client_key,
-                ))
-                .ca_certificate(tonic::transport::Certificate::from_pem(ca_cert)),
-        )
-        .context("配置 TLS 失败")?;
+        // 设定 SNI 域名（若 URL 含域名）
+        if let Some(host) = extract_host(&server_url) {
+            tls = tls.domain_name(host.to_string());
+        }
+
+        // 可选 CA
+        let ca_cert_path = config.tls.grpc_ca_path();
+        if ca_cert_path.exists() {
+            let ca_cert = tokio::fs::read(&ca_cert_path).await.with_context(|| {
+                let abs_path = ca_cert_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| ca_cert_path.clone());
+                format!(
+                    "读取 CA 证书失败 - 路径: {} (绝对路径: {})",
+                    ca_cert_path.display(),
+                    abs_path.display()
+                )
+            })?;
+            tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca_cert));
+        }
+
+        // 可选客户端证书（开启 mTLS）
+        let client_cert_path = config.tls.grpc_client_cert_path();
+        let client_key_path = config.tls.grpc_client_key_path();
+        if client_cert_path.exists() && client_key_path.exists() {
+            let client_cert = tokio::fs::read(&client_cert_path).await.with_context(|| {
+                let abs_path = client_cert_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| client_cert_path.clone());
+                format!(
+                    "读取客户端证书失败 - 路径: {} (绝对路径: {})",
+                    client_cert_path.display(),
+                    abs_path.display()
+                )
+            })?;
+            let client_key = tokio::fs::read(&client_key_path).await.with_context(|| {
+                let abs_path = client_key_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| client_key_path.clone());
+                format!(
+                    "读取客户端密钥失败 - 路径: {} (绝对路径: {})",
+                    client_key_path.display(),
+                    abs_path.display()
+                )
+            })?;
+            tls = tls.identity(tonic::transport::Identity::from_pem(
+                client_cert,
+                client_key,
+            ));
+        }
+
+        endpoint = endpoint.tls_config(tls).context("配置 TLS 失败")?;
+    }
 
     // Connect with TLS
     let channel = endpoint
@@ -143,4 +154,14 @@ async fn create_grpc_client(
         .with_context(|| format!("无法连接到服务器 {}", server_url))?;
 
     Ok(OasisServiceClient::new(channel))
+}
+
+/// 从 https URL 中提取主机名（简易解析，避免额外依赖）
+fn extract_host(url: &str) -> Option<&str> {
+    // 期望格式: https://host[:port][/...]
+    let after_scheme = url.strip_prefix("https://")?;
+    let host_port_path = after_scheme;
+    let host_port = host_port_path.split('/').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    if host.is_empty() { None } else { Some(host) }
 }

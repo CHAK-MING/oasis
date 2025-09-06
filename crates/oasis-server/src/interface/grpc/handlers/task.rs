@@ -1,10 +1,11 @@
-use tonic::{Request, Response, Status};
-use tracing::instrument;
+//! Task gRPC handlers - 完整实现
 
-use oasis_core::proto::{
-    ApplyFileRequest, ApplyFileResponse, ClearFilesRequest, ClearFilesResponse, ExecuteTaskRequest,
-    ExecuteTaskResponse, GetTaskResultRequest, GetTaskResultResponse,
-};
+use tonic::{Request, Response, Status};
+use tracing::{info, instrument, warn};
+
+use oasis_core::core_types::BatchId;
+use oasis_core::proto;
+use oasis_core::task_types::{BatchRequest, TaskState};
 
 use crate::interface::grpc::errors::map_core_error;
 use crate::interface::grpc::server::OasisServer;
@@ -12,228 +13,190 @@ use crate::interface::grpc::server::OasisServer;
 pub struct TaskHandlers;
 
 impl TaskHandlers {
+    /// 提交批量任务
     #[instrument(skip_all)]
-    pub async fn execute_task(
+    pub async fn submit_batch(
         srv: &OasisServer,
-        request: Request<ExecuteTaskRequest>,
-    ) -> Result<Response<ExecuteTaskResponse>, Status> {
-        let req = request.into_inner();
-        if req.command.trim().is_empty() {
-            return Err(Status::invalid_argument("Command cannot be empty"));
-        }
-        if req.target.is_none() {
-            return Err(Status::invalid_argument("Target cannot be empty"));
-        }
-        if req.timeout_seconds <= 0 {
-            return Err(Status::invalid_argument("Timeout must be greater than 0"));
+        request: tonic::Request<proto::SubmitBatchRequest>,
+    ) -> std::result::Result<tonic::Response<proto::SubmitBatchResponse>, tonic::Status> {
+        let proto_request = request.into_inner();
+
+        // 验证请求
+        let batch_req = proto_request
+            .batch_request
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("batch_request is required"))?;
+
+        if let Err(e) = batch_req.validate() {
+            return Err(Status::invalid_argument(format!("Invalid request: {}", e)));
         }
 
-        // 只支持选择器
-        let targets = match req.target.as_ref().and_then(|t| t.target.as_ref()) {
-            Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => {
-                if s.is_empty() {
-                    return Err(Status::invalid_argument("Selector cannot be empty"));
-                }
-                srv.manage_agents_use_case()
-                    .resolve_selector(s)
-                    .await
-                    .map_err(map_core_error)?
-            }
-            // AgentIds 已移除于 proto
-            None => return Err(Status::invalid_argument("Target is required")),
-        };
+        let batch_request = BatchRequest::from(&proto_request);
 
-        let task_id = srv
-            .execute_task_use_case()
-            .execute(
-                targets,
-                req.command,
-                req.args,
-                req.timeout_seconds as u32,
-                Some(req.env),
-            )
+        let selector_expr = batch_request.selector.as_str();
+        let resolved_agent_ids = srv
+            .context()
+            .agent_service
+            .resolve_online(selector_expr)
             .await
             .map_err(map_core_error)?;
 
-        tracing::Span::current().record("task_id", &task_id);
-        Ok(Response::new(ExecuteTaskResponse {
-            task_id: Some(oasis_core::proto::TaskId { value: task_id }),
-        }))
-    }
-
-    #[instrument(skip_all)]
-    pub async fn get_task_result(
-        srv: &OasisServer,
-        request: Request<GetTaskResultRequest>,
-    ) -> Result<Response<GetTaskResultResponse>, Status> {
-        let req = request.into_inner();
-        if let Some(task_id) = &req.task_id {
-            tracing::Span::current().record("task_id", &task_id.value);
-        }
-
-        let task_id = req.task_id.as_ref().unwrap().value.clone();
-        let agent_id = req.agent_id.as_ref().map(|id| id.value.as_str());
-        let wait_timeout_ms = req.wait_timeout_ms;
-
-        let get_result_closure = || async {
-            srv.execute_task_use_case()
-                .get_task_result(&task_id, agent_id)
-                .await
-                .map_err(map_core_error)
-        };
-
-        let to_response =
-            |task_result: crate::domain::models::task::TaskResult| -> GetTaskResultResponse {
-                GetTaskResultResponse {
-                    found: true,
-                    timestamp: task_result.timestamp,
-                    duration_ms: task_result.duration_ms,
-                    task_id: Some(oasis_core::proto::TaskId {
-                        value: task_result.task_id.to_string(),
-                    }),
-                    agent_id: Some(oasis_core::proto::AgentId {
-                        value: task_result.agent_id.to_string(),
-                    }),
-                    exit_code: match task_result.status {
-                        crate::domain::models::task::TaskStatus::Completed { exit_code } => {
-                            exit_code
-                        }
-                        _ => -1,
-                    },
-                    stdout: task_result.stdout,
-                    stderr: task_result.stderr,
-                }
-            };
-
-        let not_found_response = || -> GetTaskResultResponse {
-            GetTaskResultResponse {
-                found: false,
-                task_id: Some(oasis_core::proto::TaskId {
-                    value: task_id.clone(),
-                }),
-                agent_id: req.agent_id.clone(),
-                ..Default::default()
-            }
-        };
-
-        if wait_timeout_ms <= 0 {
-            if let Some(task_result) = get_result_closure().await? {
-                return Ok(Response::new(to_response(task_result)));
-            }
-            return Ok(Response::new(not_found_response()));
-        }
-
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        let start_time = std::time::Instant::now();
-        let timeout_duration = std::time::Duration::from_millis(wait_timeout_ms as u64);
-        loop {
-            if start_time.elapsed() >= timeout_duration {
-                return Ok(Response::new(not_found_response()));
-            }
-            poll_interval.tick().await;
-            if let Some(task_result) = get_result_closure().await? {
-                return Ok(Response::new(to_response(task_result)));
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    pub async fn apply_file(
-        srv: &OasisServer,
-        request: Request<ApplyFileRequest>,
-    ) -> Result<Response<ApplyFileResponse>, Status> {
-        let req = request.into_inner();
-        if req.object_name.trim().is_empty() {
-            return Err(Status::invalid_argument("Object name cannot be empty"));
-        }
-        if req.destination_path.trim().is_empty() {
-            return Err(Status::invalid_argument("Destination path cannot be empty"));
-        }
-        if req.target.is_none() {
-            return Err(Status::invalid_argument("Target cannot be empty"));
-        }
-        if req.file_data.is_empty() {
-            return Err(Status::invalid_argument("File data cannot be empty"));
-        }
-
-        srv.upload_file_use_case()
-            .push_file(&req.object_name, req.file_data)
-            .await
-            .map_err(map_core_error)?;
-
-        // 只支持选择器 - 文件分发需要动态目标解析
-        let target_selector = match req.target.as_ref().and_then(|t| t.target.as_ref()) {
-            Some(oasis_core::proto::task_target_msg::Target::Selector(s)) => {
-                if s.is_empty() {
-                    return Err(Status::invalid_argument("Selector cannot be empty"));
-                }
-                s.clone()
-            }
-            // AgentIds 已移除于 proto
-            None => return Err(Status::invalid_argument("Target is required")),
-        };
-
-                  let response = srv
-            .manage_agents_use_case()
-            .resolve_selector(&target_selector)
-            .await
-            .map_err(map_core_error)?;
-
-        if response.is_empty() {
-            return Ok(Response::new(ApplyFileResponse {
-                success: false,
-                message: format!("No nodes matched selector: {}", target_selector),
-                applied_agents: Vec::new(),
-                failed_agents: Vec::new(),
-            }));
-        }
-
-        let mut config = crate::domain::models::file::FileApplyConfig::new(
-            req.object_name,
-            req.destination_path,
+        info!(
+            "Resolved selector '{}' to {} agents",
+            selector_expr,
+            resolved_agent_ids.len()
         );
-        if !req.expected_sha256.is_empty() {
-            config = config.with_sha256(req.expected_sha256);
-        }
-        if !req.owner.is_empty() {
-            config = config.with_owner(req.owner);
-        }
-        if !req.mode.is_empty() {
-            config = config.with_mode(req.mode);
-        }
-        if req.atomic {
-            config = config.with_atomic(true);
-        }
 
-        let task_id = srv
-            .upload_file_use_case()
-            .apply_file(config, response.clone())
+        let agent_nums = resolved_agent_ids.len() as i64;
+
+        match srv
+            .context()
+            .task_service
+            .submit_batch(batch_request, resolved_agent_ids)
             .await
-            .map_err(map_core_error)?;
-
-        Ok(Response::new(ApplyFileResponse {
-            success: true,
-            message: format!("File apply task created: {}", task_id),
-            applied_agents: response
-                .iter()
-                .map(|id| oasis_core::proto::AgentId { value: id.clone() })
-                .collect(),
-            failed_agents: Vec::new(),
-        }))
+        {
+            Ok(batch_id) => {
+                let response = proto::SubmitBatchResponse::success(batch_id, agent_nums);
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                warn!("Failed to submit batch: {}", e);
+                Err(map_core_error(e))
+            }
+        }
     }
 
     #[instrument(skip_all)]
-    pub async fn clear_files(
+    pub async fn get_batch_details(
         srv: &OasisServer,
-        _request: Request<ClearFilesRequest>,
-    ) -> Result<Response<ClearFilesResponse>, Status> {
-        let deleted = srv
-            .clear_files_use_case()
-            .clear_all()
+        request: Request<proto::GetBatchDetailsRequest>,
+    ) -> Result<Response<proto::GetBatchDetailsResponse>, Status> {
+        let proto_request = request.into_inner();
+
+        let batch_id = match proto_request.batch_id {
+            Some(id) => BatchId::from(id),
+            None => {
+                return Err(Status::invalid_argument("batch_id is required"));
+            }
+        };
+
+        let state_filter = if proto_request.states.is_empty() {
+            None
+        } else {
+            Some(
+                proto_request
+                    .states
+                    .into_iter()
+                    .map(TaskState::from)
+                    .collect(),
+            )
+        };
+
+        match srv
+            .context()
+            .task_service
+            .get_batch_details(&batch_id, state_filter)
             .await
-            .map_err(map_core_error)?;
-        Ok(Response::new(ClearFilesResponse {
-            deleted_count: deleted,
-        }))
+        {
+            Ok(tasks) => {
+                let response = proto::GetBatchDetailsResponse {
+                    tasks: tasks
+                        .into_iter()
+                        .map(|t| proto::TaskExecutionMsg::from(t))
+                        .collect(),
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                warn!("Failed to get batch details: {}", e);
+                Err(map_core_error(e))
+            }
+        }
+    }
+
+    /// 列出任务
+    #[instrument(skip_all)]
+    pub async fn list_batches(
+        srv: &OasisServer,
+        request: Request<proto::ListBatchesRequest>,
+    ) -> Result<Response<proto::ListBatchesResponse>, Status> {
+        let proto_request = request.into_inner();
+
+        // 验证请求
+        if proto_request.limit == 0 {
+            return Err(Status::invalid_argument("limit must be greater than 0"));
+        }
+
+        // 转换状态过滤器
+        let state_filter = if proto_request.states.is_empty() {
+            None
+        } else {
+            Some(
+                proto_request
+                    .states
+                    .into_iter()
+                    .map(TaskState::from)
+                    .collect(),
+            )
+        };
+
+        match srv
+            .context()
+            .task_service
+            .list_batches(proto_request.limit, state_filter)
+            .await
+        {
+            Ok((batches, total_count)) => {
+                let proto_batches: Vec<proto::BatchMsg> = batches
+                    .into_iter()
+                    .map(|t| proto::BatchMsg::from(t))
+                    .collect();
+                let has_more = proto_batches.len() < total_count as usize;
+
+                let response = proto::ListBatchesResponse {
+                    batches: proto_batches,
+                    total_count,
+                    has_more,
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                warn!("Failed to list batches: {}", e);
+                Err(map_core_error(e))
+            }
+        }
+    }
+    /// 取消任务
+    #[instrument(skip_all)]
+    pub async fn cancel_batch(
+        srv: &OasisServer,
+        request: Request<proto::CancelBatchRequest>,
+    ) -> Result<Response<proto::CancelBatchResponse>, Status> {
+        let proto_request = request.into_inner();
+
+        // 验证请求
+        let batch_id = match proto_request.batch_id {
+            Some(id) => {
+                if let Err(e) = id.validate() {
+                    return Err(Status::invalid_argument(format!("Invalid batch_id: {}", e)));
+                }
+                BatchId::from(id)
+            }
+            None => {
+                return Err(Status::invalid_argument("batch_id is required"));
+            }
+        };
+
+        match srv.context().task_service.cancel_batch(&batch_id).await {
+            Ok(_) => {
+                let response = proto::CancelBatchResponse::success();
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                warn!("Failed to cancel batch {}: {}", batch_id, e);
+                let response = proto::CancelBatchResponse::failure();
+                Ok(Response::new(response))
+            }
+        }
     }
 }

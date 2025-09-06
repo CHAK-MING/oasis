@@ -22,8 +22,9 @@ tonic = { workspace = true, features = ["tls"] }
 prost = { workspace = true }
 clap = { workspace = true }
 async-trait = { workspace = true }
-serde_yaml = { workspace = true }
 toml = { workspace = true }
+futures-util = { workspace = true }
+
 
 # 本地依赖
 uuid = { version = "1.15", features = ["v4"] }
@@ -36,15 +37,14 @@ anyhow = { workspace = true }
 futures = "0.3"
 tokio-util = "0.7"
 base64 = "0.21"
+once_cell = "1.19"
 
 # 选择器重构依赖
 roaring = "0.10"
-arc-swap = "1.6"
 pest = "2.7"
 pest_derive = "2.7"
-moka = "0.12"
 
 # TLS 相关依赖
-tonic-health = "0.11"
 rustls = "0.22"
 rustls-pemfile = "2.1"
+lazy_static = "1.5.0"

@@ -21,9 +21,8 @@ pub struct RateLimitConfig {
 impl RateLimitConfig {
     /// 创建新的限流配置
     pub fn new(max_operations: u32, time_window: Duration) -> Result<Self> {
-        let max_ops = NonZeroU32::new(max_operations).ok_or_else(|| CoreError::Config {
-            message: "max_operations must be greater than 0".to_string(),
-        })?;
+        let max_ops = NonZeroU32::new(max_operations)
+            .ok_or_else(|| CoreError::config_error("max_operations must be greater than 0"))?;
 
         Ok(Self {
             max_operations: max_ops,
@@ -60,7 +59,10 @@ impl RateLimitConfig {
     /// 创建限流器
     pub fn build(&self) -> SimpleRateLimiter {
         let quota = Quota::with_period(self.time_window)
-            .expect("valid time window")
+            .unwrap_or_else(|| {
+                tracing::error!("Invalid time window, using default");
+                Quota::with_period(Duration::from_secs(1)).unwrap()
+            })
             .allow_burst(self.max_operations);
         RateLimiter::direct(quota)
     }
@@ -103,11 +105,11 @@ impl CancellableRateLimiter {
             _ = &mut wait_fut => Ok(()),
             _ = &mut timeout_fut => {
                 warn!(operation = operation_name, "Rate limit timeout");
-                Err(CoreError::Internal { message: format!("Rate limit timeout for {}", operation_name) })
+                Err(CoreError::internal_error(format!("Rate limit timeout for {}", operation_name)))
             },
             _ = &mut cancel_fut => {
                 debug!(operation = operation_name, "Rate limit cancelled");
-                Err(CoreError::Internal { message: format!("Rate limit cancelled for {}", operation_name) })
+                Err(CoreError::internal_error(format!("Rate limit cancelled for {}", operation_name)))
             },
         }
     }
@@ -153,9 +155,9 @@ where
 
     if let Some(ref token) = cancellation_token {
         if token.is_cancelled() {
-            return Err(CoreError::Internal {
-                message: "Operation cancelled before execution".to_string(),
-            });
+            return Err(CoreError::internal_error(
+                "Operation cancelled before execution",
+            ));
         }
     }
 

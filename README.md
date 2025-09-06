@@ -7,7 +7,7 @@
 1. 初始化（生成证书、配置与 docker-compose.yml）
 
 ```bash
-oasis-cli system init --output-dir . --force
+./oasis-cli system init --output-dir . --force
 ```
 
 2. 启动 NATS
@@ -19,67 +19,60 @@ docker compose up -d
 3. 启动服务器
 
 ```bash
-oasis-cli system start --daemon
+./oasis-cli system start -d
 ```
 
-4. 启动本机 Agent（使用 `./certs` 证书，带 labels/groups 示例）
+4. 部署 Agent
 
 ```bash
-OASIS_NATS_URL=tls://127.0.0.1:4222 \
-OASIS_NATS_CA=certs/nats-ca.pem \
-OASIS_NATS_CLIENT_CERT=certs/nats-client.pem \
-OASIS_NATS_CLIENT_KEY=certs/nats-client-key.pem \
-OASIS_GRPC__URL=https://127.0.0.1:50051 \
-OASIS_GRPC_CA=certs/grpc-ca.pem \
-OASIS_GRPC_CLIENT_CERT=certs/grpc-client.pem \
-OASIS_GRPC_CLIENT_KEY=certs/grpc-client-key.pem \
-OASIS_AGENT_LABELS="role=web,env=dev,zone=az1" \
-OASIS_AGENT_GROUPS="frontend,blue" \
-./target/debug/oasis-agent
+./oasis-cli agent deploy \
+  --agent-id agent123456
+  --ssh-target user@remote-host \
+  --nats-url tls://YOUR_SERVER_IP:4222 \
+  --output-dir ~/agent-deploy \
+  --labels "env=test" \
+  --labels "role=worker" \
+  --groups "test-group" \
+  --agent-binary ./oasis-agent 
+
+# 安装
+cd ~/agent-deploy/*/
+sudo ./install.sh
+
+# 查看状态
+sudo systemctl status oasis-agent
 ```
 
-5. 执行命令并获取结果（exec 已内置结果获取）
+5. 执行命令并获取结果
 
 ```bash
-# 下发任务（不等待）
-oasis-cli exec --target true -- /bin/echo hello
+# 下发任务
+./oasis-cli exec run -t 'true' -- /bin/echo hello
 
-# 下发并等待 5 秒结果
-oasis-cli exec --target true --wait-ms 5000 -- /bin/echo hi
+# 获取任务结果
+./oasis-cli exec get <batch_id>
 
-# 下发并流式查看结果（直到 Ctrl+C）
-oasis-cli exec --target true --stream -- /bin/echo hi
+# 列出最近任务
+./oasis-cli exec list --limit 20
+
+# 取消任务
+./oasis-cli exec cancel <batch_id>
 ```
 
-说明：历史上的 `task get` 将逐步移除，请优先使用 `exec --wait-ms` 或 `--stream`。
-
-6. 查看状态与停止
+6. 查看系统状态与停止
 
 ```bash
 oasis-cli system status
 oasis-cli system stop
 ```
 
-## 远端部署 Agent（示例）
+7. 移除 Agent
 
 ```bash
-oasis-cli agent deploy \
-  --target user@host \
-  --server-url https://127.0.0.1:50051 \
-  --nats-url tls://127.0.0.1:4222 \
-  --output-dir ./deploy
-
-# 将 oasis-agent 放入 ./deploy 目录后执行
-cd deploy && ./install.sh
+./oasis-cli agent remove \
+  --ssh-target root@localhost \
+  --agent-id agent123456
 ```
-
-`agent.env`（自动生成）中的关键变量：
-
-- OASIS_GRPC\_\_URL：Server 的 gRPC 地址（必须为 https）
-- OASIS_NATS_URL：NATS 地址（必须为 tls）
-- OASIS_AGENT_LABELS：Agent 启动时的标签（逗号分隔，如 `k1=v1,k2=v2`）
-- OASIS_AGENT_GROUPS：Agent 启动时的分组（逗号分隔，如 `g1,g2`）
-- 证书路径默认在 `/opt/oasis/certs/`，安装脚本会从 `deploy/certs/` 拷贝过去
 
 ## CLI 用法
 
@@ -102,23 +95,29 @@ oasis-cli system stop
 ### exec：执行命令
 
 ```bash
-# 基本执行
-oasis-cli exec --target 'labels["role"] == "web"' -- /usr/bin/uptime
+# 下发任务
+oasis-cli exec run -t 'labels["role"] == "worker"' -- /usr/bin/uptime
 
-# 等待结果（5秒超时）
-oasis-cli exec --target "true" --wait-ms 5000 -- /bin/echo hi
+# 下发任务（支持系统参数）
+oasis-cli exec run -t 'system["hostname"] == "server-name"' -- /usr/bin/uptime
 
-# 流式查看结果
-oasis-cli exec --target "true" --stream -- /bin/echo hi
+# 下发任务（支持下发全部在线的 Agent）
+oasis-cli exec run -t 'true' -- /usr/bin/uptime
+
+# 获取某任务结果
+oasis-cli exec get <batch_id>
+
+# 列出最近任务
+oasis-cli exec list --limit 20
 ```
 
 ### file：分发文件
 
 ```bash
 # 分发文件
-oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
+oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "worker"'
 
-# 清空对象存储
+# 清空文件仓库
 oasis-cli file clear
 ```
 
@@ -136,28 +135,4 @@ oasis-cli agent list --verbose
 
 # 移除 Agent
 oasis-cli agent remove --target user@host
-```
-
-### rollout：灰度发布
-
-```bash
-# 启动灰度
-oasis-cli rollout start --name my-rollout --strategy rolling -t 'labels["role"] == "web"' --task-file ./task.sh
-
-# 查看状态
-oasis-cli rollout status my-rollout
-
-# 控制灰度
-oasis-cli rollout pause my-rollout
-oasis-cli rollout resume my-rollout
-oasis-cli rollout abort my-rollout
-oasis-cli rollout rollback my-rollout
-```
-
-```
-
-## 输出说明
-- CLI 输出使用中文，支持彩色显示
-- 默认启用 ANSI 颜色（可通过 `CLICOLOR_FORCE=0` 关闭）
-- 服务器日志重定向到文件（守护模式）
 ```

@@ -1,8 +1,12 @@
 use anyhow::Result;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn, error};
 
 /// gRPC 服务器管理器
+/// 
+/// 负责管理 gRPC 服务器的生命周期，包括：
+/// - TLS 热重载支持
+/// - 优雅关闭处理
 pub struct GrpcServerManager;
 
 impl GrpcServerManager {
@@ -14,21 +18,24 @@ impl GrpcServerManager {
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> Result<()>
     where
-        F: FnMut() -> (
-            oasis_core::proto::oasis_service_server::OasisServiceServer<
-                crate::interface::grpc::server::OasisServer,
-            >,
-            Option<std::sync::Arc<crate::interface::health::HealthService>>,
-        ),
+        F: FnMut() -> oasis_core::proto::oasis_service_server::OasisServiceServer<
+            crate::interface::grpc::server::OasisServer,
+        >,
     {
+        info!("Starting gRPC server manager on {}", addr);
+
         // 如果提供了 TLS 服务，则订阅热重载通知
         let mut tls_reload_rx = tls_service.as_ref().map(|svc| svc.get_reload_receiver());
 
         loop {
+            info!("Creating new gRPC server instance");
+
             // 启动一次服务器
-            let (svc, health_service) = make_svc();
+            let svc = make_svc();
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let token = shutdown_token.clone();
+            
+            // 监听关闭信号
             tokio::spawn(async move {
                 token.cancelled().await;
                 let _ = shutdown_tx.send(());
@@ -36,81 +43,130 @@ impl GrpcServerManager {
 
             // 构建 Server，并在可用时应用 TLS 配置
             let tls_for_spawn = tls_service.clone();
-            let server = tokio::spawn(async move {
-                // 创建标准健康服务，并通过 HealthService 标记为 Serving
-                let (mut reporter, health_svc) = tonic_health::server::health_reporter();
-                if let Some(h) = health_service.clone() {
-                    h.register_reporter(reporter.clone()).await;
-                    h.set_serving_oasis().await;
-                } else {
-                    let _ = reporter
-                        .set_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
-                            crate::interface::grpc::server::OasisServer,
-                        >>()
-                        .await;
-                }
+            let addr_for_spawn = addr;
+            let server_handle = tokio::spawn(async move {
                 // 构建 Server 并按需应用 TLS
                 let mut builder = if let Some(ref svc) = tls_for_spawn {
                     if let Some(tls_cfg) = svc.get_server_tls_config().await {
+                        info!("Applying TLS configuration to gRPC server");
                         Server::builder()
                             .tls_config(tls_cfg)
-                            .expect("failed to apply TLS config")
+                            .map_err(|e| {
+                                tracing::error!("Failed to apply TLS config: {}", e);
+                                e
+                            })?
                     } else {
+                        warn!("TLS service available but no TLS config, starting without TLS");
                         Server::builder()
                     }
                 } else {
+                    info!("Starting gRPC server without TLS");
                     Server::builder()
                 };
 
-                builder
-                    .add_service(health_svc)
+                // 启动服务器
+                let result = builder
                     .add_service(svc)
-                    .serve_with_shutdown(addr, async {
+                    .serve_with_shutdown(addr_for_spawn, async {
                         let _ = shutdown_rx.await;
-                        // 关闭前将健康置为 NotServing，便于探针快速摘流
-                        if let Some(h) = health_service.clone() {
-                            h.set_not_serving_oasis().await;
-                        } else {
-                            let _ = reporter
-                                .set_not_serving::<oasis_core::proto::oasis_service_server::OasisServiceServer<
-                                    crate::interface::grpc::server::OasisServer,
-                                >>()
-                                .await;
-                        }
+                        info!("Gracefully shutting down gRPC server");
                     })
-                    .await
+                    .await;
+
+                if let Err(e) = result {
+                    error!("gRPC server error: {}", e);
+                    Err(e)
+                } else {
+                    info!("gRPC server shut down successfully");
+                    Ok(())
+                }
             });
 
+            // 等待关闭信号或 TLS 重载信号
             if let Some(ref mut rx) = tls_reload_rx {
                 tokio::select! {
+                    // 全局关闭信号
                     _ = shutdown_token.cancelled() => {
-                        let _ = server.await;
+                        info!("Global shutdown signal received");
                         break;
                     }
+                    // TLS 重载信号
                     res = rx.recv() => {
                         if res.is_ok() {
                             info!("TLS reload signal received, restarting gRPC server...");
-                            let _ = server.await;
-                            continue; // 重启
+                            continue; // 重启服务器
                         } else {
-                            // 通道关闭时不再监听 TLS 事件，但保持服务运行直到关闭信号
-                            info!("TLS reload channel closed; disabling TLS reload and continuing run_loop.");
-                            let _ = server.await;
-                            // 退出循环由外层控制；此处 break 会停止一次服务器重启循环
+                            // TLS 通道关闭，继续运行但不再监听 TLS 重载
+                            warn!("TLS reload channel closed, disabling TLS reload");
+                            tls_reload_rx = None;
+                            // 如果没有全局关闭信号，继续运行
+                            if !shutdown_token.is_cancelled() {
+                                continue;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    // 服务器异常退出
+                    server_result = server_handle => {
+                        match server_result {
+                            Ok(Ok(())) => {
+                                info!("Server completed successfully");
+                            }
+                            Ok(Err(e)) => {
+                                error!("Server error: {}", e);
+                                return Err(e.into());
+                            }
+                            Err(e) => {
+                                error!("Server task panicked: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                        
+                        // 如果没有关闭信号，则重启
+                        if !shutdown_token.is_cancelled() {
+                            warn!("Server exited unexpectedly, restarting...");
+                            continue;
+                        } else {
                             break;
                         }
                     }
                 }
             } else {
-                // 不监听 TLS reload，仅等待关闭信号
+                // 不监听 TLS reload，仅等待关闭信号或服务器完成
                 tokio::select! {
                     _ = shutdown_token.cancelled() => {
-                        let _ = server.await;
+                        info!("Global shutdown signal received");
                         break;
+                    }
+                    server_result = server_handle => {
+                        match server_result {
+                            Ok(Ok(())) => {
+                                info!("Server completed successfully");
+                            }
+                            Ok(Err(e)) => {
+                                error!("Server error: {}", e);
+                                return Err(e.into());
+                            }
+                            Err(e) => {
+                                error!("Server task panicked: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                        
+                        // 如果没有关闭信号，则重启
+                        if !shutdown_token.is_cancelled() {
+                            warn!("Server exited unexpectedly, restarting...");
+                            continue;
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
         }
+
+        info!("gRPC server manager shut down successfully");
         Ok(())
     }
 }

@@ -133,11 +133,8 @@ pub async fn execute_process_with_cancellation(
         _ = cancel_token.cancelled() => {
             // 取消：杀死子进程
             if let Some(pid) = child_id {
-                #[cfg(unix)]
-                unsafe {
-                    // 安全性说明：pid 来自 tokio::process::Child::id()，且仅在 Unix 平台调用；
-                    // 发送 SIGTERM 是温和的终止信号，符合预期的优雅退出语义。
-                    libc::kill(pid as i32, libc::SIGTERM);
+                if let Err(e) = kill_process_safely(pid) {
+                    warn!("Failed to kill process {} during cancellation: {}", pid, e);
                 }
             }
             Err(ExecutionError::Cancelled)
@@ -145,15 +142,43 @@ pub async fn execute_process_with_cancellation(
         _ = tokio::time::sleep(timeout) => {
             // 超时：杀死子进程
             if let Some(pid) = child_id {
-                #[cfg(unix)]
-                unsafe {
-                    // 参见上面的安全性说明
-                    libc::kill(pid as i32, libc::SIGTERM);
+                if let Err(e) = kill_process_safely(pid) {
+                    warn!("Failed to kill process {} during timeout: {}", pid, e);
                 }
             }
             Err(ExecutionError::Timeout(timeout))
         }
     }
+}
+
+/// 安全地终止进程
+#[cfg(unix)]
+fn kill_process_safely(pid: u32) -> Result<(), ExecutionError> {
+    // 验证pid有效性
+    if pid == 0 {
+        return Err(ExecutionError::Failed(anyhow::anyhow!("Invalid PID: 0")));
+    }
+
+    unsafe {
+        // 更安全的调用：检查返回值
+        let result = libc::kill(pid as i32, libc::SIGTERM);
+        if result != 0 {
+            return Err(ExecutionError::Failed(anyhow::anyhow!(
+                "Failed to send SIGTERM to PID {}: errno {}",
+                pid,
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn kill_process_safely(_pid: u32) -> Result<(), ExecutionError> {
+    // 在非Unix平台上，我们无法直接杀死进程
+    Err(ExecutionError::Failed(anyhow::anyhow!(
+        "Process termination not supported on this platform"
+    )))
 }
 
 /// 运行一个可取消的任务

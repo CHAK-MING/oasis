@@ -1,26 +1,26 @@
-pub mod agent;
-pub mod backoff;
+pub mod agent_types;
+pub mod core_types;
+pub mod file_types;
+pub mod task_types;
+
+// Proto conversion bridge
+pub mod proto_bridge;
+
 pub mod config;
-pub mod constants;
-pub mod dlq;
+pub mod config_strategies;
+pub mod config_strategy;
 pub mod error;
-pub mod patch;
-pub mod proto_impls;
+// --- End old modules ---
+
+// Modules to keep
+pub mod backoff;
+pub mod constants;
+pub mod nats;
 pub mod rate_limit;
 pub mod shutdown;
-pub mod task;
 pub mod telemetry;
-pub mod transport;
-mod type_defs;
 
 pub use constants::*;
-pub use error::{CoreError, Result};
-
-pub mod types {
-    pub use crate::agent::*;
-    pub use crate::task::*;
-    pub use crate::type_defs::*;
-}
 
 pub mod proto {
     tonic::include_proto!("oasis");

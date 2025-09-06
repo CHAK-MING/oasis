@@ -11,75 +11,128 @@ message TaskId {
   string value = 1;
 }
 
-message RolloutId {
+message BatchId {
   string value = 1;
 }
 
-// ===== 统一的任务目标消息 =====
-message TaskTargetMsg {
-  oneof target {
-    string selector = 2;
-  }
+// ===== 任务状态枚举 =====
+enum TaskStateEnum {
+  TASK_CREATED = 0;
+  TASK_PENDING = 1;
+  TASK_RUNNING = 2;
+  TASK_SUCCESS = 3;
+  TASK_FAILED = 4;
+  TASK_TIMEOUT = 5;
+  TASK_CANCELLED = 6;
 }
 
-// Oasis 管理服务
-service OasisService {
-  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
-  // 健康检查：返回 200/OK 即表示服务端在线且与 NATS 通路工作正常
-  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-  // 查询代理在线状态（由服务端访问 NATS/KV 提供）
-  rpc CheckAgents(CheckAgentsRequest) returns (CheckAgentsResponse);
-  // 结果查询（单次，若未就绪可返回 not found）
-  rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
-  // 结果订阅（流式，持续推送该 task 的结果消息）
-  rpc StreamTaskResults(StreamTaskResultsRequest) returns (stream StreamTaskResultsResponse);
-
-
-  // 文件管理
-  rpc ApplyFile(ApplyFileRequest) returns (ApplyFileResponse);
-  rpc ClearFiles(ClearFilesRequest) returns (ClearFilesResponse);
-
-  // Agent 查询
-  rpc GetAgentLabels(GetAgentLabelsRequest) returns (GetAgentLabelsResponse);
-  rpc GetAgentFacts(GetAgentFactsRequest) returns (GetAgentFactsResponse);
-  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
-
-  // 灰度发布管理
-  rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
-  rpc StartRollout(StartRolloutRequest) returns (StartRolloutResponse);
-  rpc PauseRollout(PauseRolloutRequest) returns (PauseRolloutResponse);
-  rpc ResumeRollout(ResumeRolloutRequest) returns (ResumeRolloutResponse);
-  rpc AbortRollout(AbortRolloutRequest) returns (AbortRolloutResponse);
-  rpc RollbackRollout(RollbackRolloutRequest) returns (RollbackRolloutResponse);
-  rpc GetRollout(GetRolloutRequest) returns (GetRolloutResponse);
-  rpc ListRollouts(ListRolloutsRequest) returns (ListRolloutsResponse);
+// ===== Agent 状态枚举 =====
+enum AgentStatusEnum {
+  AGENT_ONLINE = 0;
+  AGENT_OFFLINE = 1;
+  AGENT_REMOVED = 2;
 }
 
-message ExecuteTaskRequest {
+message SelectorExpression {
+  string expression = 1;
+}
+
+message EmptyMsg {}
+
+
+// 完整的任务信息
+message TaskMsg {
+  TaskId task_id = 1;
+  BatchId batch_id = 2;
+  AgentId agent_id = 3;
+
+  // 执行定义
+  string command = 4;
+  repeated string args = 5;
+  
+  uint32 timeout_seconds = 6;
+  
+  // 状态信息
+  TaskStateEnum state = 7;
+
+  int64 created_at = 8;
+  int64 updated_at = 9;
+}
+
+message BatchMsg {
+  BatchId batch_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  uint32 timeout_seconds = 4;
+  int64 created_at = 5;
+}
+
+// 任务执行结果 - 单个Agent执行结果
+message TaskExecutionMsg {
+  TaskId task_id = 1;
+  AgentId agent_id = 2;
+  
+  // 执行结果
+  TaskStateEnum state = 3;
+  optional int32 exit_code = 4;
+  string stdout = 5;
+  string stderr = 6;
+  
+  // 时间信息
+  int64 started_at = 7;
+  optional int64 finished_at = 8;
+  optional double duration_ms = 9;
+}
+
+// 批次请求消息 
+message BatchRequestMsg {
   string command = 1;
   repeated string args = 2;
-  int64 timeout_seconds = 3;
-  // Optional environment variables for the task execution
-  map<string, string> env = 4;
-  TaskTargetMsg target = 5; // 使用统一的目标消息
+  SelectorExpression target = 3;
+  uint32 timeout_seconds = 4;
 }
 
-message ExecuteTaskResponse {
-  // 返回任务 ID，用于后续追踪
-  TaskId task_id = 1;
+// 提交批次请求
+message SubmitBatchRequest {
+  BatchRequestMsg batch_request = 1;
 }
 
-message HealthCheckRequest {}
-
-message HealthCheckResponse {
-  // server 是否处于健康状态（NATS 可用、内部组件正常）
-  bool ok = 1;
-  // 健康检查信息
-  string message = 2;
+// 提交批次响应
+message SubmitBatchResponse {
+  BatchId batch_id = 1;
+  int64 agent_nums = 2;
 }
 
-message CheckAgentsRequest {
-  repeated AgentId agent_ids = 1;
+message GetBatchDetailsRequest {
+  BatchId batch_id = 1;
+  repeated TaskStateEnum states = 2;
+}
+
+message GetBatchDetailsResponse {
+  repeated TaskExecutionMsg tasks = 1;
+}
+
+// 列出任务请求
+message ListBatchesRequest {
+  uint32 limit = 1;
+  repeated TaskStateEnum states = 2;  // 筛选状态
+}
+
+// 列出任务响应
+message ListBatchesResponse {
+  repeated BatchMsg batches = 1;
+  uint32 total_count = 2;
+  bool has_more = 3;
+}
+
+// 取消批次任务请求
+message CancelBatchRequest {
+  BatchId batch_id = 1;
+}
+
+// 取消批次任务响应
+message CancelBatchResponse {
+  bool success = 1;
 }
 
 message AgentStatus {
@@ -87,336 +140,107 @@ message AgentStatus {
   bool online = 2;
 }
 
-message CheckAgentsResponse {
-  repeated AgentStatus statuses = 1;
-}
-
-message GetTaskResultRequest {
-  TaskId task_id = 1;
-  // 等待超时（毫秒），为 0 表示不等待
-  int64 wait_timeout_ms = 2;
-  // 指定查询哪个 agent 的结果，如果为空，则返回第一个成功的结果
-  optional AgentId agent_id = 3; // 标记为 optional
-}
-
-message GetTaskResultResponse {
-  bool found = 1;
-  TaskId task_id = 2;
-  AgentId agent_id = 3;
-  string stdout = 4;
-  string stderr = 5;
-  int32 exit_code = 6;
-  int64 timestamp = 7;
-  uint64 duration_ms = 8;
-}
-
-message StreamTaskResultsRequest {
-  TaskId task_id = 1;
-}
-
-message StreamTaskResultsResponse {
-  TaskId task_id = 1;
-  AgentId agent_id = 2;
-  string stdout = 3;
-  string stderr = 4;
-  int32 exit_code = 5;
-  int64 timestamp = 6;
-  uint64 duration_ms = 7;
-}
-
-
-
-// 文件管理消息
-message ApplyFileRequest {
-  string object_name = 1;    
-  bytes file_data = 2;           
-  string destination_path = 3;   
-  string expected_sha256 = 4;   
-  string owner = 5;            
-  string mode = 6;              
-  bool atomic = 7;
-  TaskTargetMsg target = 8; // 使用统一的目标消息
-}
-
-message ApplyFileResponse {
-  bool success = 1;
-  string message = 2;
-  repeated AgentId applied_agents = 3;
-  repeated AgentId failed_agents = 4;
-}
-
-message ClearFilesRequest {}
-message ClearFilesResponse { uint64 deleted_count = 1; }
-
-// Removed: SetNodeLabels/DeleteNodeLabels (unused by CLI)
-
-message GetAgentLabelsRequest {
-  AgentId agent_id = 1;
-}
-
-message GetAgentLabelsResponse {
-  map<string, string> labels = 1;
-}
-
-message GetAgentFactsRequest {
-  AgentId agent_id = 1;
-}
-
-message GetAgentFactsResponse {
-  AgentFacts facts = 1;
-}
-
 message ListAgentsRequest {
   bool verbose = 1;
-  optional string target = 2; // 选择器语法
+  SelectorExpression target = 2; 
+  bool is_online = 3;
 }
 
-message AgentInfo {
-  AgentId agent_id = 1;
-  bool is_online = 2;
-  AgentFacts facts = 3;
-  map<string, string> labels = 4;
-  repeated string groups = 5; // 添加 groups 字段
+message AgentInfoMsg {
+  AgentId id = 1;
+  AgentStatusEnum status = 2;
+  map<string, string> info = 3;
+  int64 last_heartbeat = 4;
+  string version = 5;
+  repeated string capabilities = 6;
 }
 
 message ListAgentsResponse {
-  repeated AgentInfo agents = 1;
+  repeated AgentInfoMsg agents = 1;
 }
 
-// 灰度发布相关消息
+message RemoveAgentRequest {
+  AgentId id = 1;
+}
 
-message CreateRolloutRequest {
+message RemoveAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message FileSpecMsg {
+  // 文件基本信息
   string name = 1;
-  TaskSpecMsg task = 2;
-  RolloutConfigMsg config = 3;
-  map<string, string> labels = 4;
-  TaskTargetMsg target = 5; // 使用统一的目标消息
+  uint64 size = 2;
+  string checksum = 3;
+  string content_type = 4;
+  int64 created_at = 5;
 }
 
-message CreateRolloutResponse {
-  RolloutId rollout_id = 1;
-}
-
-message StartRolloutRequest {
-  RolloutId rollout_id = 1;
-}
-
-message StartRolloutResponse {}
-
-message PauseRolloutRequest {
-  RolloutId rollout_id = 1;
-  string reason = 2;
-}
-
-message PauseRolloutResponse {}
-
-message ResumeRolloutRequest {
-  RolloutId rollout_id = 1;
-}
-
-message ResumeRolloutResponse {}
-
-message AbortRolloutRequest {
-  RolloutId rollout_id = 1;
-  string reason = 2;
-}
-
-message AbortRolloutResponse {}
-
-message RollbackRolloutRequest {
-  RolloutId rollout_id = 1;
-  string reason = 2;
-}
-
-message RollbackRolloutResponse {}
-
-message GetRolloutRequest {
-  RolloutId rollout_id = 1;
-}
-
-message GetRolloutResponse {
-  RolloutMsg rollout = 1;
-}
-
-message ListRolloutsRequest {
-  string status_filter = 1; // Optional status filter
-  int32 limit = 2; // Optional limit
-}
-
-message ListRolloutsResponse {
-  repeated RolloutMsg rollouts = 1;
-}
-
-// ===== Structured messages replacing JSON =====
-
-message TaskSpecMsg {
-  TaskId id = 1;
-  string command = 2;
-  repeated string args = 3;
-  map<string, string> env = 4;
-  uint32 timeout_seconds = 5;
-  TaskTargetMsg target = 6; // 使用统一的目标消息
-}
-
-message BatchSizeMsg {
-  oneof kind {
-    double percentage = 1; // 0-100
-    uint32 count = 2;
-  }
-}
-
-message CanaryStrategyMsg { double percentage = 1; uint64 observation_duration_secs = 2; }
-message RollingStrategyMsg { BatchSizeMsg batch_size = 1; uint64 batch_delay_secs = 2; uint32 max_failures = 3; }
-message BlueGreenStrategyMsg { double switch_percentage = 1; uint64 warmup_secs = 2; }
-
-message RolloutConfigMsg {
-  oneof strategy {
-    CanaryStrategyMsg canary = 1;
-    RollingStrategyMsg rolling = 2;
-    BlueGreenStrategyMsg blue_green = 3;
-  }
-  uint64 timeout_seconds = 4;
-  bool auto_advance = 5;
-  string health_check = 6;
-  map<string, string> labels = 7;
-}
-
-message RolloutProgressMsg {
-  uint32 total_agents = 1;
-  uint32 processed_agents = 2;
-  uint32 successful_agents = 3;
-  uint32 failed_agents = 4;
-  double completion_rate = 5;
-  uint32 current_batch = 6; // 0 if none
-  uint32 total_batches = 7;
-}
-
-message BatchResultMsg {
-  uint32 batch_index = 1;
-  uint32 agent_count = 2;
-  uint32 successful_count = 3;
-  uint32 failed_count = 4;
-  uint64 duration_secs = 5;
-  int64 completed_at = 6;
-}
-
-enum RolloutStateEnum {
-  ROLL_CREATED = 0;
-  ROLL_RUNNING_BATCH = 1;
-  ROLL_WAITING_NEXT = 2;
-  ROLL_PAUSED = 3;
-  ROLL_SUCCEEDED = 4;
-  ROLL_FAILED = 5;
-  ROLL_ABORTED = 6;
-  ROLL_ROLLING_BACK = 7;
-}
-
-// Optional state data depending on the enum above
-message RolloutStateDataMsg {
-  uint32 current_batch = 1;
-  int64 batch_completed_at = 2;
-  string reason = 3;
-  string error = 4;
-}
-
-message RolloutMsg {
-  RolloutId id = 1;
-  string name = 2;
-  TaskSpecMsg task = 3;
-  TaskTargetMsg target = 4; // 使用统一的目标消息
-  RolloutConfigMsg config = 5;
-  RolloutStateEnum state = 6;
-  RolloutStateDataMsg state_data = 7;
-  RolloutProgressMsg progress = 8;
-  repeated BatchResultMsg batch_results = 9;
-  repeated AgentId processed_agents = 10;
-  map<string, TaskId> current_batch_tasks = 11; // 注意：key 是 AgentId 的字符串表示
-  int64 current_batch_started_at = 12; // 0 if none
-  repeated AgentId cached_target_agents = 13;
-  int64 created_at = 14;
-  int64 updated_at = 15;
-  uint64 version = 16;
-}
-
-// ===== Agent structured messages =====
-
-message NetworkInterfaceMsg {
+message FileApplyConfigMsg {
   string name = 1;
-  optional string mac = 2;
-  repeated string ipv4 = 3;
-  repeated string ipv6 = 4;
+  string destination_path = 2;
+  string owner = 3;            // user:group 格式
+  string mode = 4;             // 0644 格式
+  SelectorExpression target = 5;   
 }
 
-enum AgentStatusEnum {
-  AGENT_ONLINE = 0;
-  AGENT_OFFLINE = 1;
-  AGENT_BUSY = 2;
+message FileChunkMsg {
+  string upload_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
 }
 
-message AgentFacts {
-  AgentId agent_id = 1;
-  string hostname = 2;
-  string primary_ip = 3;
-  string cpu_arch = 4;
-  uint32 cpu_cores = 5;
-  uint64 memory_total_bytes = 6;
-  string os_name = 7;
-  string os_version = 8;
-  string kernel_version = 9;
-  string boot_id = 10;
-  repeated NetworkInterfaceMsg network_interfaces = 11;
-  repeated string cidrs = 12;
-  string agent_version = 13;
-  int64 collected_at = 14;
+message FileChunkResponse {
+  uint64 received_bytes = 1;
+  bool complete = 2;  // 是否完成上传
 }
 
-message AgentHeartbeat {
-  AgentId agent_id = 1;
-  AgentStatusEnum status = 2;
-  int64 last_seen = 3;
-  uint64 sequence = 4;
+message CommitFileMsg {
+  string upload_id = 1;
+  bool verify_checksum = 2;  // 是否验证校验和
 }
 
-// ===== Task execution result (internal Pub/Sub over NATS) =====
-message TaskExecutionMsg {
-  TaskId task_id = 1;
-  AgentId agent_id = 2;
-  string stdout = 3;
-  string stderr = 4;
-  int32 exit_code = 5; // -1 if not available
-  int64 timestamp = 6;
-  uint64 duration_ms = 7;
+message FileUploadSession {
+  string upload_id = 1;
+  uint64 received_bytes = 2;  // 已接收字节（断点续传）
+  uint64 chunk_size = 3;      // 建议的分片大小
+  bool resume = 4;            // 是否为续传
 }
 
-// ===== Agent labels (KV) =====
-message AgentLabels {
-  AgentId agent_id = 1;
-  map<string, string> labels = 2;
-  int64 updated_at = 3;
-  string updated_by = 4;
+message FileOperationResult {
+  bool success = 1;
+  string message = 2;
 }
 
-// ===== Leader election =====
+
+message FileApplyRequestMsg {
+  FileApplyConfigMsg config = 2;
+}
+
 message LeaderInfoMsg {
   string instance_id = 1;
   int64 elected_at = 2;
   int64 last_renewal = 3;
 }
 
-// ===== File metadata =====
-message FileMetadataMsg {
-  string name = 1;
-  uint64 size = 2;
-  string checksum = 3;
-  string content_type = 4;
-  int64 uploaded_at = 5;
+// ===== 主服务定义 =====
+service OasisService {
+  // 任务管理
+  rpc SubmitBatch(SubmitBatchRequest) returns (SubmitBatchResponse);
+  rpc GetBatchDetails(GetBatchDetailsRequest) returns (GetBatchDetailsResponse);
+  rpc ListBatches(ListBatchesRequest) returns (ListBatchesResponse);
+  rpc CancelBatch(CancelBatchRequest) returns (CancelBatchResponse);
+  
+  // Agent管理
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc RemoveAgent(RemoveAgentRequest) returns (RemoveAgentResponse);
+  
+  // 文件管理
+  rpc BeginFileUpload(FileSpecMsg) returns (FileUploadSession);
+  rpc UploadFileChunk(FileChunkMsg) returns (FileChunkResponse);
+  rpc CommitFileUpload(CommitFileMsg) returns (FileOperationResult);
+  rpc ApplyFile(FileApplyRequestMsg) returns (FileOperationResult);
+  rpc ClearFiles(EmptyMsg) returns (FileOperationResult);
 }
 
-// ===== Dead letter (DLQ) =====
-message DeadLetterEntryMsg {
-  TaskSpecMsg task = 1;
-  string error = 2;
-  AgentId agent_id = 3;
-  uint32 retry_count = 4;
-  int64 timestamp = 5;
-}

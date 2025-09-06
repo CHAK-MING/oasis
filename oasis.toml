@@ -1,0 +1,24 @@
+# Oasis 系统配置文件
+listen_addr = "0.0.0.0:50051"
+data_dir = "./data"
+
+[telemetry]
+log_level = "info"
+log_format = "text"
+log_no_ansi = false
+
+[nats]
+url = "tls://127.0.0.1:4222"
+
+[grpc]
+url = "https://127.0.0.1:50051"
+
+[tls]
+certs_dir = "./certs"
+
+[server]
+heartbeat_ttl_sec = 60
+
+[agent]
+heartbeat_interval_sec = 30
+fact_collection_interval_sec = 300

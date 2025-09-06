@@ -1,451 +1,388 @@
+use crate::ui::{
+    log_operation, print_header, print_info, print_next_step, print_progress, print_status,
+    print_warning,
+};
 use anyhow::{Context, Result};
-use clap::Subcommand;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use clap::{Parser, Subcommand, arg, command};
+use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
+use oasis_core::proto::RemoveAgentRequest;
+use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use std::path::PathBuf;
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "agent",
+    about = "管理 Agent 节点",
+    after_help = r#"示例：
+  # 部署 Agent
+  oasis-cli agent deploy \
+    --ssh-target root@localhost 
+    --agent-id agent-1234567890 \
+    --nats-url tls://127.0.0.1:4222 \
+    --output-dir ./agent-deploy \
+    --labels "env=test" \
+    --labels "role=worker" \
+    --groups "test-group" \
+    --agent-binary ./oasis-agent
+
+  # 列出 Agent
+  oasis-cli agent list
+"#
+)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    cmd: AgentCmd,
+}
+
 #[derive(Subcommand, Debug)]
-pub enum AgentCommands {
+pub enum AgentCmd {
     /// 部署 agent 到远端机器
-    Deploy {
-        /// 目标主机（SSH 连接串，如 user@host）
-        #[arg(short, long)]
-        target: String,
+    Deploy(AgentDeployArgs),
+    /// 列出 Agent
+    List(AgentListArgs),
+    /// 从远端移除 agent
+    Remove(AgentRemoveArgs),
+    /// 设置 Agent 标签或者分组
+    Set(AgentSetArgs),
+}
 
-        /// SSH 私钥路径
-        #[arg(short, long)]
-        key: Option<PathBuf>,
+#[derive(Parser, Debug)]
+pub struct AgentDeployArgs {
+    /// 目标主机（SSH 连接串，如 user@host）
+    #[arg(short, long)]
+    ssh_target: String,
 
-        /// Agent 连接的 Server URL（等价于 grpc.url 覆盖）
-        #[arg(short, long, default_value = "https://127.0.0.1:50051")]
-        server_url: String,
+    /// Agent ID
+    #[arg(short, long)]
+    agent_id: String,
 
-        /// Agent 连接的 NATS URL
-        #[arg(short, long, default_value = "tls://127.0.0.1:4222")]
-        nats_url: String,
+    /// SSH 私钥路径
+    #[arg(short, long)]
+    key: Option<PathBuf>,
 
-        /// 部署文件输出目录
-        #[arg(short, long, default_value = "./deploy")]
-        output_dir: PathBuf,
+    /// Agent 连接的 NATS URL
+    #[arg(short, long, default_value = "tls://127.0.0.1:4222")]
+    nats_url: String,
 
-        /// Agent 标签，格式 KEY=VALUE，可多次指定
-        #[arg(
+    /// 部署文件输出目录
+    #[arg(short, long, default_value = "./deploy")]
+    output_dir: PathBuf,
+
+    /// Agent 标签，格式 KEY=VALUE，可多次指定
+    #[arg(
             long,
             value_name = "KEY=VALUE",
             action = clap::ArgAction::Append,
             help = "Agent 标签（可重复）",
         )]
-        labels: Vec<String>,
+    labels: Vec<String>,
 
-        /// Agent 组，可多次指定
-        #[arg(
+    /// Agent 组，可多次指定
+    #[arg(
             long,
             value_name = "GROUP",
             action = clap::ArgAction::Append,
             help = "Agent 组（可重复）",
         )]
-        groups: Vec<String>,
-    },
+    groups: Vec<String>,
 
-    /// 列出已部署的 agents
-    List {
-        /// 显示详细信息（包括 facts）
-        #[arg(short, long)]
-        verbose: bool,
+    /// 自动执行部署（无需手动运行脚本）
+    #[arg(long)]
+    auto_install: bool,
 
-        /// 目标选择器
-        #[arg(long, value_name = "TARGET")]
-        target: Option<String>,
-    },
+    /// Agent 二进制文件路径（如果提供，将自动复制）
+    #[arg(long)]
+    agent_binary: Option<PathBuf>,
 
-    /// 从远端移除 agent
-    Remove {
-        /// 目标主机（SSH 连接串，如 user@host）
-        #[arg(short, long)]
-        target: String,
-
-        /// SSH 私钥路径
-        #[arg(short, long)]
-        key: Option<PathBuf>,
-    },
+    /// 为 Agent 生成独立证书
+    #[arg(long)]
+    generate_cert: bool,
 }
 
-pub async fn run_agent(cmd: AgentCommands) -> Result<()> {
-    match cmd {
-        AgentCommands::Deploy {
-            target,
-            key,
-            server_url,
-            nats_url,
-            output_dir,
-            labels,
-            groups,
-        } => {
-            deploy_agent(
-                target, key, server_url, nats_url, output_dir, labels, groups,
-            )
-            .await
-        }
-        AgentCommands::List { verbose, target } => list_agents(verbose, target).await,
-        AgentCommands::Remove { target, key } => remove_agent(target, key).await,
+#[derive(Parser, Debug)]
+pub struct AgentListArgs {
+    /// 显示详细信息（包括 facts）
+    #[arg(short, long)]
+    verbose: bool,
+
+    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    target: String,
+
+    /// 是否只显示在线的 Agent
+    #[arg(long)]
+    is_online: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct AgentRemoveArgs {
+    /// 目标主机（SSH 连接串，如 user@host）
+    #[arg(short, long)]
+    ssh_target: String,
+
+    /// Agent ID
+    #[arg(short, long)]
+    agent_id: String,
+
+    /// SSH 私钥路径
+    #[arg(short, long)]
+    key: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct AgentSetArgs {
+    /// 目标主机（SSH 连接串，如 user@host）
+    #[arg(short, long)]
+    ssh_target: String,
+
+    /// SSH 私钥路径
+    #[arg(short, long)]
+    key: Option<PathBuf>,
+
+    /// 标签
+    #[arg(short, long)]
+    labels: Option<Vec<String>>,
+
+    /// 分组
+    #[arg(short, long)]
+    groups: Option<Vec<String>>,
+}
+
+/// 主入口函数 - 根据子命令分发执行
+pub async fn run_agent(
+    mut client: OasisServiceClient<tonic::transport::Channel>,
+    args: AgentArgs,
+) -> Result<()> {
+    match args.cmd {
+        AgentCmd::Deploy(deploy) => run_agent_deploy(&mut client, deploy).await,
+        AgentCmd::List(list) => run_agent_list(&mut client, list).await,
+        AgentCmd::Remove(remove) => run_agent_remove(&mut client, remove).await,
+        AgentCmd::Set(set) => run_agent_set(&mut client, set).await,
     }
 }
 
-async fn deploy_agent(
-    target: String,
-    key: Option<PathBuf>,
-    server_url: String,
-    nats_url: String,
-    output_dir: PathBuf,
-    labels: Vec<String>,
-    groups: Vec<String>,
+async fn run_agent_deploy(
+    _client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: AgentDeployArgs,
 ) -> Result<()> {
-    println!(
-        "{} {}",
-        style("部署 Agent 到:").bold(),
-        style(&target).cyan()
-    );
+    if args.ssh_target.is_empty() {
+        return Err(anyhow::anyhow!("必须提供 --ssh-target 参数。"));
+    }
+
+    print_header(&format!("部署 Agent 到 {}", style(&args.ssh_target).cyan()));
+
+    // 加一个对 AgentId 的验证，不能超过 64 位，只支持字母和数字，并且不能为空
+    if args.agent_id.len() > 64 {
+        return Err(anyhow::anyhow!("Agent ID 不能超过 64 位。"));
+    }
+    if args.agent_id.is_empty() {
+        return Err(anyhow::anyhow!("Agent ID 不能为空。"));
+    }
+    if !args.agent_id.chars().all(|c| c.is_alphanumeric()) {
+        return Err(anyhow::anyhow!("Agent ID 只能包含字母和数字。"));
+    }
 
     // 创建部署目录
-    std::fs::create_dir_all(&output_dir)?;
+    let deploy_dir = args.output_dir.join(&args.agent_id);
+    std::fs::create_dir_all(&deploy_dir)?;
+    print_status("创建部署目录", true);
 
-    let deploy_script = generate_deploy_script(&target, &server_url, &nats_url)?;
-    let script_path = output_dir.join("deploy-agent.sh");
-    std::fs::write(&script_path, deploy_script)?;
-    println!("  {} {}", style("✔").green(), style("生成部署脚本").dim());
+    // 如果需要，生成独立证书
+    if args.generate_cert {
+        print_info("生成 Agent 独立证书...");
+        generate_agent_certificates(&args.agent_id, &deploy_dir.join("certs")).await?;
+        print_status("生成独立证书", true);
+    } else {
+        // 复制默认证书
+        copy_default_certificates(&deploy_dir.join("certs"))?;
+        print_status("复制默认证书", true);
+    }
+
+    // 复制 Agent 二进制文件（如果提供）
+    if let Some(binary_path) = &args.agent_binary {
+        std::fs::copy(binary_path, deploy_dir.join("oasis-agent"))?;
+        print_status("复制 Agent 二进制文件", true);
+    }
 
     // 生成环境变量文件
-    let env_file = generate_env_file(&server_url, &nats_url, &labels, &groups)?;
-    let env_path = output_dir.join("agent.env");
-    std::fs::write(&env_path, env_file)?;
-    println!(
-        "  {} {}",
-        style("✔").green(),
-        style("生成环境变量文件").dim()
-    );
-
-    // 拷贝本地证书到输出目录（如果存在）
-    let local_certs = PathBuf::from("./certs");
-    if local_certs.exists() && local_certs.is_dir() {
-        let out_certs = output_dir.join("certs");
-        if out_certs.exists() {
-            std::fs::remove_dir_all(&out_certs).ok();
-        }
-        std::fs::create_dir_all(&out_certs)?;
-        for entry in std::fs::read_dir(&local_certs)? {
-            let entry = entry?;
-            let src = entry.path();
-            if src.is_file() {
-                let dst = out_certs.join(src.file_name().unwrap());
-                std::fs::copy(src, dst)?;
-            }
-        }
-        println!("  {} {}", style("✔").green(), style("复制本地证书").dim());
-    }
+    let env_file =
+        generate_agent_env_file(&args.nats_url, &args.labels, &args.groups, &args.agent_id)?;
+    std::fs::write(deploy_dir.join("agent.env"), env_file)?;
+    print_status("生成环境变量文件", true);
 
     // 生成 systemd 服务文件
     let service_file = generate_systemd_service()?;
-    let service_path = output_dir.join("oasis-agent.service");
-    std::fs::write(&service_path, service_file)?;
-    println!(
-        "  {} {}",
-        style("✔").green(),
-        style("生成 systemd 服务文件").dim()
-    );
+    std::fs::write(deploy_dir.join("oasis-agent.service"), service_file)?;
+    print_status("生成 systemd 服务文件", true);
 
     // 生成安装脚本
-    let install_script = generate_install_script(&target, &key)?;
-    let install_path = output_dir.join("install.sh");
-    std::fs::write(&install_path, install_script)?;
-    println!("  {} {}", style("✔").green(), style("生成安装脚本").dim());
+    let install_script = generate_install_script(&args.ssh_target, &args.agent_id)?;
+    let install_script_path = deploy_dir.join("install.sh");
+    std::fs::write(&install_script_path, install_script)?;
+    std::fs::set_permissions(
+        &install_script_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )?;
+    print_status("生成安装脚本", true);
 
-    println!(
-        "\n{} {}",
-        style("部署文件已生成到:").bold(),
-        style(output_dir.display()).cyan()
-    );
-    println!("{}", style("接下来:").bold());
-    println!(
-        "  1. {}",
-        style("复制 `oasis-agent` 二进制文件到输出目录").cyan()
-    );
-    println!("  2. {}", style("运行 `./install.sh` 完成部署").cyan());
+    // 如果启用自动安装
+    if args.auto_install {
+        print_header("自动部署 Agent");
+
+        // 执行自动部署
+        run_agent_auto_deploy(&args.ssh_target, &args.key, &deploy_dir, &args.agent_id).await?;
+
+        // 验证部署
+        verify_agent_deployment(&args.ssh_target, &args.key).await?;
+
+        print_status("Agent 部署完成并已验证", true);
+    } else {
+        print_next_step("手动部署步骤:");
+        println!("  1. cd {}", deploy_dir.display());
+        println!("  2. ./install.sh");
+    }
 
     Ok(())
 }
 
-fn generate_deploy_script(target: &str, _server_url: &str, _nats_url: &str) -> Result<String> {
-    let script = format!(
-        r#"#!/bin/bash
-# Oasis Agent 部署脚本
-# 目标主机: {target}
+async fn run_agent_list(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: AgentListArgs,
+) -> Result<()> {
+    if args.target.is_empty() {
+        return Err(anyhow::anyhow!("必须提供 --target 参数。"));
+    }
 
-set -e
+    print_header("列出所有已连接的 Agent");
 
-echo "部署 Oasis Agent 到 {target}..."
-
-# 创建必要目录
-sudo mkdir -p /opt/oasis/agent
-sudo mkdir -p /opt/oasis/certs
-sudo mkdir -p /var/log/oasis
-
-# 复制二进制文件
-sudo cp oasis-agent /opt/oasis/agent/
-sudo chmod +x /opt/oasis/agent/oasis-agent
-
-# 复制环境变量文件
-sudo cp agent.env /opt/oasis/agent/
-
-# 复制证书（如果从安装脚本上传）
-if [ -d "certs" ]; then
-  sudo cp -r certs/* /opt/oasis/certs/
-  sudo chmod 600 /opt/oasis/certs/*.pem || true
-fi
-
-# 安装 systemd 服务
-sudo cp oasis-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable oasis-agent
-sudo systemctl start oasis-agent
-
-echo "Oasis Agent 部署完成"
-echo "  查看状态: sudo systemctl status oasis-agent"
-echo "  查看日志: sudo journalctl -u oasis-agent -f"
-"#
-    );
-
-    Ok(script)
-}
-
-fn generate_env_file(
-    server_url: &str,
-    nats_url: &str,
-    labels: &[String],
-    groups: &[String],
-) -> Result<String> {
-    // 解析标签
-    let labels_env = if labels.is_empty() {
-        String::new()
-    } else {
-        let labels_str = labels.join(",");
-        format!("\n# Agent 标签\nOASIS_AGENT_LABELS={labels_str}")
-    };
-
-    // 解析组
-    let groups_env = if groups.is_empty() {
-        String::new()
-    } else {
-        let groups_str = groups.join(",");
-        format!("\n# Agent 组\nOASIS_AGENT_GROUPS={groups_str}")
-    };
-
-    let env = format!(
-        r#"# Oasis Agent 环境变量
-# 该文件由工具自动生成，请勿手工修改
-
-# Server 配置
-OASIS_GRPC__URL={server_url}
-
-# NATS 配置
-OASIS_NATS_URL={nats_url}
-OASIS_NATS_CA=/opt/oasis/certs/nats-ca.pem
-OASIS_NATS_CLIENT_CERT=/opt/oasis/certs/nats-client.pem
-OASIS_NATS_CLIENT_KEY=/opt/oasis/certs/nats-client-key.pem
-
-# gRPC 配置
-OASIS_GRPC_CA=/opt/oasis/certs/grpc-ca.pem
-OASIS_GRPC_CLIENT_CERT=/opt/oasis/certs/grpc-client.pem
-OASIS_GRPC_CLIENT_KEY=/opt/oasis/certs/grpc-client-key.pem
-
-# Agent 配置
-OASIS_LOG_LEVEL=info
-OASIS_HEARTBEAT_INTERVAL_SEC=30
-OASIS_FACT_COLLECTION_INTERVAL_SEC=300{labels_env}{groups_env}
-
-# 性能配置
-OASIS_MAX_CONCURRENT_TASKS=10
-"#
-    );
-
-    Ok(env)
-}
-
-fn generate_systemd_service() -> Result<String> {
-    let service = r#"[Unit]
-Description=Oasis Agent
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=root
-Group=root
-WorkingDirectory=/opt/oasis/agent
-EnvironmentFile=/opt/oasis/agent/agent.env
-ExecStart=/opt/oasis/agent/oasis-agent
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=oasis-agent
-
-# 安全设置
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/oasis
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-    Ok(service.to_string())
-}
-
-fn generate_install_script(target: &str, key: &Option<PathBuf>) -> Result<String> {
-    let key_arg = if let Some(key_path) = key {
-        format!("-i {}", key_path.display())
-    } else {
-        String::new()
-    };
-
-    let script = format!(
-        r#"#!/bin/bash
-# Oasis Agent 安装脚本
-
-set -e
-
-echo "正在安装 Oasis Agent..."
-
-# 检查必要文件
-if [ ! -f "oasis-agent" ]; then
-    echo "oasis-agent 二进制文件未找到"
-    exit 1
-fi
-
-if [ ! -f "deploy-agent.sh" ]; then
-    echo "deploy-agent.sh 脚本未找到"
-    exit 1
-fi
-
-echo "正在复制文件到 {target}..."
-scp {key_arg} oasis-agent deploy-agent.sh agent.env oasis-agent.service {target}:/tmp/
-# 复制证书（如果从安装脚本上传）
-if [ -d "certs" ]; then
-  scp -r {key_arg} certs {target}:/tmp/
-fi
-
-echo "正在运行部署脚本..."
-ssh {key_arg} {target} "cd /tmp && chmod +x deploy-agent.sh && ./deploy-agent.sh"
-
-echo "安装完成"
-echo "  Agent 正在运行 {target}"
-echo "  查看状态: ssh {key_arg} {target} 'sudo systemctl status oasis-agent'"
-"#
-    );
-
-    Ok(script)
-}
-
-async fn list_agents(verbose: bool, target: Option<String>) -> Result<()> {
-    println!("{}", style("列出所有已连接的 Agent...").bold());
-
-    let config = oasis_core::config::OasisConfig::load_config(None)?;
-    let server_url = config.grpc.url.clone();
-
-    let endpoint =
-        tonic::transport::Endpoint::from_shared(server_url).context("Invalid server URL")?;
-
-    // 加载客户端证书（使用配置中的路径，确保与服务端匹配）
-    let ca_cert = tokio::fs::read(&config.tls.grpc_ca_path).await?;
-    let client_cert = tokio::fs::read(&config.tls.grpc_client_cert_path).await?;
-    let client_key = tokio::fs::read(&config.tls.grpc_client_key_path).await?;
-
-    let tls_config = tonic::transport::ClientTlsConfig::new()
-        .ca_certificate(tonic::transport::Certificate::from_pem(ca_cert))
-        .identity(tonic::transport::Identity::from_pem(
-            client_cert,
-            client_key,
-        ));
-
-    let channel = endpoint
-        .tls_config(tls_config)?
-        .connect()
-        .await
-        .context("Failed to connect to server")?;
-
-    let mut client = oasis_core::proto::oasis_service_client::OasisServiceClient::new(channel);
-
-    // 优先使用新的 target 字段，如果为空则回退到 selector
-    // 调用服务器 API 获取节点列表
+    // 获取节点列表
     let response = client
-        .list_agents(oasis_core::proto::ListAgentsRequest { target, verbose })
+        .list_agents(oasis_core::proto::ListAgentsRequest {
+            target: Some(oasis_core::proto::SelectorExpression {
+                expression: args.target.clone(),
+            }),
+            verbose: args.verbose,
+            is_online: args.is_online,
+        })
         .await
         .context("Failed to get nodes from server")?;
 
     let agents = response.into_inner().agents;
 
     if agents.is_empty() {
-        println!("  {}", style("没有已连接的 Agent").yellow());
+        print_warning("没有已连接的 Agent");
         return Ok(());
     }
 
-    if verbose {
-        // 详细模式：显示 facts 信息
+    if args.verbose {
+        // 详细模式：显示 agent 信息（分离 groups、系统信息、普通标签）
         for agent in agents {
             let agent_id = agent
-                .agent_id
+                .id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
-            let is_online = agent.is_online;
-            let labels = agent
-                .labels
-                .into_iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
 
-            println!("\n{} {}", style("Agent ID:").bold(), style(agent_id).cyan());
-            println!(
-                "  {}: {}",
-                style("状态").dim(),
-                if is_online {
-                    style("在线").green()
-                } else {
-                    style("离线").red()
-                }
-            );
-            println!(
-                "  {}: {}",
-                style("标签").dim(),
-                if labels.is_empty() {
-                    "-".to_string()
-                } else {
-                    labels
-                }
-            );
+            // 状态处理
+            let is_online = match agent.status {
+                0 => true,  // ONLINE
+                1 => false, // OFFLINE
+                2 => true,  // BUSY
+                _ => false,
+            };
 
-            // 解析并显示 facts（来自 Protobuf 结构）
-            if let Some(facts) = agent.facts {
-                println!("  {}:", style("系统信息").dim());
-                println!("    {}: {}", style("操作系统").dim(), facts.os_name);
-                println!("    {}: {}", style("版本").dim(), facts.os_version);
-                println!("    {}: {}", style("CPU 核心数").dim(), facts.cpu_cores);
-                let mem_gb = facts.memory_total_bytes / (1024 * 1024 * 1024);
-                println!("    {}: {} GB", style("内存").dim(), mem_gb);
-                println!("    {}: {}", style("主机名").dim(), facts.hostname);
-                println!("    {}: {}", style("主 IP").dim(), facts.primary_ip);
-                println!("    {}: {}", style("Agent 版本").dim(), facts.agent_version);
-                let datetime = chrono::DateTime::from_timestamp(facts.collected_at, 0)
-                    .unwrap_or_default()
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
-                println!("    {}: {}", style("信息收集时间").dim(), datetime);
-                println!("    {}: {}", style("内核版本").dim(), facts.kernel_version);
-                println!("    {}: {}", style("CPU 架构").dim(), facts.cpu_arch);
+            // 解析 labels：分离 groups、系统信息、普通标签
+            let mut groups: Vec<String> = Vec::new();
+            let mut system_info_kv: Vec<(String, String)> = Vec::new();
+            let mut user_labels_kv: Vec<(String, String)> = Vec::new();
+
+            for (k, v) in agent.info.iter() {
+                let key = k.as_str();
+                if key == "__groups" {
+                    groups.extend(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                } else if key.starts_with("__system_") {
+                    let clean_key = key.strip_prefix("__system_").unwrap_or(key);
+                    system_info_kv.push((clean_key.to_string(), v.clone()));
+                } else {
+                    // 用户标签：过滤掉所有内部标签
+                    if !key.starts_with("__") {
+                        user_labels_kv.push((k.clone(), v.clone()));
+                    }
+                }
             }
+
+            print_header(&format!("Agent ID: {}", agent_id));
+
+            let status_msg = if is_online { "在线" } else { "离线" };
+            print_info(&format!("状态: {}", status_msg));
+
+            if !user_labels_kv.is_empty() {
+                let labels_str = user_labels_kv
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                print_info(&format!("标签: {}", labels_str));
+            }
+
+            if !groups.is_empty() {
+                print_info(&format!("分组: {}", groups.join(", ")));
+            }
+
+            // 系统信息 + 公共元数据
+            let datetime = chrono::DateTime::from_timestamp(agent.last_heartbeat, 0)
+                .unwrap_or_default()
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+
+            // 组装系统信息项，按常见顺序展示
+            let mut sys_items: Vec<(String, String)> = Vec::new();
+            let push_if = |items: &mut Vec<(String, String)>,
+                           key: &str,
+                           label: &str,
+                           map: &Vec<(String, String)>| {
+                if let Some((_, v)) = map.iter().find(|(k, _)| k == key) {
+                    items.push((label.to_string(), v.clone()));
+                }
+            };
+            push_if(&mut sys_items, "hostname", "主机名", &system_info_kv);
+            push_if(&mut sys_items, "primary_ip", "主IP", &system_info_kv);
+            push_if(&mut sys_items, "cpu_arch", "架构", &system_info_kv);
+            push_if(&mut sys_items, "cpu_cores", "CPU核数", &system_info_kv);
+            push_if(&mut sys_items, "cpu_count", "CPU核数", &system_info_kv);
+            push_if(
+                &mut sys_items,
+                "memory_total_gb",
+                "内存(GB)",
+                &system_info_kv,
+            );
+            push_if(
+                &mut sys_items,
+                "memory_total",
+                "内存(字节)",
+                &system_info_kv,
+            );
+            push_if(&mut sys_items, "os_name", "OS", &system_info_kv);
+            push_if(&mut sys_items, "os_version", "OS版本", &system_info_kv);
+            push_if(&mut sys_items, "kernel_version", "内核", &system_info_kv);
+            push_if(&mut sys_items, "boot_id", "BootID", &system_info_kv);
+
+            // 附加通用元信息
+            sys_items.push(("Agent 版本".to_string(), agent.version.clone()));
+            sys_items.push(("能力".to_string(), agent.capabilities.join(", ")));
+            sys_items.push(("最后心跳".to_string(), datetime));
+
+            // 转为引用切片以适配 log_operation 接口
+            let sys_slice: Vec<(String, String)> = sys_items;
+            let sys_ref: Vec<(&str, &str)> = sys_slice
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            log_operation("系统信息", Some(&sys_ref));
         }
     } else {
         // 简洁模式：表格显示
@@ -454,48 +391,69 @@ async fn list_agents(verbose: bool, target: Option<String>) -> Result<()> {
         table.set_content_arrangement(ContentArrangement::Dynamic);
         table.set_header(vec![
             Cell::new("AGENT ID").add_attribute(Attribute::Bold),
-            Cell::new("主机名").add_attribute(Attribute::Bold),
             Cell::new("状态").add_attribute(Attribute::Bold),
+            Cell::new("版本").add_attribute(Attribute::Bold),
+            Cell::new("分组").add_attribute(Attribute::Bold),
             Cell::new("标签").add_attribute(Attribute::Bold),
         ]);
 
         for agent in agents {
             let agent_id = agent
-                .agent_id
+                .id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
-            let is_online = agent.is_online;
-            let labels = agent
-                .labels
-                .into_iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
 
-            // 从 facts 中提取主机名
-            let hostname = agent
-                .facts
-                .as_ref()
-                .map(|f| f.hostname.clone())
-                .unwrap_or_else(|| "未知".to_string());
-
-            // 使用 comfy_table 的内置着色，避免 ANSI 转义序列导致宽度计算错误（中英文混排下会出现边框错位）
-            let status_cell = if is_online {
-                Cell::new("在线").fg(Color::Green)
-            } else {
-                Cell::new("离线").fg(Color::Red)
+            // 修复：状态处理
+            let status_cell = match agent.status {
+                0 => Cell::new("在线").fg(Color::Green),  // AGENT_ONLINE
+                1 => Cell::new("离线").fg(Color::Red),    // AGENT_OFFLINE
+                2 => Cell::new("繁忙").fg(Color::Yellow), // AGENT_BUSY
+                _ => Cell::new("未知").fg(Color::Grey),
             };
+            // 解析 labels：分离 groups 与普通标签
+            let mut groups: Vec<String> = Vec::new();
+            let mut user_labels_kv: Vec<(String, String)> = Vec::new();
+            for (k, v) in agent.info.into_iter() {
+                let key = k.as_str();
+                if key == "__groups" {
+                    groups.extend(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                } else {
+                    user_labels_kv.push((k, v));
+                }
+            }
+
+            let groups_str = if groups.is_empty() {
+                "-".to_string()
+            } else {
+                groups.join(", ")
+            };
+            let mut labels = if user_labels_kv.is_empty() {
+                "-".to_string()
+            } else {
+                user_labels_kv
+                    .into_iter()
+                    .filter(|(k, _)| !k.starts_with("__system_"))
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            // 限制标签长度，避免表格换行过多
+            if labels.len() > 60 {
+                labels.truncate(57);
+                labels.push_str("...");
+            }
 
             table.add_row(vec![
                 Cell::new(agent_id),
-                Cell::new(hostname),
                 status_cell,
-                Cell::new(if labels.is_empty() {
-                    "-".to_string()
-                } else {
-                    labels
-                }),
+                Cell::new(agent.version),
+                Cell::new(groups_str),
+                Cell::new(labels),
             ]);
         }
 
@@ -504,14 +462,16 @@ async fn list_agents(verbose: bool, target: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn remove_agent(target: String, key: Option<PathBuf>) -> Result<()> {
-    println!(
-        "{} {}",
-        style("正在从远端移除 Agent:").bold(),
-        style(&target).cyan()
-    );
+async fn run_agent_remove(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: AgentRemoveArgs,
+) -> Result<()> {
+    print_header(&format!(
+        "正在从远端移除 Agent: {}",
+        style(&args.ssh_target).cyan()
+    ));
 
-    let key_arg = if let Some(ref key_path) = key {
+    let key_arg = if let Some(ref key_path) = args.key {
         format!("-i {}", key_path.display())
     } else {
         String::new()
@@ -542,27 +502,391 @@ echo "Oasis Agent 已成功移除!"
 "#;
 
     // 保存卸载脚本
-    let script_name = format!("uninstall-{}.sh", target.replace(['@', ':'], "-"));
+    let script_name = format!("uninstall-{}.sh", args.ssh_target.replace(['@', ':'], "-"));
     std::fs::write(&script_name, uninstall_script)?;
 
+    print_status(&format!("已生成卸载脚本: {}", script_name), true);
+    println!();
+    print_next_step("请手动执行以下命令完成移除:");
     println!(
-        "  {} {}",
-        style("✔").green(),
-        style(format!("已生成卸载脚本: {}", script_name)).dim()
-    );
-    println!("\n{}", style("请手动执行以下命令完成移除:").bold());
-    println!(
-        "  1. {}",
-        style(format!("scp {} {} {}:/tmp/", key_arg, script_name, target)).cyan()
+        "  1. scp {} {} {}:/tmp/",
+        key_arg, script_name, args.ssh_target
     );
     println!(
-        "  2. {}",
-        style(format!(
-            "ssh {} {} 'chmod +x /tmp/{} && sudo /tmp/{}'",
-            key_arg, target, script_name, script_name
-        ))
-        .cyan()
+        "  2. ssh {} {} 'chmod +x /tmp/{} && sudo /tmp/{}'",
+        key_arg, args.ssh_target, script_name, script_name
     );
 
+    match client
+        .remove_agent(RemoveAgentRequest {
+            id: Some(oasis_core::proto::AgentId {
+                value: args.agent_id.clone(),
+            }),
+        })
+        .await
+    {
+        Ok(response) => {
+            let resp = response.into_inner();
+            if resp.success {
+                print_status("Agent 已从服务器注销", true);
+            } else {
+                print_warning(&format!("注销结果: {}", resp.message));
+            }
+        }
+        Err(e) => {
+            print_warning(&format!("从服务器注销 Agent 失败: {}", e));
+            print_warning("将继续进行远程卸载，但 Agent 信息可能仍存在于服务器");
+        }
+    }
+
     Ok(())
+}
+
+// TODO: 待实现
+async fn run_agent_set(
+    _client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: AgentSetArgs,
+) -> Result<()> {
+    print_header(&format!(
+        "设置 Agent 标签或者分组: {}",
+        style(&args.ssh_target).cyan()
+    ));
+    Ok(())
+}
+
+/// 自动执行 Agent 部署
+async fn run_agent_auto_deploy(
+    target: &str,
+    key: &Option<PathBuf>,
+    deploy_dir: &PathBuf,
+    agent_id: &str,
+) -> Result<()> {
+    let ssh_key_args = if let Some(key_path) = key {
+        vec![
+            "-i",
+            key_path.to_str().expect("Key path should be valid UTF-8"),
+        ]
+    } else {
+        vec![]
+    };
+
+    // 1. 创建远程临时目录
+    print_progress(1, 5, "创建远程目录");
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_key_args)
+        .arg(target)
+        .arg(format!("mkdir -p /tmp/oasis-deploy-{}", agent_id));
+
+    let output = cmd.output().await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "创建远程目录失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // 2. 使用 rsync 或 scp 复制文件
+    print_progress(2, 5, "上传部署文件");
+
+    // 尝试使用 rsync（更快更可靠）
+    let mut rsync_cmd = tokio::process::Command::new("rsync");
+    rsync_cmd.arg("-avz").arg("--progress");
+
+    if let Some(key_path) = key {
+        rsync_cmd.arg(format!("-e ssh -i {}", key_path.display()));
+    }
+
+    rsync_cmd
+        .arg(format!("{}/", deploy_dir.display()))
+        .arg(format!("{}:/tmp/oasis-deploy-{}/", target, agent_id));
+
+    let rsync_result = rsync_cmd.output().await;
+
+    if rsync_result.is_err()
+        || !rsync_result
+            .expect("rsync_result should be Ok")
+            .status
+            .success()
+    {
+        // 如果 rsync 失败，回退到 scp
+        print_info("使用 scp 上传文件...");
+        let mut scp_cmd = tokio::process::Command::new("scp");
+        scp_cmd
+            .args(&ssh_key_args)
+            .arg("-r")
+            .arg(format!("{}/*", deploy_dir.display()))
+            .arg(format!("{}:/tmp/oasis-deploy-{}/", target, agent_id));
+
+        let output = scp_cmd.output().await?;
+        if !output.status.success() {
+            anyhow::bail!("上传文件失败: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    // 3. 执行安装脚本
+    print_progress(3, 5, "执行安装脚本");
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_key_args).arg(target).arg(format!(
+        "cd /tmp/oasis-deploy-{} && sudo bash install.sh",
+        agent_id
+    ));
+
+    let output = cmd.output().await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "执行安装脚本失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // 4. 启动服务
+    print_progress(4, 5, "启动 Agent 服务");
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_key_args)
+        .arg(target)
+        .arg("sudo systemctl start oasis-agent");
+
+    let output = cmd.output().await?;
+    if !output.status.success() {
+        anyhow::bail!("启动服务失败: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    // 5. 清理临时文件
+    print_progress(5, 5, "清理临时文件");
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_key_args)
+        .arg(target)
+        .arg(format!("rm -rf /tmp/oasis-deploy-{}", agent_id));
+
+    let _ = cmd.output().await; // 忽略清理错误
+
+    Ok(())
+}
+
+/// 验证 Agent 部署是否成功
+async fn verify_agent_deployment(target: &str, key: &Option<PathBuf>) -> Result<()> {
+    print_info("验证 Agent 部署...");
+
+    let ssh_key_args = if let Some(key_path) = key {
+        vec![
+            "-i",
+            key_path.to_str().expect("Key path should be valid UTF-8"),
+        ]
+    } else {
+        vec![]
+    };
+
+    // 检查服务状态
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_key_args)
+        .arg(target)
+        .arg("sudo systemctl is-active oasis-agent");
+
+    let output = cmd.output().await?;
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if status == "active" {
+        print_status("Agent 服务运行正常", true);
+
+        // 获取最近的日志
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args(&ssh_key_args)
+            .arg(target)
+            .arg("sudo journalctl -u oasis-agent -n 10 --no-pager");
+
+        let output = cmd.output().await?;
+        if output.status.success() {
+            print_info("最近日志:");
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+
+        Ok(())
+    } else {
+        print_warning(&format!("Agent 服务状态异常: {}", status));
+        Err(anyhow::anyhow!("Agent 服务未正常运行"))
+    }
+}
+
+/// 生成 Agent 独立证书
+async fn generate_agent_certificates(agent_id: &str, output_dir: &PathBuf) -> Result<()> {
+    use crate::certificate::CertificateGenerator;
+
+    // 加载 CA 证书
+    let ca = CertificateGenerator::load_ca(&PathBuf::from("./certs"))?;
+
+    // 为 Agent 生成证书
+    CertificateGenerator::generate_agent_certificate(agent_id, &ca, output_dir).await?;
+
+    Ok(())
+}
+
+/// 复制默认证书
+fn copy_default_certificates(output_dir: &PathBuf) -> Result<()> {
+    std::fs::create_dir_all(output_dir)?;
+
+    let cert_files = ["nats-ca.pem", "nats-client.pem", "nats-client-key.pem"];
+
+    for file in &cert_files {
+        let src = PathBuf::from("./certs").join(file);
+        let dst = output_dir.join(file);
+        if src.exists() {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 生成改进的安装脚本
+fn generate_install_script(target: &str, agent_id: &str) -> Result<String> {
+    let script = format!(
+        r#"#!/bin/bash
+# Oasis Agent 自动安装脚本
+# 目标: {target}
+# Agent ID: {agent_id}
+
+set -e
+
+echo "==========================================="
+echo "  Oasis Agent 自动安装"
+echo "  Agent ID: {agent_id}"
+echo "==========================================="
+
+# 检查是否以 root 权限运行
+if [[ $EUID -ne 0 ]]; then
+   echo "此脚本需要 root 权限运行"
+   echo "请使用: sudo $0"
+   exit 1
+fi
+
+echo "► 创建必要目录..."
+mkdir -p /opt/oasis/agent
+mkdir -p /opt/oasis/certs
+mkdir -p /var/log/oasis
+
+echo "► 安装 Agent 文件..."
+if [ -f "oasis-agent" ]; then
+    cp oasis-agent /opt/oasis/agent/
+    chmod +x /opt/oasis/agent/oasis-agent
+    echo "  ✔ Agent 二进制文件已安装"
+else
+    echo "  ⚠ Agent 二进制文件未找到，请手动复制"
+fi
+
+echo "► 安装配置文件..."
+cp agent.env /opt/oasis/agent/
+echo "  ✔ 环境变量文件已安装"
+
+echo "► 安装证书..."
+if [ -d "certs" ]; then
+    cp -r certs/* /opt/oasis/certs/
+    chmod 600 /opt/oasis/certs/*.pem 2>/dev/null || true
+    echo "  ✔ 证书已安装"
+else
+    echo "  ⚠ 证书目录未找到"
+fi
+
+echo "► 安装 systemd 服务..."
+cp oasis-agent.service /etc/systemd/system/
+systemctl daemon-reload
+echo "  ✔ systemd 服务已安装"
+
+echo "► 启动 Agent 服务..."
+systemctl enable oasis-agent
+systemctl restart oasis-agent
+
+# 等待服务启动
+sleep 2
+
+# 检查服务状态
+if systemctl is-active --quiet oasis-agent; then
+    echo "  ✔ Agent 服务已成功启动"
+    echo ""
+    echo "==========================================="
+    echo "  安装完成！"
+    echo "  Agent ID: {agent_id}"
+    echo "  状态: 运行中"
+    echo "==========================================="
+    echo ""
+    echo "有用的命令:"
+    echo "  查看状态: systemctl status oasis-agent"
+    echo "  查看日志: journalctl -u oasis-agent -f"
+    echo "  重启服务: systemctl restart oasis-agent"
+else
+    echo "  ✗ Agent 服务启动失败"
+    echo "  请检查日志: journalctl -u oasis-agent -n 50"
+    exit 1
+fi
+"#
+    );
+
+    Ok(script)
+}
+
+/// 生成环境变量文件（包含 Agent ID）
+fn generate_agent_env_file(
+    nats_url: &str,
+    labels: &[String],
+    groups: &[String],
+    agent_id: &str,
+) -> Result<String> {
+    let labels_str = if labels.is_empty() {
+        String::new()
+    } else {
+        format!("\nOASIS_AGENT_LABELS={}", labels.join(","))
+    };
+
+    let groups_str = if groups.is_empty() {
+        String::new()
+    } else {
+        format!("\nOASIS_AGENT_GROUPS={}", groups.join(","))
+    };
+
+    let env = format!(
+        r#"# Oasis Agent 环境变量
+# Agent ID: {agent_id}
+# 生成时间: {}
+
+# Agent 身份
+OASIS_AGENT_ID={agent_id}
+
+# NATS 配置
+OASIS__NATS__URL={nats_url}
+
+# 证书路径（部署时固定）
+OASIS__TLS__CERTS_DIR=/opt/oasis/certs
+
+# 日志配置
+OASIS__TELEMETRY__LOG_LEVEL=info
+OASIS__TELEMETRY__LOG_FORMAT=text
+OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}
+"#,
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
+
+    Ok(env)
+}
+
+/// 生成 systemd 服务文件
+fn generate_systemd_service() -> Result<String> {
+    let service = r#"[Unit]
+Description=Oasis Agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/oasis/agent/oasis-agent
+EnvironmentFile=/opt/oasis/agent/agent.env
+Restart=always
+RestartSec=5
+User=root
+WorkingDirectory=/opt/oasis/agent
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"#;
+    Ok(service.to_string())
 }
