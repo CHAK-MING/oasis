@@ -33,7 +33,7 @@ docker compose up -d
   --labels "env=test" \
   --labels "role=worker" \
   --groups "test-group" \
-  --agent-binary ./oasis-agent 
+  --agent-binary ./oasis-agent
 
 # 安装
 cd ~/agent-deploy/*/
@@ -114,11 +114,23 @@ oasis-cli exec list --limit 20
 ### file：分发文件
 
 ```bash
-# 分发文件
-oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "worker"'
+# 向 Web 服务器分发 nginx 配置
+oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
 
-# 清空文件仓库
-oasis-cli file clear
+# 原子替换并设置权限/属主
+oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --owner root:root --mode 0644
+
+# 指定多个 agent ID
+oasis-cli file apply --src ./config.conf --dest /etc/config.conf --target 'agent-1,agent-2,agent-3'
+
+# 查看文件的历史版本
+oasis-cli file history --source-path ./nginx.conf
+
+# 回滚文件到指定版本
+oasis-cli file rollback --source-path ./nginx.conf --revision 1 --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
+
+# 清空文件仓库（对象存储）——危险操作，会提示确认
+oasis-cli file clear"
 ```
 
 ### agent：Agent 管理
@@ -135,4 +147,34 @@ oasis-cli agent list --verbose
 
 # 移除 Agent
 oasis-cli agent remove --target user@host
+```
+
+### rollout：灰度发布
+
+```bash
+# 创建命令灰度发布
+oasis-cli rollout create \
+  --name "系统更新" \
+  --target 'labels["role"] == "web"' \
+  --strategy percentage:10,30,60,100 \
+  --command "apt update && apt upgrade -y" \
+  --timeout 300
+
+# 创建文件灰度发布
+oasis-cli rollout create \
+  --name "配置更新" \
+  --target 'labels["environment"] == "prod"' \
+  --strategy count:2,5,10,0 \
+  --file-src ./nginx.conf \
+  --file-dest /etc/nginx/nginx.conf \
+  --file-mode 0644
+
+# 查看发布状态
+oasis-cli rollout status rollout-12345678
+
+# 推进到下一阶段
+oasis-cli rollout advance rollout-12345678
+
+# 回滚发布
+oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
 ```

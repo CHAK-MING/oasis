@@ -41,12 +41,6 @@ use std::path::PathBuf;
   # 推进到下一阶段
   oasis-cli rollout advance rollout-12345678
 
-  # 暂停发布
-  oasis-cli rollout pause rollout-12345678
-
-  # 恢复发布
-  oasis-cli rollout resume rollout-12345678
-
   # 回滚发布
   oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
 "#
