@@ -234,7 +234,7 @@ pub struct AgentConfig {
 // --- Default value functions ---
 
 fn default_listen_addr() -> String {
-    "0.0.0.0:50051".to_string()
+    "127.0.0.1:50051".to_string()
 }
 
 fn default_data_dir() -> PathBuf {

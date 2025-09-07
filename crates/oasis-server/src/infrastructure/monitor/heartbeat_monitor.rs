@@ -5,9 +5,9 @@ use oasis_core::{
     agent_types::AgentStatus,
     constants::*,
     core_types::AgentId,
-    error::{CoreError, ErrorSeverity, Result},
+    error::{Result},
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -18,6 +18,8 @@ pub struct AgentHeartbeatInfo {
     pub status: AgentStatus,
     pub last_heartbeat: i64,
     pub updated_at: i64, // 本地更新时间
+    #[allow(dead_code)]
+    pub remove_reason: Option<String>, // 移除原因
 }
 
 impl AgentHeartbeatInfo {
@@ -26,6 +28,7 @@ impl AgentHeartbeatInfo {
             status,
             last_heartbeat,
             updated_at: chrono::Utc::now().timestamp(),
+            remove_reason: None,
         }
     }
 
@@ -33,13 +36,19 @@ impl AgentHeartbeatInfo {
         Self::new(AgentStatus::Online, last_heartbeat)
     }
 
-    pub fn offline() -> Self {
-        Self::new(AgentStatus::Offline, 0)
+    pub fn removed(remove_reason: String) -> Self {
+        Self {
+            status: AgentStatus::Removed,
+            last_heartbeat: 0,
+            updated_at: chrono::Utc::now().timestamp(),
+            remove_reason: Some(remove_reason),
+        }
     }
 }
 
 /// 心跳监控器
 /// 负责监控所有 Agent 的心跳状态，维护内存中的状态缓存
+#[derive(Debug, Clone)]
 pub struct HeartbeatMonitor {
     jetstream: Arc<Context>,
     /// Agent 状态缓存: AgentId -> (Status, LastHeartbeat)
@@ -70,14 +79,10 @@ impl HeartbeatMonitor {
             "Starting HeartbeatMonitor (timeout: {}s)",
             self.heartbeat_timeout
         );
-
-        // 1. 初始加载：从 JetStream 加载现有心跳数据
-        self.initial_load().await?;
-
-        // 2. 启动定期扫描任务
+        // 1. 启动定期扫描任务
         self.start_periodic_scan().await?;
 
-        // 3. 启动心跳数据监听器
+        // 2. 启动心跳数据监听器
         self.start_heartbeat_watcher().await?;
 
         info!("HeartbeatMonitor started successfully");
@@ -95,75 +100,6 @@ impl HeartbeatMonitor {
         })
     }
 
-    /// 初始加载所有现有的心跳数据
-    async fn initial_load(&self) -> Result<()> {
-        info!("Loading initial heartbeat data");
-
-        let heartbeat_store = self.get_heartbeat_store().await?;
-        let current_time = chrono::Utc::now().timestamp();
-        let mut loaded_count = 0;
-
-        let mut keys = heartbeat_store.keys().await.map_err(|e| CoreError::Nats {
-            message: format!("Failed to get heartbeat keys: {}", e),
-            severity: ErrorSeverity::Error,
-        })?;
-
-        while let Some(key) = keys.next().await {
-            match key {
-                Ok(key_name) => {
-                    let agent_id = AgentId::from(key_name.clone());
-
-                    match heartbeat_store.get(&key_name).await {
-                        Ok(Some(bytes)) => {
-                            if let Ok(timestamp_str) = String::from_utf8(bytes.to_vec()) {
-                                if let Ok(last_heartbeat) = timestamp_str.parse::<i64>() {
-                                    let age = current_time - last_heartbeat;
-                                    let status = if age <= self.heartbeat_timeout as i64 {
-                                        AgentStatus::Online
-                                    } else {
-                                        AgentStatus::Offline
-                                    };
-
-                                    self.status_cache.insert(
-                                        agent_id.clone(),
-                                        AgentHeartbeatInfo::new(status, last_heartbeat),
-                                    );
-                                    loaded_count += 1;
-
-                                    debug!(
-                                        "Loaded agent {}: {} (age: {}s)",
-                                        agent_id,
-                                        status.as_str(),
-                                        age
-                                    );
-                                } else {
-                                    warn!(
-                                        "Invalid heartbeat timestamp for {}: {}",
-                                        key_name, timestamp_str
-                                    );
-                                }
-                            } else {
-                                warn!("Invalid heartbeat data for {}", key_name);
-                            }
-                        }
-                        Ok(None) => {
-                            debug!("Heartbeat key {} exists but has no value", key_name);
-                        }
-                        Err(e) => {
-                            warn!("Failed to get heartbeat for {}: {}", key_name, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Error reading heartbeat key: {}", e);
-                }
-            }
-        }
-
-        info!("Initial heartbeat data loaded: {} agents", loaded_count);
-        Ok(())
-    }
-
     /// 启动定期扫描任务，检测心跳超时
     async fn start_periodic_scan(&self) -> Result<()> {
         let status_cache = self.status_cache.clone();
@@ -172,8 +108,7 @@ impl HeartbeatMonitor {
 
         tokio::spawn(async move {
             info!("Starting periodic heartbeat timeout scanner");
-
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
 
             loop {
                 tokio::select! {
@@ -181,24 +116,20 @@ impl HeartbeatMonitor {
                         let current_time = chrono::Utc::now().timestamp();
                         let mut timeout_count = 0;
 
-                        // 扫描所有缓存的状态，检查超时
+                        // 只检查在线 Agent 的超时情况
                         for mut entry in status_cache.iter_mut() {
-                            let agent_id_clone = entry.key().clone();
-                            let info = entry.value().clone();
-                            let mut_to_update = entry.value_mut();
+                            let agent_id = entry.key().clone();
+                            let info = entry.value_mut();
 
-                            let age = current_time - info.last_heartbeat;
-                            let should_be_online = age <= heartbeat_timeout as i64;
-
-                            if should_be_online && matches!(mut_to_update.status, AgentStatus::Offline) {
-                                mut_to_update.status = AgentStatus::Online;
-                                mut_to_update.updated_at = current_time;
-                                debug!("Agent {} back online", agent_id_clone);
-                            } else if !should_be_online && matches!(mut_to_update.status, AgentStatus::Online) {
-                                mut_to_update.status = AgentStatus::Offline;
-                                mut_to_update.updated_at = current_time;
-                                timeout_count += 1;
-                                debug!("Agent {} timed out (age: {}s)", agent_id_clone, age);
+                            // 只处理在线状态的 Agent
+                            if matches!(info.status, AgentStatus::Online) {
+                                let age = current_time - info.last_heartbeat;
+                                if age > heartbeat_timeout as i64 {
+                                    info.status = AgentStatus::Offline;
+                                    info.updated_at = current_time;
+                                    timeout_count += 1;
+                                    debug!("Agent {} timed out (age: {}s)", agent_id, age);
+                                }
                             }
                         }
 
@@ -273,24 +204,37 @@ impl HeartbeatMonitor {
 
         match entry.operation {
             async_nats::jetstream::kv::Operation::Put => {
-                // 心跳更新
+                // 心跳更新 - Agent 恢复在线
                 if let Ok(timestamp_str) = String::from_utf8(entry.value.to_vec()) {
                     if let Ok(last_heartbeat) = timestamp_str.parse::<i64>() {
                         status_cache
                             .insert(agent_id.clone(), AgentHeartbeatInfo::online(last_heartbeat));
                         debug!("Agent {} heartbeat updated: {}", agent_id, last_heartbeat);
                     } else {
-                        warn!("Invalid heartbeat timestamp for {}: {}", key, timestamp_str);
+                        warn!(
+                            "Invalid heartbeat timestamp for {}: {}",
+                            agent_id, timestamp_str
+                        );
                     }
                 } else {
-                    warn!("Invalid heartbeat data for {}", key);
+                    warn!("Invalid heartbeat data for {}", agent_id);
                 }
             }
-            async_nats::jetstream::kv::Operation::Delete
-            | async_nats::jetstream::kv::Operation::Purge => {
-                // ❌ 删除心跳时应该区分"临时离线"和"永久移除"
-                status_cache.insert(agent_id.clone(), AgentHeartbeatInfo::offline());
-                debug!("Agent {} heartbeat removed, marked offline", agent_id);
+            async_nats::jetstream::kv::Operation::Delete => {
+                // 显式删除 - 标记为已移除
+                status_cache.insert(
+                    agent_id.clone(),
+                    AgentHeartbeatInfo::removed("Explicitly deleted via API".to_string()),
+                );
+                info!("Agent {} explicitly removed from heartbeat store", agent_id);
+            }
+            async_nats::jetstream::kv::Operation::Purge => {
+                // 清除操作 - 也标记为已移除
+                status_cache.insert(
+                    agent_id.clone(),
+                    AgentHeartbeatInfo::removed("Purged from storage".to_string()),
+                );
+                info!("Agent {} purged from heartbeat store", agent_id);
             }
         }
     }
@@ -367,17 +311,6 @@ impl HeartbeatMonitor {
             offline_agents: offline,
             heartbeat_timeout: self.heartbeat_timeout,
         }
-    }
-
-    // 辅助方法
-    async fn get_heartbeat_store(&self) -> Result<async_nats::jetstream::kv::Store> {
-        self.jetstream
-            .get_key_value(JS_KV_AGENT_HEARTBEAT)
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to get heartbeat store: {}", e),
-                severity: ErrorSeverity::Error,
-            })
     }
 }
 

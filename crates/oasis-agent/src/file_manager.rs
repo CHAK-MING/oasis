@@ -2,8 +2,13 @@ use crate::nats_client::NatsClient;
 use anyhow::{Context, Result};
 use async_nats::jetstream;
 use futures::StreamExt;
-use oasis_core::{constants::*, core_types::AgentId, file_types::FileApplyConfig};
+use oasis_core::{
+    constants::*,
+    core_types::AgentId,
+    file_types::FileConfig,
+};
 use prost::Message;
+use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -101,48 +106,44 @@ impl FileManager {
         debug!("Received file message: {:?}", msg.info());
 
         // 解析文件应用配置
-        let file_apply_config =
-            match oasis_core::proto::FileApplyConfigMsg::decode(msg.payload.as_ref()) {
-                Ok(file_apply_config_msg) => {
-                    // 从 proto 转换为内部类型
-                    FileApplyConfig::try_from(file_apply_config_msg).map_err(|e| {
-                        error!(
-                            "Failed to convert FileApplyConfigMsg to FileApplyConfig: {}",
-                            e
-                        );
-                        e
-                    })?
+        let file_config = match oasis_core::proto::FileConfigMsg::decode(msg.payload.as_ref()) {
+            Ok(file_config_msg) => {
+                // 从 proto 转换为内部类型
+                FileConfig::try_from(file_config_msg).map_err(|e| {
+                    error!("Failed to convert FileConfigMsg to FileConfig: {}", e);
+                    e
+                })?
+            }
+            Err(e) => {
+                error!("Failed to decode file apply config message: {}", e);
+                // 文件任务失败不重试，直接 ack
+                if let Err(ack_err) = msg.ack().await {
+                    warn!("Failed to ack failed file message: {}", ack_err);
                 }
-                Err(e) => {
-                    error!("Failed to decode file apply config message: {}", e);
-                    // 文件任务失败不重试，直接 ack
-                    if let Err(ack_err) = msg.ack().await {
-                        warn!("Failed to ack failed file message: {}", ack_err);
-                    }
-                    return Err(anyhow::anyhow!("Failed to decode file apply config: {}", e));
-                }
-            };
+                return Err(anyhow::anyhow!("Failed to decode file apply config: {}", e));
+            }
+        };
 
         debug!(
             "Processing file: {} -> {}",
-            file_apply_config.name, file_apply_config.destination_path
+            file_config.source_path, file_config.destination_path
         );
 
         // 执行文件部署
-        let result = self.apply_file(&file_apply_config).await;
+        let result = self.apply_file(&file_config).await;
 
         match &result {
             Ok(_) => {
                 info!(
                     "Successfully applied file: {} -> {}",
-                    file_apply_config.name, file_apply_config.destination_path
+                    file_config.source_path, file_config.destination_path
                 );
                 if let Err(e) = msg.ack().await {
                     warn!("Failed to ack file message: {}", e);
                 }
             }
             Err(e) => {
-                error!("Failed to apply file {}: {}", file_apply_config.name, e);
+                error!("Failed to apply file {}: {}", file_config.source_path, e);
                 // 文件任务失败不重试，直接 ack
                 if let Err(ack_err) = msg.ack().await {
                     warn!("Failed to ack failed file message: {}", ack_err);
@@ -154,14 +155,14 @@ impl FileManager {
     }
 
     /// 应用文件到本地系统
-    async fn apply_file(&self, config: &FileApplyConfig) -> Result<()> {
+    async fn apply_file(&self, config: &FileConfig) -> Result<()> {
         // 验证配置
         config
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
 
         // 1. 从 Object Store 下载文件
-        let file_data = self.download_from_object_store(&config.name).await?;
+        let file_data = self.download_from_object_store(config).await?;
 
         // 2. 应用到本地文件系统
         self.deploy_file_to_local(&file_data, config).await?;
@@ -170,8 +171,8 @@ impl FileManager {
     }
 
     /// 从 Object Store 下载文件
-    async fn download_from_object_store(&self, object_name: &str) -> Result<Vec<u8>> {
-        debug!("Downloading file from object store: {}", object_name);
+    async fn download_from_object_store(&self, config: &FileConfig) -> Result<Vec<u8>> {
+        debug!("Downloading file {}", config.source_path);
 
         let object_store = self
             .nats_client
@@ -180,8 +181,17 @@ impl FileManager {
             .await
             .context("Failed to get object store")?;
 
+        let mut path_hasher = Sha256::new();
+        path_hasher.update(config.source_path.as_bytes());
+        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+        let filename = std::path::Path::new(&config.source_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let object_key = format!("{}/{}.v{}", path_hash, filename, config.revision);
+
         let mut object = object_store
-            .get(object_name)
+            .get(object_key)
             .await
             .context("Failed to get object from store")?;
 
@@ -194,27 +204,26 @@ impl FileManager {
             .await
             .context("Failed to read object data")?;
 
-        info!("Downloaded file: {} ({} bytes)", object_name, data.len());
+        info!(
+            "Downloaded file: {} ({} bytes)",
+            config.source_path,
+            data.len()
+        );
 
         Ok(data)
     }
 
     /// 部署文件到本地文件系统
-    async fn deploy_file_to_local(&self, data: &[u8], config: &FileApplyConfig) -> Result<()> {
+    async fn deploy_file_to_local(&self, data: &[u8], config: &FileConfig) -> Result<()> {
         let dest_path = Path::new(&config.destination_path);
 
         info!(
-            "Deploying file to: {} (atomic: {}, size: {} bytes)",
+            "Deploying file to: {} (size: {} bytes)",
             dest_path.display(),
-            config.atomic,
             data.len()
         );
 
-        if config.atomic {
-            self.atomic_write(dest_path, data).await?;
-        } else {
-            self.direct_write(dest_path, data).await?;
-        }
+        self.direct_write(dest_path, data).await?;
 
         // 设置权限
         if let Some(mode_str) = &config.mode {
@@ -227,45 +236,6 @@ impl FileManager {
         }
 
         info!("File deployed successfully: {}", dest_path.display());
-        Ok(())
-    }
-
-    /// 原子写入文件
-    async fn atomic_write(&self, dest_path: &Path, data: &[u8]) -> Result<()> {
-        // 在同一目录创建临时文件
-        let temp_path = {
-            let mut temp_name = dest_path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Invalid destination path"))?
-                .to_owned();
-            temp_name.push(".tmp");
-
-            dest_path.with_file_name(temp_name)
-        };
-
-        debug!(
-            "Atomic write: {} -> {}",
-            temp_path.display(),
-            dest_path.display()
-        );
-
-        // 确保目标目录存在
-        if let Some(parent_dir) = dest_path.parent() {
-            fs::create_dir_all(parent_dir)
-                .await
-                .context("Failed to create parent directory")?;
-        }
-
-        // 写入临时文件
-        fs::write(&temp_path, data)
-            .await
-            .context("Failed to write to temporary file")?;
-
-        // 原子移动
-        fs::rename(&temp_path, dest_path)
-            .await
-            .context("Failed to move temporary file to destination")?;
-
         Ok(())
     }
 

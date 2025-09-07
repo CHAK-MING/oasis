@@ -1,14 +1,11 @@
-use crate::{
-    core_types::{ SelectorExpression},
-    error::CoreError,
-};
+use crate::{core_types::SelectorExpression, error::CoreError};
 use serde::{Deserialize, Serialize};
 
 /// 统一的文件规格类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSpec {
-    /// 对象名称/文件名
-    pub name: String,
+    /// 源文件路径
+    pub source_path: String,
     /// 文件大小（字节）
     pub size: u64,
     /// SHA256校验和
@@ -21,19 +18,47 @@ pub struct FileSpec {
 
 /// 文件应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileApplyConfig {
-    /// 文件名
-    pub name: String,
+pub struct FileConfig {
+    /// 源文件路径
+    pub source_path: String,
     /// 目标路径
     pub destination_path: String,
+    /// nats 原生 revision
+    pub revision: u64,
     /// 所有者（user:group）
     pub owner: Option<String>,
     /// 权限模式（0644）
     pub mode: Option<String>,
-    /// 原子操作
-    pub atomic: bool,
     /// 目标选择器
     pub target: Option<SelectorExpression>,
+}
+
+/// 文件版本信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVersion {
+    /// 文件名
+    pub name: String,
+    /// revision
+    pub revision: u64,
+    /// 文件大小
+    pub size: u64,
+    /// SHA256 校验和
+    pub checksum: String,
+    /// 创建时间戳
+    pub created_at: i64,
+    /// 是否为当前版本
+    pub is_current: bool,
+}
+
+/// 文件历史信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileHistory {
+    /// 文件名
+    pub name: String,
+    /// 所有版本
+    pub versions: Vec<FileVersion>,
+    /// 当前版本号
+    pub current_version: u64,
 }
 
 /// 统一的文件操作结果
@@ -43,9 +68,11 @@ pub struct FileOperationResult {
     pub success: bool,
     /// 消息
     pub message: String,
+    // revision
+    pub revision: u64,
 }
 
-impl FileApplyConfig {
+impl FileConfig {
     /// 验证部署配置
     pub fn validate(&self) -> Result<(), CoreError> {
         if self.destination_path.trim().is_empty() {
@@ -120,20 +147,71 @@ impl FileApplyConfig {
     }
 }
 
+impl FileVersion {
+    /// 创建新的文件版本
+    pub fn new(
+        name: String,
+        revision: u64,
+        size: u64,
+        checksum: String,
+        created_at: i64,
+        is_current: bool,
+    ) -> Self {
+        Self {
+            name,
+            revision,
+            size,
+            checksum,
+            created_at,
+            is_current,
+        }
+    }
+}
+
+impl FileHistory {
+    /// 创建新的文件历史
+    pub fn new(name: String, versions: Vec<FileVersion>) -> Self {
+        let current_version = versions
+            .iter()
+            .filter(|v| v.is_current)
+            .map(|v| v.revision)
+            .next()
+            .unwrap_or(0);
+
+        Self {
+            name,
+            current_version,
+            versions,
+        }
+    }
+
+    /// 获取当前版本
+    pub fn get_current_version(&self) -> Option<&FileVersion> {
+        self.versions.iter().find(|v| v.is_current)
+    }
+
+    /// 按 revision 排序版本
+    pub fn sort_versions(&mut self) {
+        self.versions.sort_by_key(|v| v.revision);
+    }
+}
+
 impl FileOperationResult {
     /// 创建成功结果
-    pub fn success(message: String) -> Self {
+    pub fn success(message: String, revision: u64) -> Self {
         Self {
             success: true,
             message,
+            revision,
         }
     }
 
     /// 创建失败结果
-    pub fn failure(message: String) -> Self {
+    pub fn failure(message: String, revision: u64) -> Self {
         Self {
             success: false,
             message,
+            revision,
         }
     }
 }

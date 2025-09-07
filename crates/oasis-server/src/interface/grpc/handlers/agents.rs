@@ -21,18 +21,16 @@ impl AgentHandlers {
             .map(|t| t.expression.clone())
             .unwrap_or_else(|| "all".to_string());
 
+        let result = srv.context()
+                .agent_service
+                .query(&expression)
+                .await
+                .map_err(map_core_error)?;
+
         let agent_ids = if req.is_online {
-            srv.context()
-                .agent_service
-                .resolve_online(&expression)
-                .await
-                .map_err(map_core_error)?
+            result.to_online_agents()
         } else {
-            srv.context()
-                .agent_service
-                .resolve_all(&expression)
-                .await
-                .map_err(map_core_error)?
+            result.to_all_agents()
         };
 
         // 从 AgentInfoMonitor 拿快照信息

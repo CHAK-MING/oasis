@@ -1,5 +1,5 @@
 # Oasis 系统配置文件
-listen_addr = "0.0.0.0:50051"
+listen_addr = "127.0.0.1:50051"
 data_dir = "./data"
 
 [telemetry]

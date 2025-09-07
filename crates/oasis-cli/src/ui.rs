@@ -1,7 +1,5 @@
 use console::style;
 use std::io::Write;
-use std::time::Duration;
-use tokio::time::sleep;
 
 /// Docker 风格符号
 pub struct Symbols;
@@ -56,6 +54,8 @@ pub fn print_warning(message: &str) {
     );
 }
 
+/// 错误信息
+#[allow(dead_code)]
 pub fn print_error(message: &str) {
     println!(
         " {} {}",
@@ -145,33 +145,4 @@ pub fn log_operation(operation: &str, details: Option<&[(&str, &str)]>) {
             log_detail(key, value);
         }
     }
-}
-
-/// 等待和进度动画
-pub async fn show_operation_with_dots(message: &str, duration: Duration) {
-    let dots = ["", ".", "..", "..."];
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < duration {
-        for dot in &dots {
-            print!(
-                "\r {} {}{}",
-                get_theme().info.apply_to(Symbols::ARROW),
-                message,
-                dot
-            );
-            std::io::stdout().flush().expect("Failed to flush stdout");
-            sleep(Duration::from_millis(400)).await;
-
-            if start.elapsed() >= duration {
-                break;
-            }
-        }
-    }
-
-    println!(
-        "\r {} {} 完成",
-        get_theme().success.apply_to(Symbols::SUCCESS),
-        message
-    );
 }

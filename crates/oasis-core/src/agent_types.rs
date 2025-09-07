@@ -43,12 +43,13 @@ impl AgentInfo {
     }
 }
 
-/// 强类型的Agent状态 - 替代所有String状态
+/// 强类型的Agent状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
-    Online,
-    Offline,
-    Removed,
+    Online,  // 在线（心跳正常）
+    Offline, // 离线（心跳超时）
+    Removed, // 移除（手动移除）
+    Unknown,
 }
 
 impl AgentStatus {
@@ -57,6 +58,7 @@ impl AgentStatus {
             Self::Online => "online",
             Self::Offline => "offline",
             Self::Removed => "removed",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -67,8 +69,7 @@ impl From<String> for AgentStatus {
             "online" => Self::Online,
             "offline" => Self::Offline,
             "removed" => Self::Removed,
-            _ => Self::Removed,
+            _ => Self::Unknown,
         }
     }
 }
-

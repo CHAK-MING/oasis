@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     let info = build_agent_info(labels, groups.clone());
 
     let nats_url =
-        std::env::var("OASIS__NATS__URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+        std::env::var("OASIS__NATS__URL").unwrap_or_else(|_| "tls://127.0.0.1:4222".to_string());
 
     let certs_dir =
         std::env::var("OASIS__TLS__CERTS_DIR").unwrap_or_else(|_| "./certs".to_string());

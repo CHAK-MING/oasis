@@ -8,10 +8,33 @@ use oasis_core::{
     task_types::{Batch, Task, TaskExecution, TaskState},
 };
 use prost::Message;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, Clone)]
+pub struct TaskMonitorConfig {
+    pub max_cache_size: usize,
+    pub cache_ttl_seconds: u64,
+    pub cleanup_interval_seconds: u64,
+}
+
+impl Default for TaskMonitorConfig {
+    fn default() -> Self {
+        Self {
+            max_cache_size: 10000,
+            cache_ttl_seconds: 3600,
+            cleanup_interval_seconds: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedExecution {
+    pub execution: Arc<TaskExecution>,
+    pub cached_at: i64,
+}
 
 /// Task 监控器：监听结果流，维护任务/执行缓存
 pub struct TaskMonitor {
@@ -23,7 +46,9 @@ pub struct TaskMonitor {
     pub batch_tasks_cache: DashMap<BatchId, Vec<TaskId>>,
     pub task_batch_cache: DashMap<TaskId, BatchId>,
     pub task_cache: DashMap<TaskId, Arc<Task>>,
-    pub execution_cache: DashMap<TaskId, Vec<Arc<TaskExecution>>>,
+    pub execution_cache: DashMap<TaskId, Vec<CachedExecution>>,
+
+    pub config: TaskMonitorConfig,
 }
 
 impl TaskMonitor {
@@ -36,13 +61,27 @@ impl TaskMonitor {
             task_batch_cache: DashMap::new(),
             task_cache: DashMap::new(),
             execution_cache: DashMap::new(),
+            config: TaskMonitorConfig::default(),
         }
     }
 
     pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
+        let monitor = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self.run().await {
-                error!("TaskMonitor run error: {}", e);
+            let cleanup_handle = monitor.start_cache_cleanup();
+
+            let monitor_handle = async {
+                if let Err(e) = monitor.run().await {
+                    error!("TaskMonitor run error: {}", e);
+                }
+            };
+
+            tokio::select! {
+                _ = cleanup_handle => {},
+                _ = monitor_handle => {},
+                _ = monitor.shutdown_token.cancelled() => {
+                    info!("TaskMonitor shutdown requested");
+                }
             }
         })
     }
@@ -87,7 +126,10 @@ impl TaskMonitor {
                                                     self.execution_cache
                                                         .entry(task_id.clone())
                                                         .or_insert_with(Vec::new)
-                                                        .push(Arc::new(execution.clone()));
+                                                        .push(CachedExecution {
+                                                            execution: Arc::new(execution.clone()),
+                                                            cached_at: chrono::Utc::now().timestamp(),
+                                                        });
 
                                                     if execution.state.is_terminal() {
                                                         if let Some(mut cached_task) = self.task_cache.get_mut(task_id) {
@@ -167,10 +209,88 @@ impl TaskMonitor {
     pub fn latest_execution_from_cache(&self, task_id: &TaskId) -> Option<TaskExecution> {
         self.execution_cache
             .get(task_id)
-            .and_then(|v| v.last().map(|e| (**e).clone()))
+            .and_then(|v| v.last().map(|e| (*e.execution).clone()))
     }
 
     pub fn get_batch_task_ids(&self, batch_id: &BatchId) -> Option<Vec<TaskId>> {
         self.batch_tasks_cache.get(batch_id).map(|v| v.clone())
+    }
+
+    async fn start_cache_cleanup(&self) {
+        let shutdown_token = self.shutdown_token.clone();
+
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(self.config.cleanup_interval_seconds));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    self.cleanup_expired_cache().await;
+                }
+                _ = shutdown_token.cancelled() => {
+                    info!("Cache cleanup task stopped");
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn cleanup_expired_cache(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let ttl = self.config.cache_ttl_seconds as i64;
+
+        // 新增：清理过期的 batch 和相关缓存
+        let batch_cache = &self.batch_cache; // 需要传入这些参数
+        let task_cache = &self.task_cache;
+        let batch_tasks_cache = &self.batch_tasks_cache;
+        let task_batch_cache = &self.task_batch_cache;
+        let execution_cache = &self.execution_cache;
+
+        let mut cleaned_batches = 0;
+        let mut cleaned_tasks = 0;
+        let mut cleaned_executions = 0;
+
+        // 清理过期的 batch（超过 TTL 且所有任务都已完成）
+        batch_cache.retain(|batch_id, batch| {
+            let is_expired = now - batch.created_at > ttl;
+            if is_expired {
+                // 清理相关的映射缓存
+                batch_tasks_cache.remove(batch_id);
+                cleaned_batches += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        // 清理过期的已完成任务
+        task_cache.retain(|task_id, task| {
+            let is_terminal_and_old = task.state.is_terminal() && (now - task.created_at > ttl);
+            if is_terminal_and_old {
+                task_batch_cache.remove(task_id);
+                cleaned_tasks += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        // 清理过期的执行记录
+        execution_cache.retain(|_, executions| {
+            let is_expired = now - executions.last().map(|e| e.cached_at).unwrap_or(0) > ttl;
+            if is_expired {
+                cleaned_executions += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        if cleaned_batches > 0 || cleaned_tasks > 0 || cleaned_executions > 0 {
+            debug!(
+                "Cache cleanup: removed {} batches, {} tasks",
+                cleaned_batches, cleaned_tasks
+            );
+        }
     }
 }

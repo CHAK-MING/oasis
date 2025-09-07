@@ -1,6 +1,9 @@
 use crate::nats_client::NatsClient;
 use anyhow::Result;
-use oasis_core::{constants::{kv_key_heartbeat, JS_KV_AGENT_HEARTBEAT}, core_types::AgentId};
+use oasis_core::{
+    constants::{JS_KV_AGENT_HEARTBEAT, kv_key_heartbeat},
+    core_types::AgentId,
+};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -27,6 +30,11 @@ impl HeartbeatService {
 
     pub async fn run(&self) -> Result<()> {
         info!("Starting heartbeat service");
+
+        if let Err(e) = self.send_heartbeat().await {
+            error!("Failed to send initial heartbeat: {}", e);
+        }
+
         let mut interval = tokio::time::interval(Duration::from_secs(30));
 
         loop {
@@ -47,10 +55,14 @@ impl HeartbeatService {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
-        let kv = self.nats_client.jetstream.get_key_value(JS_KV_AGENT_HEARTBEAT).await?;
+        let kv = self
+            .nats_client
+            .jetstream
+            .get_key_value(JS_KV_AGENT_HEARTBEAT)
+            .await?;
         let key = kv_key_heartbeat(self.agent_id.as_str());
         let timestamp = chrono::Utc::now().timestamp();
-        
+
         kv.put(&key, timestamp.to_string().into()).await?;
         debug!("Sent heartbeat for agent: {}", self.agent_id);
 

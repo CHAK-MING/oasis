@@ -34,12 +34,14 @@ impl TaskHandlers {
         let batch_request = BatchRequest::from(&proto_request);
 
         let selector_expr = batch_request.selector.as_str();
-        let resolved_agent_ids = srv
+        let result = srv
             .context()
             .agent_service
-            .resolve_online(selector_expr)
+            .query(selector_expr)
             .await
             .map_err(map_core_error)?;
+
+        let resolved_agent_ids = result.to_online_agents();
 
         info!(
             "Resolved selector '{}' to {} agents",

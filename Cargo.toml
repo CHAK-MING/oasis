@@ -38,3 +38,4 @@ prost = "0.12"
 
 # 并发数据结构
 dashmap = "5.5"
+sysinfo = "0.30"

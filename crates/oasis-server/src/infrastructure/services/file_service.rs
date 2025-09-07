@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+use futures::StreamExt;
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{FILES_SUBJECT_PREFIX, file_types::*};
 
@@ -53,8 +54,23 @@ impl FileService {
     }
 
     /// 上传文件到对象存储 - 返回统一类型的结果
-    async fn upload_internal(&self, name: &str, data: Vec<u8>) -> Result<FileOperationResult> {
-        debug!("Uploading file: {} ({} bytes)", name, data.len());
+    async fn upload_internal(
+        &self,
+        source_path: &String,
+        data: Vec<u8>,
+    ) -> Result<FileOperationResult> {
+        debug!("Uploading file: {} ({} bytes)", source_path, data.len());
+
+        // 生成路径hash和对象key
+        let mut path_hasher = Sha256::new();
+        path_hasher.update(source_path.as_bytes());
+        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+        let filename = std::path::Path::new(source_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let revision = chrono::Utc::now().timestamp() as u64;
+        let object_key = format!("{}/{}.v{}", path_hash, filename, revision);
 
         // 计算文件的 SHA256
         let mut hasher = Sha256::new();
@@ -64,20 +80,23 @@ impl FileService {
         // 获取对象存储
         let store = self.get_object_store().await?;
 
-        match store.put(name, &mut data.as_slice()).await {
+        match store.put(object_key.as_str(), &mut data.as_slice()).await {
             Ok(info) => {
                 info!(
-                    "Successfully uploaded file: {} ({} bytes, SHA256: {})",
-                    name, info.size, checksum
+                    "Successfully uploaded file: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
+                    source_path, object_key, info.nuid, info.size, checksum
                 );
 
-                Ok(FileOperationResult::success(format!(
-                    "File uploaded successfully: {} ({} bytes, SHA256: {})",
-                    name, info.size, checksum
-                )))
+                Ok(FileOperationResult::success(
+                    format!(
+                        "File uploaded successfully: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
+                        source_path, object_key, info.nuid, info.size, checksum
+                    ),
+                    revision,
+                ))
             }
             Err(e) => {
-                error!("Failed to upload file {}: {}", name, e);
+                error!("Failed to upload file {}: {}", source_path, e);
                 Err(CoreError::Internal {
                     message: format!("Failed to upload file: {}", e),
                     severity: ErrorSeverity::Error,
@@ -89,39 +108,15 @@ impl FileService {
     /// 应用到对应的 agents
     async fn apply_internal(
         &self,
-        config: Option<oasis_core::proto::FileApplyConfigMsg>,
+        config: &oasis_core::proto::FileConfigMsg,
         agent_ids: Vec<AgentId>,
     ) -> Result<FileOperationResult> {
-        let config = config.ok_or_else(|| CoreError::InvalidTask {
-            reason: "FileApplyConfig is required".to_string(),
-            severity: ErrorSeverity::Error,
-        })?;
-
         info!(
             "Applying file {} to {} agents: {:?}",
-            config.name,
+            config.source_path,
             agent_ids.len(),
             agent_ids
         );
-
-        // 验证文件是否存在于 Object Store
-        let store = self.get_object_store().await?;
-        let _object_info = store
-            .info(&config.name)
-            .await
-            .map_err(|e| CoreError::Internal {
-                message: format!("File not found in object store: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
-
-        // 验证配置
-        let internal_config =
-            FileApplyConfig::try_from(&config).map_err(|e| CoreError::InvalidTask {
-                reason: format!("Invalid file apply config: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
-
-        internal_config.validate()?;
 
         // 向每个 Agent 发送文件应用任务
         let mut applied_agents = Vec::new();
@@ -146,13 +141,13 @@ impl FileService {
         let message = if failed_agents.is_empty() {
             format!(
                 "File {} sent to {} agents successfully",
-                config.name,
+                config.source_path,
                 applied_agents.len()
             )
         } else {
             format!(
                 "File {} sent to {}/{} agents (failed: {})",
-                config.name,
+                config.source_path,
                 applied_agents.len(),
                 applied_agents.len() + failed_agents.len(),
                 failed_agents.len()
@@ -161,12 +156,26 @@ impl FileService {
 
         let success = failed_agents.is_empty();
 
-        Ok(FileOperationResult { success, message })
+        // 成功后更新当前版本指针
+        if success {
+            if let Err(e) = self
+                .set_active_revision(&config.source_path, config.revision)
+                .await
+            {
+                warn!("Failed to update active revision pointer: {}", e);
+            }
+        }
+
+        Ok(FileOperationResult {
+            success,
+            message,
+            revision: config.revision,
+        })
     }
 
     async fn send_file_apply_task(
         &self,
-        config: &oasis_core::proto::FileApplyConfigMsg,
+        config: &oasis_core::proto::FileConfigMsg,
         agent_id: &AgentId,
     ) -> Result<()> {
         // 序列化配置为 protobuf
@@ -178,7 +187,10 @@ impl FileService {
 
         // 设置去重头部
         let mut headers = async_nats::HeaderMap::new();
-        let dedupe_key = format!("file-{}@{}", config.name, agent_id);
+        let dedupe_key = format!(
+            "file-{}@{}@{}",
+            config.source_path, config.revision, agent_id
+        );
         headers.insert("Nats-Msg-Id", dedupe_key);
 
         // 发布消息到 JS_STREAM_FILES
@@ -256,18 +268,71 @@ impl FileService {
                 severity: ErrorSeverity::Error,
             })
     }
+
+    /// 更新指定源文件的当前版本指针（写入 `{path_hash}/{filename}.current` 对象，内容为 revision）
+    async fn set_active_revision(&self, source_path: &str, revision: u64) -> Result<()> {
+        let mut path_hasher = Sha256::new();
+        path_hasher.update(source_path.as_bytes());
+        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+        let filename = std::path::Path::new(source_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let pointer_key = format!("{}/{}.current", path_hash, filename);
+
+        let content = revision.to_string().into_bytes();
+        let store = self.get_object_store().await?;
+        store
+            .put(pointer_key.as_str(), &mut content.as_slice())
+            .await
+            .map_err(|e| CoreError::Internal {
+                message: format!("Failed to update active revision pointer: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+        Ok(())
+    }
+
+    /// 读取指定源文件的当前版本指针（从 `{path_hash}/{filename}.current` 读取 revision）
+    async fn get_active_revision(&self, source_path: &str) -> Result<Option<u64>> {
+        let mut path_hasher = Sha256::new();
+        path_hasher.update(source_path.as_bytes());
+        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+        let filename = std::path::Path::new(source_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let pointer_key = format!("{}/{}.current", path_hash, filename);
+
+        let store = self.get_object_store().await?;
+        match store.get(pointer_key.as_str()).await {
+            Ok(mut obj) => {
+                let mut buf = Vec::new();
+                use tokio::io::AsyncReadExt;
+                obj.read_to_end(&mut buf)
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to read active revision pointer: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })?;
+                let s = String::from_utf8_lossy(&buf);
+                let rev = s.trim().parse::<u64>().ok();
+                Ok(rev)
+            }
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 impl FileService {
     /// 上传文件到Object Store
-    pub async fn upload(&self, name: &str, data: Vec<u8>) -> Result<FileOperationResult> {
-        self.upload_internal(name, data).await
+    pub async fn upload(&self, source_path: &String, data: Vec<u8>) -> Result<FileOperationResult> {
+        self.upload_internal(source_path, data).await
     }
 
     /// 下发文件到对应的 agents
     pub async fn apply(
         &self,
-        config: Option<oasis_core::proto::FileApplyConfigMsg>,
+        config: &oasis_core::proto::FileConfigMsg,
         agent_ids: Vec<AgentId>,
     ) -> Result<FileOperationResult> {
         self.apply_internal(config, agent_ids).await
@@ -276,5 +341,138 @@ impl FileService {
     /// 清空所有文件
     pub async fn clear_all(&self) -> Result<usize> {
         self.clear_all_internal().await
+    }
+
+    /// 获取特定文件的历史版本
+    pub async fn get_file_history(&self, source_path: &str) -> Result<Option<FileHistory>> {
+        debug!("Getting file history for: {}", source_path);
+
+        // 生成路径hash和文件名
+        let mut path_hasher = Sha256::new();
+        path_hasher.update(source_path.as_bytes());
+        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+        let filename = std::path::Path::new(source_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+
+        let store = self.get_object_store().await?;
+
+        // 使用 list() 获取所有对象，然后过滤出我们关心的文件
+        let mut list = store.list().await.map_err(|e| CoreError::Internal {
+            message: format!("Failed to list objects: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        let mut versions = Vec::new();
+        let mut current_version = None;
+
+        // 构建匹配模式：{path_hash}/{filename}.v*
+        let pattern_prefix = format!("{}/{}.v", path_hash, filename);
+
+        // 收集所有版本信息
+        while let Some(result) = list.next().await {
+            match result {
+                Ok(object_info) => {
+                    // 只处理匹配我们文件模式的对象
+                    if object_info.name.starts_with(&pattern_prefix) {
+                        // 从对象名称中提取时间戳
+                        let timestamp_str = object_info
+                            .name
+                            .strip_prefix(&pattern_prefix)
+                            .unwrap_or("0");
+                        let timestamp = timestamp_str.parse::<i64>().unwrap_or(0);
+
+                        let version = FileVersion {
+                            name: filename.to_string(),
+                            revision: timestamp as u64, // 使用时间戳作为版本号
+                            size: object_info.size as u64,
+                            checksum: object_info.digest.unwrap_or_default(),
+                            created_at: object_info
+                                .modified
+                                .map(|t| t.unix_timestamp())
+                                .unwrap_or(timestamp),
+                            is_current: false, // 稍后确定当前版本
+                        };
+
+                        versions.push(version);
+                    }
+                }
+                Err(e) => {
+                    warn!("Error getting object info: {}", e);
+                }
+            }
+        }
+
+        if versions.is_empty() {
+            return Ok(None);
+        }
+
+        // 按时间戳排序（最新的在前）
+        versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // 读取当前指针；若不存在则默认最新为当前
+        let active_revision = self.get_active_revision(source_path).await?;
+        if let Some(active) = active_revision {
+            for v in &mut versions {
+                v.is_current = v.revision == active;
+            }
+            current_version = Some(active);
+        } else if let Some(latest_version) = versions.first_mut() {
+            latest_version.is_current = true;
+            current_version = Some(latest_version.revision);
+        }
+
+        let file_history = FileHistory {
+            name: filename.to_string(),
+            versions,
+            current_version: current_version.unwrap_or(0),
+        };
+
+        Ok(Some(file_history))
+    }
+
+    /// 回滚文件到指定版本
+    pub async fn rollback_file(
+        &self,
+        config: &oasis_core::proto::FileConfigMsg,
+        agent_ids: Vec<AgentId>,
+    ) -> Result<FileOperationResult> {
+        debug!(
+            "Rolling back file {} to revision {}",
+            config.source_path, config.revision
+        );
+
+        // 下发到对应的 Agent
+        self.apply_internal(config, agent_ids).await?;
+
+        // 更新当前版本指针为回滚到的版本
+        if let Err(e) = self
+            .set_active_revision(&config.source_path, config.revision)
+            .await
+        {
+            warn!(
+                "Failed to update active revision pointer after rollback: {}",
+                e
+            );
+        }
+
+        info!(
+            "Successfully rolled back file {} to revision {}",
+            config.source_path, config.revision
+        );
+        Ok(FileOperationResult::success(
+            format!(
+                "File {} rolled back to revision {} and redeployed to target: {}",
+                config.source_path,
+                config.revision,
+                config
+                    .target
+                    .as_ref()
+                    .map(|t| t.expression.as_str())
+                    .unwrap_or("")
+            ),
+            config.revision,
+        ))
     }
 }

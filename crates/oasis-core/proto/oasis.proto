@@ -31,6 +31,7 @@ enum AgentStatusEnum {
   AGENT_ONLINE = 0;
   AGENT_OFFLINE = 1;
   AGENT_REMOVED = 2;
+  AGENT_UNKNOWN = 3;
 }
 
 message SelectorExpression {
@@ -170,19 +171,20 @@ message RemoveAgentResponse {
 
 message FileSpecMsg {
   // 文件基本信息
-  string name = 1;
+  string source_path = 1;
   uint64 size = 2;
   string checksum = 3;
   string content_type = 4;
   int64 created_at = 5;
 }
 
-message FileApplyConfigMsg {
-  string name = 1;
+message FileConfigMsg {
+  string source_path = 1;      // 源文件路径
   string destination_path = 2;
-  string owner = 3;            // user:group 格式
-  string mode = 4;             // 0644 格式
-  SelectorExpression target = 5;   
+  uint64 revision = 3;
+  string owner = 4;            // user:group 格式
+  string mode = 5;             // 0644 格式
+  SelectorExpression target = 6;   
 }
 
 message FileChunkMsg {
@@ -211,17 +213,209 @@ message FileUploadSession {
 message FileOperationResult {
   bool success = 1;
   string message = 2;
+  uint64 revision = 3;
 }
 
-
 message FileApplyRequestMsg {
-  FileApplyConfigMsg config = 2;
+  FileConfigMsg config = 1;
+}
+
+// 文件版本信息
+message FileVersionMsg {
+  string name = 1;
+  uint64 revision = 2;
+  uint64 size = 3;
+  string checksum = 4;
+  int64 created_at = 5;
+  bool is_current = 6;
+}
+
+// 文件历史信息
+message FileHistoryMsg {
+  string name = 1;
+  repeated FileVersionMsg versions = 2;
+  uint64 current_version = 3;
+}
+
+// 列出文件请求
+message GetFileHistoryRequest {
+  string source_path = 1; 
+}
+
+// 列出文件响应
+message GetFileHistoryResponse {
+  FileHistoryMsg file_history = 1;
+}
+
+// 回滚文件请求
+message RollbackFileRequest {
+  FileConfigMsg config = 1;
 }
 
 message LeaderInfoMsg {
   string instance_id = 1;
   int64 elected_at = 2;
   int64 last_renewal = 3;
+}
+
+// ===== 灰度发布相关类型定义 =====
+
+message RolloutId {
+  string value = 1;
+}
+
+// 灰度发布状态枚举
+enum RolloutStateEnum {
+  ROLLOUT_CREATED = 0;
+  ROLLOUT_RUNNING = 1;
+  ROLLOUT_COMPLETED = 3;
+  ROLLOUT_FAILED = 4;
+  ROLLOUT_ROLLEDBACK = 5;
+}
+
+// 灰度发布策略
+message RolloutStrategyMsg {
+  oneof strategy {
+    PercentageStrategy percentage = 1;
+    CountStrategy count = 2;
+    GroupsStrategy groups = 3;
+  }
+}
+
+message PercentageStrategy {
+  repeated uint32 stages = 1; // [10, 30, 60, 100]
+}
+
+message CountStrategy {
+  repeated uint32 stages = 1; // [2, 5, 10, 0]
+}
+
+message GroupsStrategy {
+  repeated string groups = 1; // ["canary", "staging", "prod"]
+}
+
+// 灰度发布任务类型
+message RolloutTaskTypeMsg {
+  oneof task_type {
+    CommandTask command = 1;
+    FileDeploymentTask file_deployment = 2;
+  }
+}
+
+message CommandTask {
+  string command = 1;
+  repeated string args = 2;
+  uint32 timeout_seconds = 3;
+}
+
+message FileDeploymentTask {
+  FileConfigMsg config = 1;
+  string uploaded_file_name = 2;
+}
+
+// 灰度发布配置
+message RolloutConfigMsg {
+  RolloutId rollout_id = 1;
+  string name = 2;
+  SelectorExpression target = 3;
+  RolloutStrategyMsg strategy = 4;
+  RolloutTaskTypeMsg task_type = 5;
+  bool auto_advance = 6;
+  uint32 advance_interval_seconds = 7;
+  int64 created_at = 8;
+}
+
+// 灰度发布阶段状态
+message RolloutStageStatusMsg {
+  uint32 stage_index = 1;
+  string stage_name = 2;
+  repeated AgentId target_agents = 3;
+  optional BatchId batch_id = 4;
+  uint32 started_count = 5;
+  uint32 completed_count = 6;
+  uint32 failed_count = 7;
+  RolloutStateEnum state = 8;
+  optional int64 started_at = 9;
+  optional int64 completed_at = 10;
+  repeated TaskExecutionMsg failed_executions = 11;
+}
+
+// 灰度发布状态
+message RolloutStatusMsg {
+  RolloutConfigMsg config = 1;
+  RolloutStateEnum state = 2;
+  uint32 current_stage = 3;
+  repeated RolloutStageStatusMsg stages = 4;
+  repeated AgentId all_target_agents = 5;
+  int64 updated_at = 6;
+  optional string error_message = 7;
+}
+
+// ===== 请求/响应消息 =====
+
+// 创建灰度发布请求
+message CreateRolloutRequest {
+  string name = 1;
+  SelectorExpression target = 2;
+  RolloutStrategyMsg strategy = 3;
+  RolloutTaskTypeMsg task_type = 4;
+  bool auto_advance = 5;
+  uint32 advance_interval_seconds = 6;
+}
+
+// 创建灰度发布响应
+message CreateRolloutResponse {
+  RolloutId rollout_id = 1;
+  int64 total_agents = 2;
+  bool success = 3;
+  string message = 4;
+}
+
+// 获取灰度发布状态请求
+message GetRolloutStatusRequest {
+  RolloutId rollout_id = 1;
+}
+
+// 获取灰度发布状态响应
+message GetRolloutStatusResponse {
+  RolloutStatusMsg status = 1;
+}
+
+// 列出灰度发布请求
+message ListRolloutsRequest {
+  uint32 limit = 1;
+  repeated RolloutStateEnum states = 2;
+}
+
+// 列出灰度发布响应
+message ListRolloutsResponse {
+  repeated RolloutStatusMsg rollouts = 1;
+  uint32 total_count = 2;
+  bool has_more = 3;
+}
+
+// 推进灰度发布请求
+message AdvanceRolloutRequest {
+  RolloutId rollout_id = 1;
+}
+
+// 推进灰度发布响应
+message AdvanceRolloutResponse {
+  bool success = 1;
+  string message = 2;
+  optional uint32 next_stage = 3;
+}
+
+// 回滚灰度发布请求
+message RollbackRolloutRequest {
+  RolloutId rollout_id = 1;
+  optional string rollback_command = 2; // 回滚命令（可选）
+}
+
+// 回滚灰度发布响应
+message RollbackRolloutResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 // ===== 主服务定义 =====
@@ -241,6 +435,15 @@ service OasisService {
   rpc UploadFileChunk(FileChunkMsg) returns (FileChunkResponse);
   rpc CommitFileUpload(CommitFileMsg) returns (FileOperationResult);
   rpc ApplyFile(FileApplyRequestMsg) returns (FileOperationResult);
+  rpc GetFileHistory(GetFileHistoryRequest) returns (GetFileHistoryResponse);
+  rpc RollbackFile(RollbackFileRequest) returns (FileOperationResult);
   rpc ClearFiles(EmptyMsg) returns (FileOperationResult);
+
+  // 灰度发布管理
+  rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
+  rpc GetRolloutStatus(GetRolloutStatusRequest) returns (GetRolloutStatusResponse);
+  rpc ListRollouts(ListRolloutsRequest) returns (ListRolloutsResponse);
+  rpc AdvanceRollout(AdvanceRolloutRequest) returns (AdvanceRolloutResponse);
+  rpc RollbackRollout(RollbackRolloutRequest) returns (RollbackRolloutResponse);
 }
 

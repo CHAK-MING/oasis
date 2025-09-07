@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 pub struct NatsClientFactory;
 
 impl NatsClientFactory {
-    /// 使用配置连接到 NATS（按 URL 判断是否 TLS，证书为可选）
+    /// 使用配置连接到 NATS
     pub async fn connect_with_config(
         nats_config: &crate::config::NatsConfig,
         tls_config: &crate::config::TlsConfig,

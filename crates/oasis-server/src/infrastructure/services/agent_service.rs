@@ -2,12 +2,14 @@ pub mod selector_engine;
 
 use crate::infrastructure::{
     monitor::{agent_info_monitor::AgentInfoMonitor, heartbeat_monitor::HeartbeatMonitor},
-    services::agent_service::selector_engine::SelectorEngine,
+    services::agent_service::selector_engine::{QueryCacheConfig, QueryResult, SelectorEngine},
 };
 use async_nats::jetstream::Context;
 use oasis_core::core_types::AgentId;
 use oasis_core::error::{CoreError, ErrorSeverity, Result as CoreResult};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// 选择器服务：封装表达式解析与索引查询
 pub struct AgentService {
@@ -20,26 +22,34 @@ impl AgentService {
         jetstream: Arc<Context>,
         heartbeat: Arc<HeartbeatMonitor>,
         agent_info: Arc<AgentInfoMonitor>,
+        shutdown_token: CancellationToken,
     ) -> Self {
-        Self {
-            jetstream,
-            engine: Arc::new(SelectorEngine::new(heartbeat.clone(), agent_info.clone())),
-        }
+        let engine = Arc::new(
+            SelectorEngine::new(heartbeat, agent_info, shutdown_token).with_cache_config(
+                QueryCacheConfig {
+                    max_entries: 2000, // 增大缓存容量
+                    ttl_seconds: 600,  // 10分钟 TTL
+                    enable_cache: true,
+                    cleanup_interval_seconds: 120, // 2分钟清理间隔
+                },
+            ),
+        );
+
+        Self { jetstream, engine }
     }
 
     /// 解析表达式，返回所有匹配的 Agent（不做在线过滤）
-    pub async fn resolve_all(&self, expression: &str) -> CoreResult<Vec<AgentId>> {
-        self.engine.resolve_all(expression).await
-    }
-
-    /// 解析表达式，仅返回在线的 Agent
-    pub async fn resolve_online(&self, expression: &str) -> CoreResult<Vec<AgentId>> {
-        self.engine.resolve_online(expression).await
+    pub async fn query(&self, expression: &str) -> CoreResult<QueryResult> {
+        self.engine.query(expression).await
     }
 
     // 只读：获取单个/批量 AgentInfo
     pub fn get_agent_info(&self, agent_id: &AgentId) -> Option<oasis_core::agent_types::AgentInfo> {
         self.engine.get_agent_info(agent_id)
+    }
+
+    pub fn spawn_cache_cleanup(&self) -> Option<JoinHandle<()>> {
+        self.engine.clone().spawn_cache_cleanup()
     }
 
     pub fn list_agent_infos(

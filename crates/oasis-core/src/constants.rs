@@ -115,11 +115,6 @@ pub mod validation {
             ));
         }
 
-        // 检查危险路径
-        if path.contains("..") || path.starts_with('/') {
-            return Err("File path contains dangerous patterns".to_string());
-        }
-
         Ok(())
     }
 

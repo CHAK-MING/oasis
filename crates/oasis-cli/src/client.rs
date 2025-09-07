@@ -2,7 +2,7 @@ use crate::commands::agent::{AgentArgs, run_agent};
 use crate::commands::exec::ExecArgs;
 use crate::commands::exec::run_exec;
 use crate::commands::file::{FileArgs, run_file};
-
+use crate::commands::rollout::{RolloutArgs, run_rollout};
 use crate::commands::system::{SystemArgs, run_system};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -50,6 +50,7 @@ pub enum Commands {
     Exec(ExecArgs),
     File(FileArgs),
     System(SystemArgs),
+    Rollout(RolloutArgs),
 }
 
 pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<()> {
@@ -67,7 +68,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
                 Commands::Exec(args) => run_exec(client, args).await?,
                 Commands::File(args) => run_file(client, args).await?,
                 Commands::Agent(args) => run_agent(client, args).await?,
-
+                Commands::Rollout(args) => run_rollout(client, args).await?,
                 Commands::System(_) => {
                     unreachable!()
                 }

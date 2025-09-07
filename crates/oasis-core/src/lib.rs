@@ -2,6 +2,7 @@ pub mod agent_types;
 pub mod core_types;
 pub mod file_types;
 pub mod task_types;
+pub mod rollout_types;
 
 // Proto conversion bridge
 pub mod proto_bridge;

@@ -39,7 +39,7 @@ impl TaskManager {
 
         let mut unicast_messages = unicast_consumer.messages().await?;
 
-        info!("Task manager started with dual consumers (default + unicast)");
+        info!("Task manager started with dual consumers");
 
         loop {
             tokio::select! {
@@ -106,7 +106,7 @@ impl TaskManager {
     async fn process_task_message(&self, msg: jetstream::Message, source: &str) -> Result<()> {
         // 解析任务(这里需要换成 proto)
         let task = match oasis_core::proto::TaskMsg::decode(msg.payload.as_ref()) {
-            Ok(task_msg) => Task::from(task_msg), 
+            Ok(task_msg) => Task::from(task_msg),
             Err(e) => {
                 error!("Failed to decode task message from {}: {}", source, e);
                 msg.ack()
@@ -249,11 +249,19 @@ impl TaskManager {
             task.args.join(" ")
         );
 
-        // 执行 shell 命令
-        let output = match tokio::process::Command::new(&task.command)
-            .args(&task.args)
+        // 构建完整命令
+        let full_command = if task.args.is_empty() {
+            task.command.clone()
+        } else {
+            format!("{} {}", task.command, task.args.join(" "))
+        };
+
+        // 统一使用 shell 执行
+        let output = match tokio::process::Command::new("/bin/sh")
+            .args(&["-c", &full_command])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .envs(std::env::vars())
             .output()
             .await
         {

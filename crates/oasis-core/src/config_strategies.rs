@@ -243,7 +243,7 @@ impl AgentConfigStrategy {
 
         // Set a default listen_addr for Agent (not used but required by config validation)
         if config.listen_addr.is_empty() {
-            config.listen_addr = "127.0.0.1:0".to_string();
+            config.listen_addr = "127.0.0.1:50051".to_string();
         }
 
         // NATS connection config - direct environment variables (keep backward compatibility)

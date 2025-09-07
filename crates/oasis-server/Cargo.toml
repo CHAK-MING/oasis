@@ -48,3 +48,4 @@ pest_derive = "2.7"
 rustls = "0.22"
 rustls-pemfile = "2.1"
 lazy_static = "1.5.0"
+

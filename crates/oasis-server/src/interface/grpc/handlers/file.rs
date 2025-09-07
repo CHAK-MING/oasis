@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 /// 文件上传会话
 #[derive(Debug, Clone)]
 struct UploadSession {
-    name: String,
+    source_path: String,
     size: u64,
     buffer: Vec<u8>,
     checksum: String,
@@ -121,7 +121,7 @@ async fn cleanup_sessions(
 impl FileHandlers {
     async fn create(
         upload_id: String,
-        name: String,
+        source_path: String,
         size: u64,
         checksum: String,
     ) -> std::result::Result<u64, String> {
@@ -157,7 +157,7 @@ impl FileHandlers {
         SESSIONS.sessions.insert(
             upload_id,
             UploadSession {
-                name,
+                source_path,
                 size,
                 buffer: Vec::with_capacity(size.min(100 * 1024 * 1024) as usize),
                 checksum,
@@ -227,12 +227,12 @@ impl FileHandlers {
         let req = request.into_inner();
 
         // 验证参数
-        if req.name.is_empty() {
-            return Err(Status::invalid_argument("object_name cannot be empty"));
+        if req.source_path.is_empty() {
+            return Err(Status::invalid_argument("source_path cannot be empty"));
         }
 
         // 使用新的验证模块
-        if let Err(e) = oasis_core::constants::validation::validate_file_path(&req.name) {
+        if let Err(e) = oasis_core::constants::validation::validate_file_path(&req.source_path) {
             return Err(Status::invalid_argument(format!(
                 "Invalid file path: {}",
                 e
@@ -242,6 +242,8 @@ impl FileHandlers {
         if req.size == 0 {
             return Err(Status::invalid_argument("size must be greater than 0"));
         }
+
+        // TODO: 支持大文件
         if req.size > 100 * 1024 * 1024 {
             // 100MB 限制
             return Err(Status::invalid_argument("file too large (max 100MB)"));
@@ -251,12 +253,16 @@ impl FileHandlers {
         let upload_id = uuid::Uuid::new_v4().to_string();
 
         // 创建会话
-        let received =
-            FileHandlers::create(upload_id.clone(), req.name.clone(), req.size, req.checksum)
-                .await
-                .map_err(|e| {
-                    Status::resource_exhausted(format!("Failed to create upload session: {}", e))
-                })?;
+        let received = FileHandlers::create(
+            upload_id.clone(),
+            req.source_path.clone(),
+            req.size,
+            req.checksum,
+        )
+        .await
+        .map_err(|e| {
+            Status::resource_exhausted(format!("Failed to create upload session: {}", e))
+        })?;
 
         // 记录会话统计信息
         let (total, expired, memory_mb) = FileHandlers::get_stats().await;
@@ -343,18 +349,19 @@ impl FileHandlers {
         let upload_result = srv
             .context()
             .file_service
-            .upload(&session.name, session.buffer)
+            .upload(&session.source_path, session.buffer)
             .await
             .map_err(|e| Status::internal(format!("Failed to store file: {}", e)))?;
 
         debug!(
             "File uploaded successfully: {} (size: {}, sha256: {})",
-            session.name, session.size, checksum
+            session.source_path, session.size, checksum
         );
 
         Ok(Response::new(oasis_core::proto::FileOperationResult {
             success: upload_result.success,
             message: upload_result.message,
+            revision: upload_result.revision,
         }))
     }
 
@@ -368,7 +375,7 @@ impl FileHandlers {
         let req = request.into_inner();
 
         // 验证参数
-        if req.config.as_ref().unwrap().name.is_empty() {
+        if req.config.as_ref().unwrap().source_path.is_empty() {
             return Err(Status::invalid_argument("name cannot be empty"));
         }
 
@@ -383,13 +390,14 @@ impl FileHandlers {
             .as_ref()
             .map(|t| t.expression.as_str())
             .unwrap_or("");
-        let agent_ids = srv
+        let result = srv
             .context()
             .agent_service
-            .resolve_online(selector_expr)
+            .query(selector_expr)
             .await
             .map_err(|e| Status::internal(format!("Failed to resolve selector: {}", e)))?;
 
+        let agent_ids = result.to_online_agents();
         if agent_ids.is_empty() {
             return Err(Status::failed_precondition("No agents match the target"));
         }
@@ -398,7 +406,7 @@ impl FileHandlers {
         let _ = srv
             .context()
             .file_service
-            .apply(req.config, agent_ids)
+            .apply(config, agent_ids)
             .await
             .map_err(|e| Status::internal(format!("Failed to download file: {}", e)))?;
 
@@ -406,6 +414,7 @@ impl FileHandlers {
         Ok(Response::new(oasis_core::proto::FileOperationResult {
             success: true,
             message: format!("File apply task created successfully"),
+            revision: 0,
         }))
     }
 
@@ -426,6 +435,75 @@ impl FileHandlers {
         Ok(Response::new(oasis_core::proto::FileOperationResult {
             success: true,
             message: format!("成功清理 {} 个文件", deleted_count),
+            revision: 0,
+        }))
+    }
+
+    /// 获取文件历史版本
+    #[instrument(skip_all)]
+    pub async fn get_file_history(
+        srv: &OasisServer,
+        request: Request<oasis_core::proto::GetFileHistoryRequest>,
+    ) -> std::result::Result<Response<oasis_core::proto::GetFileHistoryResponse>, Status> {
+        let req = request.into_inner();
+        debug!("Get file history request: source_path={}", req.source_path);
+
+        // 验证参数
+        if req.source_path.is_empty() {
+            return Err(Status::invalid_argument("source_path cannot be empty"));
+        }
+
+        // 获取文件历史
+        let file_history = srv
+            .context()
+            .file_service
+            .get_file_history(&req.source_path)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get file history: {}", e)))?;
+
+        let response = oasis_core::proto::GetFileHistoryResponse {
+            file_history: file_history.map(|h| h.into()),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    /// 回滚文件到指定版本
+    #[instrument(skip_all)]
+    pub async fn rollback_file(
+        srv: &OasisServer,
+        request: Request<oasis_core::proto::RollbackFileRequest>,
+    ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
+        let req = request.into_inner();
+        
+        let config = req.config.as_ref().ok_or_else(|| Status::invalid_argument("config is required for rollback file"))?;
+
+        // 解析选择器
+        let selector_expr = &config.target.as_ref().map(|t| t.expression.as_str()).unwrap_or("");
+        let result = srv
+            .context()
+            .agent_service
+            .query(selector_expr)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to resolve selector: {}", e)))?;
+
+        let agent_ids = result.to_online_agents();
+        if agent_ids.is_empty() {
+            return Err(Status::failed_precondition("No agents match the target"));
+        }
+
+        // 执行回滚
+        let result = srv
+            .context()
+            .file_service
+            .rollback_file(config, agent_ids)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to rollback file: {}", e)))?;
+
+        Ok(Response::new(oasis_core::proto::FileOperationResult {
+            success: result.success,
+            message: result.message,
+            revision: result.revision,
         }))
     }
 }

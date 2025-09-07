@@ -15,6 +15,10 @@ pub struct TaskId(String);
     Debug, Clone, PartialEq, Eq, Hash, Display, From, Into, AsRef, Serialize, Deserialize, Default,
 )]
 pub struct BatchId(String);
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, Into, AsRef, Serialize, Deserialize, Default,
+)]
+pub struct RolloutId(String);
 
 impl AgentId {
     pub fn new(id: impl Into<String>) -> Self {
@@ -41,6 +45,18 @@ impl TaskId {
 }
 
 impl BatchId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+}
+
+impl RolloutId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }

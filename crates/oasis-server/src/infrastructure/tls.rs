@@ -28,13 +28,9 @@ impl TlsService {
     /// Create a new TLS service with file paths
     pub async fn new_with_paths(
         cert_path: std::path::PathBuf,
-        _key_path: std::path::PathBuf,
-        _ca_path: std::path::PathBuf,
     ) -> Result<Self> {
         let config = TlsConfig {
             certs_dir: cert_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
                 .to_path_buf(),
         };
 

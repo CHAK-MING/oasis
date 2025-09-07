@@ -1,13 +1,21 @@
 use crate::agent_types::AgentInfo;
 use crate::agent_types::AgentStatus;
 use crate::core_types::BatchId;
+use crate::core_types::RolloutId;
 use crate::core_types::SelectorExpression;
 use crate::core_types::{AgentId, TaskId};
-use crate::file_types::FileApplyConfig;
+use crate::file_types::FileConfig;
 use crate::file_types::FileOperationResult;
 use crate::file_types::FileSpec;
+use crate::file_types::{FileHistory, FileVersion};
 use crate::proto;
 use crate::proto::BatchMsg;
+use crate::rollout_types::RolloutConfig;
+use crate::rollout_types::RolloutStageStatus;
+use crate::rollout_types::RolloutState;
+use crate::rollout_types::RolloutStatus;
+use crate::rollout_types::RolloutStrategy;
+use crate::rollout_types::RolloutTaskType;
 use crate::task_types::*;
 
 // ===== TaskId 转换 =====
@@ -95,6 +103,34 @@ impl From<proto::BatchId> for BatchId {
 impl From<&proto::BatchId> for BatchId {
     fn from(proto: &proto::BatchId) -> Self {
         BatchId::from(proto.value.clone())
+    }
+}
+
+impl From<&RolloutId> for proto::RolloutId {
+    fn from(rollout_id: &RolloutId) -> Self {
+        Self {
+            value: rollout_id.to_string(),
+        }
+    }
+}
+
+impl From<RolloutId> for proto::RolloutId {
+    fn from(rollout_id: RolloutId) -> Self {
+        Self {
+            value: rollout_id.to_string(),
+        }
+    }
+}
+
+impl From<proto::RolloutId> for RolloutId {
+    fn from(proto: proto::RolloutId) -> Self {
+        RolloutId::from(proto.value)
+    }
+}
+
+impl From<&proto::RolloutId> for RolloutId {
+    fn from(proto: &proto::RolloutId) -> Self {
+        RolloutId::from(proto.value.clone())
     }
 }
 
@@ -347,6 +383,7 @@ impl From<AgentStatus> for proto::AgentStatusEnum {
             AgentStatus::Online => proto::AgentStatusEnum::AgentOnline,
             AgentStatus::Offline => proto::AgentStatusEnum::AgentOffline,
             AgentStatus::Removed => proto::AgentStatusEnum::AgentRemoved,
+            AgentStatus::Unknown => proto::AgentStatusEnum::AgentUnknown,
         }
     }
 }
@@ -357,6 +394,7 @@ impl From<proto::AgentStatusEnum> for AgentStatus {
             proto::AgentStatusEnum::AgentOffline => AgentStatus::Offline,
             proto::AgentStatusEnum::AgentOnline => AgentStatus::Online,
             proto::AgentStatusEnum::AgentRemoved => AgentStatus::Removed,
+            proto::AgentStatusEnum::AgentUnknown => AgentStatus::Unknown,
         }
     }
 }
@@ -510,11 +548,21 @@ impl proto::BatchId {
     }
 }
 
-impl From<&FileApplyConfig> for crate::proto::FileApplyConfigMsg {
-    fn from(config: &FileApplyConfig) -> Self {
+impl proto::RolloutId {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.value.is_empty() {
+            return Err("rollout_id cannot be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl From<&FileConfig> for crate::proto::FileConfigMsg {
+    fn from(config: &FileConfig) -> Self {
         Self {
-            name: config.name.clone(),
+            source_path: config.source_path.clone(),
             destination_path: config.destination_path.clone(),
+            revision: config.revision,
             owner: config.owner.clone().unwrap_or_default(),
             mode: config.mode.clone().unwrap_or_default(),
             target: config.target.as_ref().map(|t| t.into()),
@@ -522,19 +570,20 @@ impl From<&FileApplyConfig> for crate::proto::FileApplyConfigMsg {
     }
 }
 
-impl From<FileApplyConfig> for crate::proto::FileApplyConfigMsg {
-    fn from(config: FileApplyConfig) -> Self {
+impl From<FileConfig> for crate::proto::FileConfigMsg {
+    fn from(config: FileConfig) -> Self {
         (&config).into()
     }
 }
 
-impl TryFrom<crate::proto::FileApplyConfigMsg> for FileApplyConfig {
+impl TryFrom<crate::proto::FileConfigMsg> for FileConfig {
     type Error = anyhow::Error;
 
-    fn try_from(proto: crate::proto::FileApplyConfigMsg) -> Result<Self, Self::Error> {
+    fn try_from(proto: crate::proto::FileConfigMsg) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: proto.name,
+            source_path: proto.source_path,
             destination_path: proto.destination_path,
+            revision: proto.revision,
             owner: if proto.owner.is_empty() {
                 None
             } else {
@@ -545,19 +594,19 @@ impl TryFrom<crate::proto::FileApplyConfigMsg> for FileApplyConfig {
             } else {
                 Some(proto.mode)
             },
-            atomic: false, // proto 中没有这个字段，默认 false
             target: proto.target.map(SelectorExpression::from),
         })
     }
 }
 
-impl TryFrom<&crate::proto::FileApplyConfigMsg> for FileApplyConfig {
+impl TryFrom<&crate::proto::FileConfigMsg> for FileConfig {
     type Error = anyhow::Error;
 
-    fn try_from(proto: &crate::proto::FileApplyConfigMsg) -> Result<Self, Self::Error> {
+    fn try_from(proto: &crate::proto::FileConfigMsg) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: proto.name.clone(),
+            source_path: proto.source_path.clone(),
             destination_path: proto.destination_path.clone(),
+            revision: proto.revision,
             owner: if proto.owner.is_empty() {
                 None
             } else {
@@ -568,7 +617,6 @@ impl TryFrom<&crate::proto::FileApplyConfigMsg> for FileApplyConfig {
             } else {
                 Some(proto.mode.clone())
             },
-            atomic: false,
             target: proto.target.as_ref().map(SelectorExpression::from),
         })
     }
@@ -579,7 +627,7 @@ impl TryFrom<&crate::proto::FileApplyConfigMsg> for FileApplyConfig {
 impl From<&FileSpec> for crate::proto::FileSpecMsg {
     fn from(spec: &FileSpec) -> Self {
         Self {
-            name: spec.name.clone(),
+            source_path: spec.source_path.clone(),
             size: spec.size,
             checksum: spec.checksum.clone(),
             content_type: spec.content_type.clone(),
@@ -599,7 +647,7 @@ impl TryFrom<crate::proto::FileSpecMsg> for FileSpec {
 
     fn try_from(proto: crate::proto::FileSpecMsg) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: proto.name,
+            source_path: proto.source_path,
             size: proto.size,
             checksum: proto.checksum,
             content_type: proto.content_type,
@@ -613,7 +661,7 @@ impl TryFrom<&crate::proto::FileSpecMsg> for FileSpec {
 
     fn try_from(proto: &crate::proto::FileSpecMsg) -> Result<Self, Self::Error> {
         Ok(Self {
-            name: proto.name.clone(),
+            source_path: proto.source_path.clone(),
             size: proto.size,
             checksum: proto.checksum.clone(),
             content_type: proto.content_type.clone(),
@@ -629,6 +677,7 @@ impl From<&FileOperationResult> for crate::proto::FileOperationResult {
         Self {
             success: result.success,
             message: result.message.clone(),
+            revision: result.revision,
         }
     }
 }
@@ -644,6 +693,7 @@ impl From<crate::proto::FileOperationResult> for FileOperationResult {
         Self {
             success: proto.success,
             message: proto.message,
+            revision: proto.revision,
         }
     }
 }
@@ -653,6 +703,268 @@ impl From<&crate::proto::FileOperationResult> for FileOperationResult {
         Self {
             success: proto.success,
             message: proto.message.clone(),
+            revision: proto.revision,
+        }
+    }
+}
+
+// ===== RolloutStatus 转换 =====
+
+impl From<&RolloutStatus> for proto::RolloutStatusMsg {
+    fn from(status: &RolloutStatus) -> Self {
+        let config = proto::RolloutConfigMsg::from(&status.config);
+        let stages = status
+            .stages
+            .iter()
+            .map(|stage| proto::RolloutStageStatusMsg::from(stage))
+            .collect();
+
+        proto::RolloutStatusMsg {
+            config: Some(config),
+            state: proto::RolloutStateEnum::from(status.state) as i32,
+            current_stage: status.current_stage,
+            stages,
+            all_target_agents: status
+                .all_target_agents
+                .iter()
+                .map(|id| proto::AgentId {
+                    value: id.to_string(),
+                })
+                .collect(),
+            updated_at: status.updated_at,
+            error_message: status.error_message.clone(),
+        }
+    }
+}
+
+impl From<RolloutStatus> for proto::RolloutStatusMsg {
+    fn from(status: RolloutStatus) -> Self {
+        (&status).into()
+    }
+}
+
+// ===== RolloutConfig 转换 =====
+
+impl From<&RolloutConfig> for proto::RolloutConfigMsg {
+    fn from(config: &RolloutConfig) -> Self {
+        let strategy = proto::RolloutStrategyMsg::from(&config.strategy);
+        let task_type = proto::RolloutTaskTypeMsg::from(&config.task_type);
+
+        proto::RolloutConfigMsg {
+            rollout_id: Some(proto::RolloutId {
+                value: config.rollout_id.to_string(),
+            }),
+            name: config.name.clone(),
+            target: Some(proto::SelectorExpression {
+                expression: config.target.to_string(),
+            }),
+            strategy: Some(strategy),
+            task_type: Some(task_type),
+            auto_advance: config.auto_advance,
+            advance_interval_seconds: config.advance_interval_seconds,
+            created_at: config.created_at,
+        }
+    }
+}
+
+impl From<RolloutConfig> for proto::RolloutConfigMsg {
+    fn from(config: RolloutConfig) -> Self {
+        (&config).into()
+    }
+}
+
+// ===== RolloutStrategy 转换 =====
+
+impl From<&RolloutStrategy> for proto::RolloutStrategyMsg {
+    fn from(strategy: &RolloutStrategy) -> Self {
+        match strategy {
+            RolloutStrategy::Percentage { stages } => proto::RolloutStrategyMsg {
+                strategy: Some(proto::rollout_strategy_msg::Strategy::Percentage(
+                    proto::PercentageStrategy {
+                        stages: stages.iter().map(|&s| s as u32).collect(),
+                    },
+                )),
+            },
+            RolloutStrategy::Count { stages } => proto::RolloutStrategyMsg {
+                strategy: Some(proto::rollout_strategy_msg::Strategy::Count(
+                    proto::CountStrategy {
+                        stages: stages.clone(),
+                    },
+                )),
+            },
+            RolloutStrategy::Groups { groups } => proto::RolloutStrategyMsg {
+                strategy: Some(proto::rollout_strategy_msg::Strategy::Groups(
+                    proto::GroupsStrategy {
+                        groups: groups.clone(),
+                    },
+                )),
+            },
+        }
+    }
+}
+
+impl From<RolloutStrategy> for proto::RolloutStrategyMsg {
+    fn from(strategy: RolloutStrategy) -> Self {
+        (&strategy).into()
+    }
+}
+
+// ===== RolloutTaskType 转换 =====
+
+impl From<&RolloutTaskType> for proto::RolloutTaskTypeMsg {
+    fn from(task_type: &RolloutTaskType) -> Self {
+        match task_type {
+            RolloutTaskType::Command {
+                command,
+                args,
+                timeout_seconds,
+            } => proto::RolloutTaskTypeMsg {
+                task_type: Some(proto::rollout_task_type_msg::TaskType::Command(
+                    proto::CommandTask {
+                        command: command.clone(),
+                        args: args.clone(),
+                        timeout_seconds: *timeout_seconds,
+                    },
+                )),
+            },
+            RolloutTaskType::FileDeployment {
+                config,
+                uploaded_file_name,
+            } => proto::RolloutTaskTypeMsg {
+                task_type: Some(proto::rollout_task_type_msg::TaskType::FileDeployment(
+                    proto::FileDeploymentTask {
+                        config: Some(config.into()),
+                        uploaded_file_name: uploaded_file_name.clone(),
+                    },
+                )),
+            },
+        }
+    }
+}
+
+impl From<RolloutTaskType> for proto::RolloutTaskTypeMsg {
+    fn from(task_type: RolloutTaskType) -> Self {
+        (&task_type).into()
+    }
+}
+
+// ===== RolloutStageStatus 转换 =====
+
+impl From<&RolloutStageStatus> for proto::RolloutStageStatusMsg {
+    fn from(stage: &RolloutStageStatus) -> Self {
+        proto::RolloutStageStatusMsg {
+            stage_index: stage.stage_index,
+            stage_name: stage.stage_name.clone(),
+            target_agents: stage
+                .target_agents
+                .iter()
+                .map(|id| proto::AgentId {
+                    value: id.to_string(),
+                })
+                .collect(),
+            batch_id: stage.batch_id.as_ref().map(|id| proto::BatchId {
+                value: id.to_string(),
+            }),
+            started_count: stage.started_count,
+            completed_count: stage.completed_count,
+            failed_count: stage.failed_count,
+            state: proto::RolloutStateEnum::from(stage.state) as i32,
+            started_at: stage.started_at,
+            completed_at: stage.completed_at,
+            failed_executions: stage
+                .failed_executions
+                .iter()
+                .map(|execution| proto::TaskExecutionMsg::from(execution))
+                .collect(),
+        }
+    }
+}
+
+impl From<RolloutStageStatus> for proto::RolloutStageStatusMsg {
+    fn from(stage: RolloutStageStatus) -> Self {
+        (&stage).into()
+    }
+}
+
+// ===== RolloutState 转换 =====
+
+impl From<RolloutState> for proto::RolloutStateEnum {
+    fn from(state: RolloutState) -> Self {
+        match state {
+            RolloutState::Created => proto::RolloutStateEnum::RolloutCreated,
+            RolloutState::Running => proto::RolloutStateEnum::RolloutRunning,
+            RolloutState::Completed => proto::RolloutStateEnum::RolloutCompleted,
+            RolloutState::Failed => proto::RolloutStateEnum::RolloutFailed,
+            RolloutState::RolledBack => proto::RolloutStateEnum::RolloutRolledback,
+        }
+    }
+}
+
+impl From<proto::RolloutStateEnum> for RolloutState {
+    fn from(state: proto::RolloutStateEnum) -> Self {
+        match state {
+            proto::RolloutStateEnum::RolloutCreated => RolloutState::Created,
+            proto::RolloutStateEnum::RolloutRunning => RolloutState::Running,
+            proto::RolloutStateEnum::RolloutCompleted => RolloutState::Completed,
+            proto::RolloutStateEnum::RolloutFailed => RolloutState::Failed,
+            proto::RolloutStateEnum::RolloutRolledback => RolloutState::RolledBack,
+        }
+    }
+}
+
+impl From<i32> for RolloutState {
+    fn from(value: i32) -> Self {
+        match proto::RolloutStateEnum::try_from(value) {
+            Ok(state) => state.into(),
+            Err(_) => RolloutState::Created, // 默认值
+        }
+    }
+}
+
+// FileVersion 转换
+impl From<FileVersion> for proto::FileVersionMsg {
+    fn from(version: FileVersion) -> Self {
+        proto::FileVersionMsg {
+            name: version.name,
+            revision: version.revision,
+            size: version.size,
+            checksum: version.checksum,
+            created_at: version.created_at,
+            is_current: version.is_current,
+        }
+    }
+}
+
+impl From<proto::FileVersionMsg> for FileVersion {
+    fn from(msg: proto::FileVersionMsg) -> Self {
+        FileVersion {
+            name: msg.name,
+            revision: msg.revision,
+            size: msg.size,
+            checksum: msg.checksum,
+            created_at: msg.created_at,
+            is_current: msg.is_current,
+        }
+    }
+}
+
+// FileHistory 转换
+impl From<FileHistory> for proto::FileHistoryMsg {
+    fn from(history: FileHistory) -> Self {
+        proto::FileHistoryMsg {
+            name: history.name,
+            versions: history.versions.into_iter().map(|v| v.into()).collect(),
+            current_version: history.current_version,
+        }
+    }
+}
+
+impl From<proto::FileHistoryMsg> for FileHistory {
+    fn from(msg: proto::FileHistoryMsg) -> Self {
+        FileHistory {
+            name: msg.name,
+            versions: msg.versions.into_iter().map(|v| v.into()).collect(),
+            current_version: msg.current_version,
         }
     }
 }

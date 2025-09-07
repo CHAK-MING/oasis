@@ -2,7 +2,7 @@ use crate::application::context::ApplicationContext;
 use crate::infrastructure::monitor::agent_info_monitor::AgentInfoMonitor;
 use crate::infrastructure::monitor::heartbeat_monitor::HeartbeatMonitor;
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
-use crate::infrastructure::services::{AgentService, FileService, TaskService};
+use crate::infrastructure::services::{AgentService, FileService, RolloutService, TaskService};
 use crate::{
     infrastructure::lifecycle::LifecycleManager, interface::server_manager::GrpcServerManager,
 };
@@ -121,14 +121,20 @@ impl Bootstrap {
             jetstream.clone(),
             heartbeat_monitor.clone(),
             agent_info_monitor.clone(),
+            lifecycle_manager.shutdown_token(),
         ));
         debug!("AgentService initialized");
 
+        let rollout_service =
+            Arc::new(RolloutService::new(jetstream.clone(), task_monitor.clone()).await?);
+        debug!("RolloutService initialized");
+
         // 7. 构造ApplicationContext
         let app_context = Arc::new(ApplicationContext {
-            agent_service,
+            agent_service: agent_service.clone(),
             task_service,
             file_service,
+            rollout_service,
         });
 
         info!("Application context built successfully");
@@ -145,12 +151,7 @@ impl Bootstrap {
 
         // 9. 启用进程内 TLS（原生 TLS）
         let tls_service: Option<std::sync::Arc<crate::infrastructure::tls::TlsService>> =
-            match crate::infrastructure::tls::TlsService::new_with_paths(
-                config.tls.grpc_server_cert_path(),
-                config.tls.grpc_server_key_path(),
-                config.tls.grpc_ca_path(),
-            )
-            .await
+            match crate::infrastructure::tls::TlsService::new_with_paths(config.tls.certs_dir).await
             {
                 Ok(svc) => Some(std::sync::Arc::new(svc)),
                 Err(e) => {
@@ -217,6 +218,13 @@ impl Bootstrap {
         );
         lifecycle_manager
             .register_medium_priority_service("task_monitor".to_string(), task_monitor_handle);
+
+        if let Some(cleanup_handle) = agent_service.spawn_cache_cleanup() {
+            lifecycle_manager.register_low_priority_service(
+                "selector_cache_cleanup".to_string(),
+                cleanup_handle,
+            );
+        }
 
         // 11. 运行生命周期管理器
         info!("Starting lifecycle manager...");
