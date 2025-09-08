@@ -148,7 +148,7 @@ message ListAgentsRequest {
 }
 
 message AgentInfoMsg {
-  AgentId id = 1;
+  AgentId agent_id = 1;
   AgentStatusEnum status = 2;
   map<string, string> info = 3;
   int64 last_heartbeat = 4;
@@ -161,10 +161,20 @@ message ListAgentsResponse {
 }
 
 message RemoveAgentRequest {
-  AgentId id = 1;
+  AgentId agent_id = 1;
 }
 
 message RemoveAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SetInfoAgentRequest {
+  AgentId agent_id = 1;
+  map<string, string> info = 2;
+}
+
+message SetInfoAgentResponse {
   bool success = 1;
   string message = 2;
 }
@@ -252,12 +262,6 @@ message RollbackFileRequest {
   FileConfigMsg config = 1;
 }
 
-message LeaderInfoMsg {
-  string instance_id = 1;
-  int64 elected_at = 2;
-  int64 last_renewal = 3;
-}
-
 // ===== 灰度发布相关类型定义 =====
 
 message RolloutId {
@@ -270,7 +274,9 @@ enum RolloutStateEnum {
   ROLLOUT_RUNNING = 1;
   ROLLOUT_COMPLETED = 3;
   ROLLOUT_FAILED = 4;
-  ROLLOUT_ROLLEDBACK = 5;
+  ROLLOUT_ROLLINGBACK = 5;
+  ROLLOUT_ROLLBACKFAILED = 6;
+  ROLLOUT_ROLLEDBACK = 7;
 }
 
 // 灰度发布策略
@@ -310,7 +316,6 @@ message CommandTask {
 
 message FileDeploymentTask {
   FileConfigMsg config = 1;
-  string uploaded_file_name = 2;
 }
 
 // 灰度发布配置
@@ -349,6 +354,7 @@ message RolloutStatusMsg {
   repeated AgentId all_target_agents = 5;
   int64 updated_at = 6;
   optional string error_message = 7;
+  optional string current_action = 8; // 当前动作（例如回滚命令）
 }
 
 // ===== 请求/响应消息 =====
@@ -429,6 +435,7 @@ service OasisService {
   // Agent管理
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
   rpc RemoveAgent(RemoveAgentRequest) returns (RemoveAgentResponse);
+  rpc SetInfoAgent(SetInfoAgentRequest) returns (SetInfoAgentResponse);
   
   // 文件管理
   rpc BeginFileUpload(FileSpecMsg) returns (FileUploadSession);

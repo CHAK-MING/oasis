@@ -411,7 +411,7 @@ impl From<i32> for AgentStatus {
 impl From<&AgentInfo> for proto::AgentInfoMsg {
     fn from(info: &AgentInfo) -> Self {
         Self {
-            id: Some(proto::AgentId::from(&info.id)),
+            agent_id: Some(proto::AgentId::from(&info.agent_id)),
             status: proto::AgentStatusEnum::from(info.status) as i32,
             info: info.info.clone(),
             last_heartbeat: info.last_heartbeat,
@@ -430,8 +430,8 @@ impl From<AgentInfo> for proto::AgentInfoMsg {
 impl From<proto::AgentInfoMsg> for AgentInfo {
     fn from(proto: proto::AgentInfoMsg) -> Self {
         Self {
-            id: proto
-                .id
+            agent_id: proto
+                .agent_id
                 .map(AgentId::from)
                 .unwrap_or_else(|| AgentId::from("unknown".to_string())),
             status: AgentStatus::from(proto.status),
@@ -733,6 +733,7 @@ impl From<&RolloutStatus> for proto::RolloutStatusMsg {
                 .collect(),
             updated_at: status.updated_at,
             error_message: status.error_message.clone(),
+            current_action: status.current_action.clone(),
         }
     }
 }
@@ -742,6 +743,107 @@ impl From<RolloutStatus> for proto::RolloutStatusMsg {
         (&status).into()
     }
 }
+
+// Proto -> Domain: RolloutStatus
+impl From<&proto::RolloutStatusMsg> for RolloutStatus {
+    fn from(msg: &proto::RolloutStatusMsg) -> Self {
+        // config
+        let cfg = msg.config.as_ref().cloned().unwrap_or_default();
+        // strategy
+        let strategy = match cfg.strategy.and_then(|s| s.strategy) {
+            Some(crate::proto::rollout_strategy_msg::Strategy::Percentage(p)) => {
+                RolloutStrategy::Percentage {
+                    stages: p.stages.into_iter().map(|v| v as u8).collect(),
+                }
+            }
+            Some(crate::proto::rollout_strategy_msg::Strategy::Count(c)) => {
+                RolloutStrategy::Count { stages: c.stages }
+            }
+            Some(crate::proto::rollout_strategy_msg::Strategy::Groups(g)) => {
+                RolloutStrategy::Groups { groups: g.groups }
+            }
+            None => RolloutStrategy::default(),
+        };
+        // task_type
+        let task_type = match cfg.task_type.and_then(|t| t.task_type) {
+            Some(crate::proto::rollout_task_type_msg::TaskType::Command(cmd)) => {
+                RolloutTaskType::Command {
+                    command: cmd.command,
+                    args: cmd.args,
+                    timeout_seconds: cmd.timeout_seconds,
+                }
+            }
+            Some(crate::proto::rollout_task_type_msg::TaskType::FileDeployment(file)) => {
+                let fc = crate::file_types::FileConfig::try_from(file.config.unwrap()).unwrap();
+                RolloutTaskType::FileDeployment { config: fc }
+            }
+            None => RolloutTaskType::Command {
+                command: String::new(),
+                args: vec![],
+                timeout_seconds: 60,
+            },
+        };
+        let rollout_config = RolloutConfig {
+            rollout_id: RolloutId::from(cfg.rollout_id.unwrap().value),
+            name: cfg.name,
+            target: SelectorExpression::from(cfg.target.unwrap()),
+            strategy,
+            task_type,
+            auto_advance: cfg.auto_advance,
+            advance_interval_seconds: cfg.advance_interval_seconds,
+            created_at: cfg.created_at,
+        };
+
+        // stages
+        let mut stages: Vec<RolloutStageStatus> = Vec::new();
+        for s in &msg.stages {
+            let target_agents: Vec<AgentId> = s
+                .target_agents
+                .iter()
+                .map(|id| AgentId::from(id.value.clone()))
+                .collect();
+            let failed_execs: Vec<TaskExecution> = s
+                .failed_executions
+                .iter()
+                .cloned()
+                .map(TaskExecution::from)
+                .collect();
+            stages.push(RolloutStageStatus {
+                stage_index: s.stage_index,
+                stage_name: s.stage_name.clone(),
+                target_agents,
+                batch_id: s.batch_id.as_ref().map(|b| BatchId::from(b.value.clone())),
+                started_count: s.started_count,
+                completed_count: s.completed_count,
+                failed_count: s.failed_count,
+                state: RolloutState::from(s.state),
+                started_at: s.started_at,
+                completed_at: s.completed_at,
+                failed_executions: failed_execs,
+                version_snapshot: None,
+            });
+        }
+
+        let all_target_agents: Vec<AgentId> = msg
+            .all_target_agents
+            .iter()
+            .map(|id| AgentId::from(id.value.clone()))
+            .collect();
+
+        RolloutStatus {
+            config: rollout_config,
+            state: RolloutState::from(msg.state),
+            current_stage: msg.current_stage,
+            stages,
+            all_target_agents,
+            updated_at: msg.updated_at,
+            error_message: msg.error_message.clone(),
+            current_action: msg.current_action.clone(),
+        }
+    }
+}
+
+// (removed duplicate impl)
 
 // ===== RolloutConfig 转换 =====
 
@@ -827,14 +929,10 @@ impl From<&RolloutTaskType> for proto::RolloutTaskTypeMsg {
                     },
                 )),
             },
-            RolloutTaskType::FileDeployment {
-                config,
-                uploaded_file_name,
-            } => proto::RolloutTaskTypeMsg {
+            RolloutTaskType::FileDeployment { config } => proto::RolloutTaskTypeMsg {
                 task_type: Some(proto::rollout_task_type_msg::TaskType::FileDeployment(
                     proto::FileDeploymentTask {
                         config: Some(config.into()),
-                        uploaded_file_name: uploaded_file_name.clone(),
                     },
                 )),
             },
@@ -895,6 +993,8 @@ impl From<RolloutState> for proto::RolloutStateEnum {
             RolloutState::Running => proto::RolloutStateEnum::RolloutRunning,
             RolloutState::Completed => proto::RolloutStateEnum::RolloutCompleted,
             RolloutState::Failed => proto::RolloutStateEnum::RolloutFailed,
+            RolloutState::RollingBack => proto::RolloutStateEnum::RolloutRollingback,
+            RolloutState::RollbackFailed => proto::RolloutStateEnum::RolloutRollbackfailed,
             RolloutState::RolledBack => proto::RolloutStateEnum::RolloutRolledback,
         }
     }
@@ -907,6 +1007,8 @@ impl From<proto::RolloutStateEnum> for RolloutState {
             proto::RolloutStateEnum::RolloutRunning => RolloutState::Running,
             proto::RolloutStateEnum::RolloutCompleted => RolloutState::Completed,
             proto::RolloutStateEnum::RolloutFailed => RolloutState::Failed,
+            proto::RolloutStateEnum::RolloutRollingback => RolloutState::RollingBack,
+            proto::RolloutStateEnum::RolloutRollbackfailed => RolloutState::RollbackFailed,
             proto::RolloutStateEnum::RolloutRolledback => RolloutState::RolledBack,
         }
     }

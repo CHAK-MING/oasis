@@ -322,6 +322,10 @@ impl AgentInfoMonitor {
         self.info_cache.get(agent_id).map(|v| v.clone())
     }
 
+    pub async fn update_agent_info(&self, agent_id: AgentId, info: AgentInfo) {
+        self.insert_info(agent_id, info).await;
+    }
+
     pub fn snapshot_labels_index(&self) -> Arc<DashMap<(String, String), roaring::RoaringBitmap>> {
         self.index_labels.clone()
     }
@@ -422,5 +426,18 @@ impl AgentInfoMonitor {
                 cleaned_labels, cleaned_system, cleaned_groups
             );
         }
+    }
+
+    pub fn get_all_agents_bitmap(&self) -> roaring::RoaringBitmap {
+        let mut bitmap = roaring::RoaringBitmap::new();
+        
+        // 遍历所有在缓存中的 agent
+        for entry in self.info_cache.iter() {
+            let agent_id = entry.key();
+            let id32 = Self::to_bitmap_key(agent_id);
+            bitmap.insert(id32);
+        }
+        
+        bitmap
     }
 }

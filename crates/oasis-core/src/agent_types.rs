@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
-    pub id: AgentId,
+    pub agent_id: AgentId,
     pub status: AgentStatus,
     pub info: HashMap<String, String>, // 合并facts和labels和 groups
     pub last_heartbeat: i64,
@@ -15,9 +15,9 @@ pub struct AgentInfo {
 }
 
 impl AgentInfo {
-    pub fn new(id: AgentId) -> Self {
+    pub fn new(agent_id: AgentId) -> Self {
         Self {
-            id,
+            agent_id,
             status: AgentStatus::Offline,
             info: HashMap::new(),
             last_heartbeat: 0,

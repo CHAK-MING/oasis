@@ -8,6 +8,7 @@ use pest::Parser;
 use roaring::RoaringBitmap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock as AsyncRwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -16,8 +17,29 @@ use tracing::{debug, info, warn};
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-selector = { SOI ~ (sys_eq | label_eq | in_groups | all_true | id_list) ~ EOI }
+// 主选择器表达式，支持逻辑运算
+selector = { SOI ~ logical_or ~ EOI }
 
+// 逻辑或（优先级最低）
+logical_or = { logical_and ~ ("or" ~ logical_and)* }
+
+// 逻辑与（中等优先级）
+logical_and = { logical_not ~ ("and" ~ logical_not)* }
+
+// 逻辑非（高优先级）
+logical_not = { ("not" ~ primary) | primary }
+
+// 基础表达式（最高优先级）
+primary = { 
+    ("(" ~ logical_or ~ ")") | 
+    sys_eq | 
+    label_eq | 
+    in_groups | 
+    all_true | 
+    id_list 
+}
+
+// 原有的基础选择器
 all_true = { ("all" | "true") }
 
 id_list = { id ~ (comma ~ id)* }
@@ -35,6 +57,18 @@ dquote = _{ "\"" }
 squote = _{ "'" }
 "#]
 struct SelectorParser;
+
+#[derive(Debug, Clone)]
+enum SelectorAst {
+    And(Box<SelectorAst>, Box<SelectorAst>),
+    Or(Box<SelectorAst>, Box<SelectorAst>),
+    Not(Box<SelectorAst>),
+    AllTrue,
+    IdList(Vec<String>),
+    SystemEq(String, String),
+    LabelEq(String, String),
+    InGroups(String),
+}
 
 /// 延迟求值的查询结果 - 核心优化：避免频繁的位图 <-> AgentId 转换
 #[derive(Debug, Clone)]
@@ -107,9 +141,8 @@ pub struct SelectorEngine {
     // 查询缓存
     parse_cache: DashMap<String, CachedQuery>,
     cache_config: QueryCacheConfig,
-    // "all" 查询的时间缓存 - 解决问题5
-    all_agents_cache: std::sync::RwLock<Option<(RoaringBitmap, Instant)>>,
-    // 添加 shutdown_token 支持
+    // "all" 查询的时间缓存
+    all_agents_cache: AsyncRwLock<Option<(RoaringBitmap, Instant)>>,
     shutdown_token: Option<CancellationToken>,
 }
 
@@ -124,7 +157,7 @@ impl SelectorEngine {
             agent_info,
             parse_cache: DashMap::new(),
             cache_config: QueryCacheConfig::default(),
-            all_agents_cache: std::sync::RwLock::new(None),
+            all_agents_cache: AsyncRwLock::new(None),
             shutdown_token: Some(shutdown_token),
         }
     }
@@ -139,7 +172,6 @@ impl SelectorEngine {
         self.agent_info.get_info(agent_id).map(|arc| (*arc).clone())
     }
 
-    /// 延迟求值查询 返回 QueryResult 而不是 Vec<AgentId>
     pub async fn query(&self, expression: &str) -> CoreResult<QueryResult> {
         let cache_key = format!("query|{}", expression);
         let bitmap = self
@@ -211,9 +243,18 @@ impl SelectorEngine {
         Ok(bitmap)
     }
 
-    // 原有的 evaluate_to_bitmap 方法保持不变，但优化 union_all_agents
     fn evaluate_to_bitmap(&self, expression: &str) -> CoreResult<RoaringBitmap> {
         debug!("selector_evaluate expr={}", expression);
+
+        // 解析表达式为 AST
+        let ast = self.parse_to_ast(expression)?;
+
+        // 递归评估 AST
+        self.evaluate_ast(&ast)
+    }
+
+    // 将表达式解析为 AST
+    fn parse_to_ast(&self, expression: &str) -> CoreResult<SelectorAst> {
         let mut pairs = SelectorParser::parse(Rule::selector, expression).map_err(|e| {
             CoreError::InvalidTask {
                 reason: format!("Invalid selector: {}", e),
@@ -225,85 +266,137 @@ impl SelectorEngine {
             reason: "Empty selector".to_string(),
             severity: ErrorSeverity::Error,
         })?;
-        if pairs.next().is_some() {
-            return Err(CoreError::InvalidTask {
-                reason: "Ambiguous selector expression".to_string(),
-                severity: ErrorSeverity::Error,
-            });
-        }
 
-        let mut inner_iter = expr_pair.into_inner();
-        let pair = inner_iter.next().ok_or_else(|| CoreError::InvalidTask {
+        // 开始解析逻辑或表达式
+        let mut inner = expr_pair.into_inner();
+        let logical_or_pair = inner.next().ok_or_else(|| CoreError::InvalidTask {
             reason: "Invalid selector structure".to_string(),
             severity: ErrorSeverity::Error,
         })?;
 
-        fn unquote(s: &str) -> String {
-            s.trim_matches('"').trim_matches('\'').to_string()
+        self.parse_logical_or(logical_or_pair)
+    }
+
+    // 解析逻辑或表达式
+    fn parse_logical_or(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+        let mut inner = pair.into_inner();
+        let first = self.parse_logical_and(inner.next().unwrap())?;
+
+        let mut result = first;
+        while let Some(and_pair) = inner.next() {
+            let right = self.parse_logical_and(and_pair)?;
+            result = SelectorAst::Or(Box::new(result), Box::new(right));
         }
 
-        debug!("selector_rule={:?}", pair.as_rule());
-        match pair.as_rule() {
-            Rule::all_true => Ok(self.union_all_agents()),
+        Ok(result)
+    }
+
+    // 解析逻辑与表达式
+    fn parse_logical_and(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+        let mut inner = pair.into_inner();
+        let first = self.parse_logical_not(inner.next().unwrap())?;
+
+        let mut result = first;
+        while let Some(not_pair) = inner.next() {
+            let right = self.parse_logical_not(not_pair)?;
+            result = SelectorAst::And(Box::new(result), Box::new(right));
+        }
+
+        Ok(result)
+    }
+
+    // 解析逻辑非表达式
+    fn parse_logical_not(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+        let pair_str = pair.as_str().trim();
+
+        // 检查是否以 "not" 开头
+        if pair_str.starts_with("not ") {
+            // 这是一个 NOT 表达式，需要提取内部的 primary
+            let mut inner = pair.into_inner();
+            let primary_pair = inner.next().unwrap(); // 这应该是 primary
+            let inner_ast = self.parse_primary(primary_pair)?;
+            Ok(SelectorAst::Not(Box::new(inner_ast)))
+        } else {
+            // 这是一个普通的 primary 表达式
+            let mut inner = pair.into_inner();
+            let primary_pair = inner.next().unwrap();
+            self.parse_primary(primary_pair)
+        }
+    }
+
+    // 解析基础表达式
+    fn parse_primary(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+        let mut inner = pair.into_inner();
+        let first_pair = inner.next().unwrap();
+
+        match first_pair.as_rule() {
+            Rule::logical_or => {
+                // 这是括号内的表达式
+                self.parse_logical_or(first_pair)
+            }
+            Rule::all_true => Ok(SelectorAst::AllTrue),
             Rule::id_list => {
-                let mut ids: Vec<String> = Vec::new();
-                for p in pair.into_inner() {
+                let mut ids = Vec::new();
+                for p in first_pair.into_inner() {
                     if p.as_rule() == Rule::id {
                         ids.push(p.as_str().to_string());
                     }
                 }
-                let bm = self.ids_to_bitmap(&ids);
-                debug!("id_list size={}", bm.len());
-                Ok(bm)
+                Ok(SelectorAst::IdList(ids))
             }
             Rule::sys_eq => {
-                let mut it = pair.into_inner();
+                let mut it = first_pair.into_inner();
                 let sk = unquote(it.next().unwrap().as_str());
                 let sv = unquote(it.next().unwrap().as_str());
-                let bm = self.lookup_system(&sk, &sv);
-                debug!("lookup_system key='{}' val='{}' size={}", sk, sv, bm.len());
-                Ok(bm)
+                Ok(SelectorAst::SystemEq(sk, sv))
             }
             Rule::label_eq => {
-                let mut it = pair.into_inner();
+                let mut it = first_pair.into_inner();
                 let lk = unquote(it.next().unwrap().as_str());
                 let lv = unquote(it.next().unwrap().as_str());
-                let bm = self.lookup_label(&lk, &lv);
-
-                let mut sample = 0;
-                for entry in self.agent_info.snapshot_labels_index().iter() {
-                    if sample > 3 {
-                        break;
-                    }
-                    if entry.key().0 == lk {
-                        debug!(
-                            "indexed_label key='{}' val='{}' size={}",
-                            lk,
-                            entry.key().1,
-                            entry.value().len()
-                        );
-                        sample += 1;
-                    }
-                }
-                Ok(bm)
+                Ok(SelectorAst::LabelEq(lk, lv))
             }
             Rule::in_groups => {
-                let mut it = pair.into_inner();
-                let g = unquote(it.next().unwrap().as_str());
-                let bm = self.lookup_group(&g);
-                debug!("lookup_group name='{}' size={}", g, bm.len());
-                Ok(bm)
+                let mut it = first_pair.into_inner();
+                let group_name = unquote(it.next().unwrap().as_str());
+                Ok(SelectorAst::InGroups(group_name))
             }
             _ => Err(CoreError::InvalidTask {
-                reason: "Unsupported selector".into(),
+                reason: format!("Unsupported selector rule: {:?}", first_pair.as_rule()),
                 severity: ErrorSeverity::Error,
             }),
         }
     }
 
+    // 递归评估 AST 节点
+    fn evaluate_ast(&self, ast: &SelectorAst) -> CoreResult<RoaringBitmap> {
+        match ast {
+            SelectorAst::And(left, right) => {
+                let left_bitmap = self.evaluate_ast(left)?;
+                let right_bitmap = self.evaluate_ast(right)?;
+                Ok(left_bitmap & right_bitmap)
+            }
+            SelectorAst::Or(left, right) => {
+                let left_bitmap = self.evaluate_ast(left)?;
+                let right_bitmap = self.evaluate_ast(right)?;
+                Ok(left_bitmap | right_bitmap)
+            }
+            SelectorAst::Not(inner) => {
+                let inner_bitmap = self.evaluate_ast(inner)?;
+                let all_bitmap = self.union_all_agents();
+                Ok(all_bitmap - inner_bitmap)
+            }
+            SelectorAst::AllTrue => Ok(self.union_all_agents()),
+            SelectorAst::IdList(ids) => Ok(self.ids_to_bitmap(ids)),
+            SelectorAst::SystemEq(key, value) => Ok(self.lookup_system(key, value)),
+            SelectorAst::LabelEq(key, value) => Ok(self.lookup_label(key, value)),
+            SelectorAst::InGroups(group) => Ok(self.lookup_group(group)),
+        }
+    }
+
     fn union_all_agents(&self) -> RoaringBitmap {
         // 检查缓存（60秒过期）
-        if let Ok(cache) = self.all_agents_cache.read() {
+        if let Ok(cache) = self.all_agents_cache.try_read() {
             if let Some((cached_bitmap, cached_time)) = cache.as_ref() {
                 if cached_time.elapsed() < Duration::from_secs(60) {
                     debug!("All agents cache hit, size={}", cached_bitmap.len());
@@ -312,20 +405,11 @@ impl SelectorEngine {
             }
         }
 
-        // 重新计算全集
-        let mut acc = RoaringBitmap::new();
-        for entry in self.agent_info.snapshot_labels_index().iter() {
-            acc |= entry.value().clone();
-        }
-        for entry in self.agent_info.snapshot_system_index().iter() {
-            acc |= entry.value().clone();
-        }
-        for entry in self.agent_info.snapshot_groups_index().iter() {
-            acc |= entry.value().clone();
-        }
+        // 使用 AgentInfoMonitor 的新方法获取所有 agent
+        let acc = self.agent_info.get_all_agents_bitmap();
 
         // 更新缓存
-        if let Ok(mut cache) = self.all_agents_cache.write() {
+        if let Ok(mut cache) = self.all_agents_cache.try_write() {
             *cache = Some((acc.clone(), Instant::now()));
             debug!("All agents cache updated, size={}", acc.len());
         }
@@ -374,9 +458,7 @@ impl SelectorEngine {
             if now - cached.cached_at < self.cache_config.ttl_seconds as i64 {
                 return Ok(Some(cached.bitmap.clone()));
             } else {
-                // 过期了，直接删除
                 self.parse_cache.remove(cache_key);
-                debug!("Cache expired for key: {}", cache_key);
             }
         }
 
@@ -428,4 +510,12 @@ impl SelectorEngine {
             debug!("Cache cleanup: removed {} expired entries", cleaned_count);
         }
     }
+
+    pub async fn update_agent_info(&self, agent_id: AgentId, info: AgentInfo) {
+        self.agent_info.update_agent_info(agent_id, info).await;
+    }
+}
+
+fn unquote(s: &str) -> String {
+    s.trim_matches('"').trim_matches('\'').to_string()
 }

@@ -7,10 +7,15 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UT
 use console::style;
 use oasis_core::proto::{
     AdvanceRolloutRequest, CreateRolloutRequest, GetRolloutStatusRequest, ListRolloutsRequest,
-    RollbackRolloutRequest, RolloutId, RolloutStateEnum, oasis_service_client::OasisServiceClient,
+    RolloutId, RolloutStateEnum, oasis_service_client::OasisServiceClient,
     rollout_task_type_msg::TaskType,
 };
 use std::path::PathBuf;
+
+// 统一 gRPC 错误格式
+fn format_grpc_error(e: &tonic::Status) -> String {
+    format!("[{}] {}", e.code(), e.message())
+}
 
 /// 灰度发布管理
 #[derive(Parser, Debug)]
@@ -214,11 +219,11 @@ async fn run_rollout_create(
             style(args.file_dest.as_ref().unwrap_or(&"未指定".to_string())).cyan()
         ));
 
-        // 先上传文件（复用现有逻辑）
-        let uploaded_file_name = upload_file_for_rollout(client, &file_src).await?;
+        // 先上传文件
+        let (uploaded_key, uploaded_revision) = upload_file_for_rollout(client, &file_src).await?;
         create_file_task_type(
-            uploaded_file_name,
-            file_src.display().to_string(),
+            uploaded_key,
+            uploaded_revision,
             args.file_dest
                 .ok_or_else(|| anyhow!("文件部署必须提供 --file-dest"))?,
             args.target.clone(),
@@ -267,7 +272,7 @@ async fn run_rollout_create(
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("创建灰度发布失败: {}", e)),
+        Err(e) => Err(anyhow!("创建灰度发布失败: {}", format_grpc_error(&e))),
     }
 }
 
@@ -292,7 +297,7 @@ async fn run_rollout_status(
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("获取发布状态失败: {}", e)),
+        Err(e) => Err(anyhow!("获取发布状态失败: {}", format_grpc_error(&e))),
     }
 }
 
@@ -320,7 +325,7 @@ async fn run_rollout_list(
             display_rollouts_table(&resp.rollouts);
             Ok(())
         }
-        Err(e) => Err(anyhow!("获取发布列表失败: {}", e)),
+        Err(e) => Err(anyhow!("获取发布列表失败: {}", format_grpc_error(&e))),
     }
 }
 
@@ -345,7 +350,7 @@ async fn run_rollout_advance(
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("推进发布失败: {}", e)),
+        Err(e) => Err(anyhow!("推进发布失败: {}", format_grpc_error(&e))),
     }
 }
 
@@ -354,7 +359,11 @@ async fn run_rollout_rollback(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: RollbackArgs,
 ) -> Result<()> {
-    // 确认回滚操作
+    use oasis_core::proto::*;
+
+    print_header(&format!("回滚灰度发布: {}", style(&args.rollout_id).cyan()));
+
+    // 确认是否继续回滚
     if !confirm_action(&format!("确定要回滚发布 {} 吗?", args.rollout_id), true) {
         print_info("操作已取消");
         return Ok(());
@@ -364,21 +373,23 @@ async fn run_rollout_rollback(
         rollout_id: Some(RolloutId {
             value: args.rollout_id.clone(),
         }),
-        rollback_command: args.rollback_cmd,
+        rollback_command: args.rollback_cmd.clone(),
     };
 
-    match client.rollback_rollout(request).await {
-        Ok(response) => {
-            let resp = response.into_inner();
-            if resp.success {
-                print_info(&format!("{}", resp.message));
-            } else {
-                print_warning(&format!("回滚失败: {}", resp.message));
-            }
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("回滚发布失败: {}", e)),
+    print_info("正在提交回滚...");
+    let resp = client
+        .rollback_rollout(request)
+        .await
+        .map_err(|e| anyhow!("回滚发布失败: {}", format_grpc_error(&e)))?
+        .into_inner();
+
+    if resp.success {
+        print_info(&resp.message);
+    } else {
+        print_warning(&format!("回滚失败: {}", resp.message));
     }
+
+    Ok(())
 }
 
 /// 解析策略字符串
@@ -460,8 +471,8 @@ fn create_command_task_type(
 
 /// 创建文件任务类型
 fn create_file_task_type(
-    uploaded_file_name: String,
     source_path: String,
+    revision: u64,
     dest_path: String,
     target: String,
     mode: Option<String>,
@@ -472,7 +483,7 @@ fn create_file_task_type(
     let config = FileConfigMsg {
         source_path: source_path,
         destination_path: dest_path,
-        revision: 0,
+        revision: revision,
         owner: owner.unwrap_or_default(),
         mode: mode.unwrap_or("0644".to_string()),
         target: Some(SelectorExpression { expression: target }),
@@ -482,20 +493,91 @@ fn create_file_task_type(
         task_type: Some(rollout_task_type_msg::TaskType::FileDeployment(
             FileDeploymentTask {
                 config: Some(config),
-                uploaded_file_name,
             },
         )),
     })
 }
 
-/// 上传文件用于发布（复用现有逻辑）
+/// 上传文件用于发布：使用文件服务的分片上传接口，返回在对象存储中的文件键
 async fn upload_file_for_rollout(
-    _: &mut OasisServiceClient<tonic::transport::Channel>,
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
     file_path: &PathBuf,
-) -> Result<String> {
-    // 这里应该复用现有的文件上传逻辑
-    // 简化实现，返回文件名
-    Ok(file_path.file_name().unwrap().to_string_lossy().to_string())
+) -> Result<(String, u64)> {
+    use oasis_core::proto::*;
+
+    // 绝对路径（与 file 命令一致，用于在服务端计算 path_hash）
+    let abs_path = std::fs::canonicalize(file_path)?;
+    let abs_path_str = abs_path.to_string_lossy().to_string();
+
+    let meta = std::fs::metadata(&abs_path)?;
+    let size = meta.len();
+
+    // 1) 开始上传会话
+    let spec = FileSpecMsg {
+        source_path: abs_path_str.clone(), // 传绝对路径，服务端据此计算 path_hash
+        size,
+        checksum: String::new(),
+        content_type: String::new(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+
+    let session = client
+        .begin_file_upload(spec)
+        .await
+        .map_err(|e| anyhow!("BeginFileUpload 失败: {}", e))?
+        .into_inner();
+
+    let upload_id = session.upload_id;
+    let mut offset: u64 = 0;
+    let chunk_size = if session.chunk_size == 0 {
+        256 * 1024
+    } else {
+        session.chunk_size
+    } as usize;
+
+    // 2) 分片上传
+    let mut file = std::fs::File::open(&abs_path)?;
+    loop {
+        let mut buf = vec![0u8; chunk_size];
+        let read_bytes = std::io::Read::read(&mut file, &mut buf)?;
+        if read_bytes == 0 {
+            break;
+        }
+        buf.truncate(read_bytes);
+
+        let chunk = FileChunkMsg {
+            upload_id: upload_id.clone(),
+            offset,
+            data: buf.into(),
+        };
+
+        let resp = client
+            .upload_file_chunk(chunk)
+            .await
+            .map_err(|e| anyhow!("UploadFileChunk 失败: {}", e))?
+            .into_inner();
+
+        offset += resp.received_bytes;
+    }
+
+    // 3) 提交上传
+    let commit = CommitFileMsg {
+        upload_id: upload_id.clone(),
+        verify_checksum: false,
+    };
+
+    let result = client
+        .commit_file_upload(commit)
+        .await
+        .map_err(|e| anyhow!("CommitFileUpload 失败: {}", e))?
+        .into_inner();
+
+    if !result.success {
+        anyhow::bail!("文件提交失败: {}", result.message);
+    }
+
+    // 返回用于构造对象键的原始绝对路径（服务端按此路径计算 path_hash）与 revision
+    Ok((abs_path_str, result.revision))
 }
 
 /// 显示发布状态
@@ -512,25 +594,61 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
                 .unwrap_or("unknown")
         ));
         print_info(&format!("状态: {}", rollout_state_to_cn(status.state())));
+        if let Some(action) = &status.current_action {
+            if !action.is_empty() {
+                println!(
+                    "{} {}",
+                    console::style("当前操作:").bold(),
+                    console::style(action).yellow().bold()
+                );
+            }
+        }
+        // 计算计划阶段总数（不把临时“回滚行”计入总数）
+        let total_planned = config
+            .strategy
+            .as_ref()
+            .and_then(|s| s.strategy.as_ref())
+            .map(|st| match st {
+                oasis_core::proto::rollout_strategy_msg::Strategy::Percentage(p) => p.stages.len(),
+                oasis_core::proto::rollout_strategy_msg::Strategy::Count(c) => c.stages.len(),
+                oasis_core::proto::rollout_strategy_msg::Strategy::Groups(g) => g.groups.len(),
+            })
+            .unwrap_or_else(|| status.stages.len());
+
         print_info(&format!(
             "当前阶段: {}/{}",
-            status.current_stage,
-            status.stages.len()
+            status.current_stage, total_planned
         ));
 
-        // 显示配置详情
+        // 显示错误信息（如果有）
+        if let Some(err) = &status.error_message {
+            if !err.is_empty() {
+                print_warning(&format!("错误信息: {}", err));
+            }
+        }
+
+        // 显示配置详情（若存在 current_action，优先展示“当前操作”，原始命令改为“原始命令”）
         if let Some(task_type) = &config.task_type {
             match &task_type.task_type {
                 Some(TaskType::Command(cmd)) => {
-                    print_info(&format!("执行命令: {}", cmd.command));
+                    if let Some(action) = &status.current_action {
+                        if !action.is_empty() {
+                            // 当前在执行回滚等动作，隐藏“执行命令”，显示“原始命令”
+                            print_info(&format!("原始命令: {}", cmd.command));
+                        } else {
+                            print_info(&format!("执行命令: {}", cmd.command));
+                        }
+                    } else {
+                        print_info(&format!("执行命令: {}", cmd.command));
+                    }
                     if !cmd.args.is_empty() {
                         print_info(&format!("命令参数: {}", cmd.args.join(" ")));
                     }
                     print_info(&format!("超时时间: {} 秒", cmd.timeout_seconds));
                 }
                 Some(TaskType::FileDeployment(file)) => {
-                    print_info(&format!("文件部署: {}", file.uploaded_file_name));
                     if let Some(file_config) = &file.config {
+                        print_info(&format!("文件部署: {}", file_config.source_path));
                         print_info(&format!("目标路径: {}", file_config.destination_path));
                         print_info(&format!("文件权限: {}", file_config.mode));
                         if !file_config.owner.is_empty() {
@@ -555,23 +673,14 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
             Cell::new("名称").add_attribute(Attribute::Bold),
             Cell::new("节点数").add_attribute(Attribute::Bold),
             Cell::new("完成/失败").add_attribute(Attribute::Bold),
-            Cell::new("状态").add_attribute(Attribute::Bold),
         ]);
 
         for stage in &status.stages {
-            let mut stage_status = create_colored_state_cell(stage.state());
-
-            // 如果是当前阶段，添加额外的高亮
-            if stage.stage_index == status.current_stage {
-                stage_status = stage_status.add_attribute(Attribute::Underlined);
-            }
-
             table.add_row(vec![
                 Cell::new((stage.stage_index + 1).to_string()),
                 Cell::new(&stage.stage_name),
                 Cell::new(stage.target_agents.len().to_string()),
                 Cell::new(format!("{}/{}", stage.completed_count, stage.failed_count)),
-                stage_status,
             ]);
         }
 
@@ -589,15 +698,17 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
     for stage in stages {
         if !stage.failed_executions.is_empty() {
             if !has_failures {
-                print_header("失败任务详情");
+                // 加粗显示
+                println!("{}", console::style("失败任务详情").bold(),);
                 has_failures = true;
             }
 
-            print_info(&format!(
-                "阶段 {} ({}):",
-                stage.stage_index + 1,
-                stage.stage_name
-            ));
+            println!(
+                "{} 阶段 {} ({}):",
+                console::style("-").bold(),
+                console::style((stage.stage_index + 1).to_string()).bold(),
+                console::style(&stage.stage_name).bold()
+            );
 
             for execution in &stage.failed_executions {
                 let task_id = execution
@@ -612,18 +723,27 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
                     .map(|id| id.value.as_str())
                     .unwrap_or("unknown");
 
-                print_info(&format!("  Task: {} Agent: {}", task_id, agent_id));
+                println!(
+                    "  {} Task: {}  Agent: {}",
+                    console::style("∙").bold(),
+                    console::style(task_id).bold(),
+                    console::style(agent_id).bold()
+                );
 
                 if !execution.stdout.is_empty() {
-                    print_info(&format!("  输出: {}", execution.stdout));
+                    println!("  输出: {}", execution.stdout);
                 }
 
                 if !execution.stderr.is_empty() {
-                    print_warning(&format!("  错误: {}", execution.stderr));
+                    println!(
+                        "  {} 错误: {}",
+                        console::style("! ").red().bold(),
+                        execution.stderr
+                    );
                 }
 
                 if let Some(exit_code) = execution.exit_code {
-                    print_info(&format!("  退出码: {}", exit_code));
+                    println!("  退出码: {}", exit_code);
                 }
             }
         }
@@ -684,23 +804,26 @@ fn parse_rollout_state(state_str: &str) -> Option<RolloutStateEnum> {
         "running" => Some(RolloutStateEnum::RolloutRunning),
         "completed" => Some(RolloutStateEnum::RolloutCompleted),
         "failed" => Some(RolloutStateEnum::RolloutFailed),
-        "rolledback" => Some(RolloutStateEnum::RolloutRolledback),
+        "rollingback" => Some(RolloutStateEnum::RolloutRollingback),
+        "rollbackfailed" => Some(RolloutStateEnum::RolloutRollbackfailed),
         _ => None,
     }
 }
 
-/// 状态中文映射
+/// 状态中文映射 - 支持所有新状态
 fn rollout_state_to_cn(state: RolloutStateEnum) -> &'static str {
     match state {
         RolloutStateEnum::RolloutCreated => "已创建",
         RolloutStateEnum::RolloutRunning => "执行中",
         RolloutStateEnum::RolloutCompleted => "已完成",
         RolloutStateEnum::RolloutFailed => "失败",
+        RolloutStateEnum::RolloutRollingback => "正在回滚",
+        RolloutStateEnum::RolloutRollbackfailed => "回滚失败",
         RolloutStateEnum::RolloutRolledback => "已回滚",
     }
 }
 
-/// 为 rollout 状态创建带颜色的 Cell
+/// 为 rollout 状态创建带颜色的 Cell - 支持所有新状态
 fn create_colored_state_cell(state: RolloutStateEnum) -> Cell {
     let state_cn = rollout_state_to_cn(state);
     let cell = Cell::new(state_cn);
@@ -710,7 +833,11 @@ fn create_colored_state_cell(state: RolloutStateEnum) -> Cell {
         RolloutStateEnum::RolloutRunning => cell.fg(Color::Blue),
         RolloutStateEnum::RolloutCompleted => cell.fg(Color::Green).add_attribute(Attribute::Bold),
         RolloutStateEnum::RolloutFailed => cell.fg(Color::Red).add_attribute(Attribute::Bold),
-        RolloutStateEnum::RolloutRolledback => cell.fg(Color::Magenta),
+        RolloutStateEnum::RolloutRollingback => cell.fg(Color::Magenta),
+        RolloutStateEnum::RolloutRollbackfailed => {
+            cell.fg(Color::Red).add_attribute(Attribute::Bold)
+        }
+        RolloutStateEnum::RolloutRolledback => cell.fg(Color::Green),
     }
 }
 
@@ -725,9 +852,5 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 /// 格式化时间戳
 fn format_timestamp(timestamp: i64) -> String {
-    if let Some(datetime) = chrono::DateTime::from_timestamp(timestamp, 0) {
-        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-    } else {
-        "无效时间".to_string()
-    }
+    crate::time::format_local_ts(timestamp)
 }

@@ -15,7 +15,6 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct TaskMonitorConfig {
-    pub max_cache_size: usize,
     pub cache_ttl_seconds: u64,
     pub cleanup_interval_seconds: u64,
 }
@@ -23,7 +22,6 @@ pub struct TaskMonitorConfig {
 impl Default for TaskMonitorConfig {
     fn default() -> Self {
         Self {
-            max_cache_size: 10000,
             cache_ttl_seconds: 3600,
             cleanup_interval_seconds: 300,
         }

@@ -1,9 +1,10 @@
 use anyhow::Result;
+use std::time::Duration;
 use tonic::transport::Server;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// gRPC 服务器管理器
-/// 
+///
 /// 负责管理 gRPC 服务器的生命周期，包括：
 /// - TLS 热重载支持
 /// - 优雅关闭处理
@@ -34,7 +35,7 @@ impl GrpcServerManager {
             let svc = make_svc();
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let token = shutdown_token.clone();
-            
+
             // 监听关闭信号
             tokio::spawn(async move {
                 token.cancelled().await;
@@ -49,12 +50,10 @@ impl GrpcServerManager {
                 let mut builder = if let Some(ref svc) = tls_for_spawn {
                     if let Some(tls_cfg) = svc.get_server_tls_config().await {
                         info!("Applying TLS configuration to gRPC server");
-                        Server::builder()
-                            .tls_config(tls_cfg)
-                            .map_err(|e| {
-                                tracing::error!("Failed to apply TLS config: {}", e);
-                                e
-                            })?
+                        Server::builder().tls_config(tls_cfg).map_err(|e| {
+                            tracing::error!("Failed to apply TLS config: {}", e);
+                            e
+                        })?
                     } else {
                         warn!("TLS service available but no TLS config, starting without TLS");
                         Server::builder()
@@ -65,6 +64,12 @@ impl GrpcServerManager {
                 };
 
                 // 启动服务器
+                // Server-side keepalive to keep connections healthy across idle periods
+                builder = builder
+                    .http2_keepalive_interval(Some(Duration::from_secs(30)))
+                    .http2_keepalive_timeout(Some(Duration::from_secs(5)))
+                    .tcp_keepalive(Some(Duration::from_secs(60)));
+
                 let result = builder
                     .add_service(svc)
                     .serve_with_shutdown(addr_for_spawn, async {
@@ -122,7 +127,7 @@ impl GrpcServerManager {
                                 return Err(e.into());
                             }
                         }
-                        
+
                         // 如果没有关闭信号，则重启
                         if !shutdown_token.is_cancelled() {
                             warn!("Server exited unexpectedly, restarting...");
@@ -153,7 +158,7 @@ impl GrpcServerManager {
                                 return Err(e.into());
                             }
                         }
-                        
+
                         // 如果没有关闭信号，则重启
                         if !shutdown_token.is_cancelled() {
                             warn!("Server exited unexpectedly, restarting...");

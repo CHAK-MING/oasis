@@ -124,7 +124,9 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
 
 /// 统一确保常用 KV buckets 存在
 pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()> {
-    use oasis_core::{JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS};
+    use oasis_core::{
+        JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS, JS_KV_ROLLOUTS,
+    };
     let mut kv_specs: Vec<(String, async_nats::jetstream::kv::Config)> = Vec::new();
 
     // 心跳（TTL型）
@@ -134,6 +136,16 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
         cfg.description = "Agent heartbeat (TTL-based cleanup)".to_string();
         cfg.history = 1;
         cfg.max_age = std::time::Duration::from_secs(90);
+        kv_specs.push((cfg.bucket.clone(), cfg));
+    }
+
+    // Rollouts（版本化不TTL）
+    {
+        let mut cfg = async_nats::jetstream::kv::Config::default();
+        cfg.bucket = JS_KV_ROLLOUTS.to_string();
+        cfg.description = "Rollouts status (versioned, no TTL)".to_string();
+        cfg.history = 50;
+        cfg.max_value_size = 655_360; // 640KB 足够存储 Proto 状态
         kv_specs.push((cfg.bucket.clone(), cfg));
     }
 

@@ -39,6 +39,18 @@ pub fn network_publish_backoff() -> ExponentialBackoff {
     }
 }
 
+/// 用于客户端网络连接的重试策略（如 gRPC 初次连接），支持更长等待窗口
+pub fn network_connect_backoff() -> ExponentialBackoff {
+    ExponentialBackoff {
+        initial_interval: Duration::from_millis(200),
+        max_interval: Duration::from_millis(5000),
+        multiplier: 2.0,
+        max_elapsed_time: Some(Duration::from_secs(120)),
+        randomization_factor: 0.2,
+        ..Default::default()
+    }
+}
+
 pub fn fast_backoff() -> ExponentialBackoff {
     ExponentialBackoff {
         initial_interval: Duration::from_millis(100),

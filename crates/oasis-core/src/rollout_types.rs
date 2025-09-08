@@ -9,33 +9,33 @@ use serde::{Deserialize, Serialize};
 /// 灰度发布状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RolloutState {
-    Created,    // 已创建
-    Running,    // 执行中
-    Completed,  // 已完成
-    Failed,     // 失败
-    RolledBack, // 已回滚
+    Created,        // 已创建
+    Running,        // 执行中
+    Completed,      // 已完成
+    Failed,         // 失败
+    RollingBack,    // 正在回滚
+    RollbackFailed, // 回滚失败
+    RolledBack,     // 回滚完成
 }
 
 impl RolloutState {
     /// 检查是否为终端状态
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            RolloutState::Completed | RolloutState::Failed | RolloutState::RolledBack
-        )
+        matches!(self, RolloutState::Completed | RolloutState::Failed)
     }
 
     /// 检查是否可以推进
     pub fn can_advance(&self) -> bool {
-        matches!(
-            self,
-            RolloutState::Created | RolloutState::Running
-        )
+        matches!(self, RolloutState::Created | RolloutState::Running)
     }
 
     /// 检查是否可以回滚
     pub fn can_rollback(&self) -> bool {
-        !matches!(self, RolloutState::RolledBack | RolloutState::Failed)
+        !matches!(self, RolloutState::Running | RolloutState::Failed)
+    }
+
+    pub fn is_busy(&self) -> bool {
+        matches!(self, RolloutState::Running | RolloutState::RollingBack)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -44,7 +44,9 @@ impl RolloutState {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
-            Self::RolledBack => "rolledback",
+            Self::RollingBack => "rolling_back",
+            Self::RollbackFailed => "rollback_failed",
+            Self::RolledBack => "rolled_back",
         }
     }
 }
@@ -143,10 +145,7 @@ pub enum RolloutTaskType {
         timeout_seconds: u32,
     },
     /// 文件部署
-    FileDeployment {
-        config: FileConfig,
-        uploaded_file_name: String, // 对象存储中的文件名
-    },
+    FileDeployment { config: FileConfig },
 }
 
 /// 灰度发布配置
@@ -195,6 +194,49 @@ pub struct RolloutStageStatus {
     pub completed_at: Option<i64>,
     /// 失败的任务执行详情
     pub failed_executions: Vec<TaskExecution>,
+    /// 版本快照信息
+    pub version_snapshot: Option<VersionSnapshot>,
+}
+
+/// 版本快照信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionSnapshot {
+    pub created_at: i64,
+    pub snapshot_data: SnapshotData,
+}
+
+/// 快照数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SnapshotData {
+    FileSnapshot {
+        file_config: FileConfig,
+        previous_revision: Option<u64>, // 推进前的文件版本
+    },
+    CommandSnapshot {
+        // 命令执行的快照，当前主要记录执行状态
+        executed_at: i64,
+    },
+}
+
+impl VersionSnapshot {
+    pub fn new_file_snapshot(file_config: FileConfig, previous_revision: Option<u64>) -> Self {
+        Self {
+            created_at: chrono::Utc::now().timestamp(),
+            snapshot_data: SnapshotData::FileSnapshot {
+                file_config,
+                previous_revision,
+            },
+        }
+    }
+
+    pub fn new_command_snapshot() -> Self {
+        Self {
+            created_at: chrono::Utc::now().timestamp(),
+            snapshot_data: SnapshotData::CommandSnapshot {
+                executed_at: chrono::Utc::now().timestamp(),
+            },
+        }
+    }
 }
 
 /// 灰度发布状态
@@ -214,6 +256,8 @@ pub struct RolloutStatus {
     pub updated_at: i64,
     /// 错误信息（如果有）
     pub error_message: Option<String>,
+    /// 当前动作（如回滚命令）
+    pub current_action: Option<String>,
 }
 
 impl RolloutStatus {
@@ -228,6 +272,7 @@ impl RolloutStatus {
             all_target_agents,
             updated_at: chrono::Utc::now().timestamp(),
             error_message: None,
+            current_action: None,
         }
     }
 
@@ -268,6 +313,7 @@ impl RolloutStatus {
                         started_at: None,
                         completed_at: None,
                         failed_executions: Vec::new(),
+                        version_snapshot: None,
                     });
 
                     if remaining_agents.is_empty() {
@@ -301,6 +347,7 @@ impl RolloutStatus {
                         started_at: None,
                         completed_at: None,
                         failed_executions: Vec::new(),
+                        version_snapshot: None,
                     });
 
                     if remaining_agents.is_empty() {
@@ -330,6 +377,7 @@ impl RolloutStatus {
                         started_at: None,
                         completed_at: None,
                         failed_executions: Vec::new(),
+                        version_snapshot: None,
                     });
 
                     if remaining_agents.is_empty() {

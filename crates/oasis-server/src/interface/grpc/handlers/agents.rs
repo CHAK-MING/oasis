@@ -1,5 +1,6 @@
 use oasis_core::proto::{
     ListAgentsRequest, ListAgentsResponse, RemoveAgentRequest, RemoveAgentResponse,
+    SetInfoAgentRequest, SetInfoAgentResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -21,11 +22,12 @@ impl AgentHandlers {
             .map(|t| t.expression.clone())
             .unwrap_or_else(|| "all".to_string());
 
-        let result = srv.context()
-                .agent_service
-                .query(&expression)
-                .await
-                .map_err(map_core_error)?;
+        let result = srv
+            .context()
+            .agent_service
+            .query(&expression)
+            .await
+            .map_err(map_core_error)?;
 
         let agent_ids = if req.is_online {
             result.to_online_agents()
@@ -53,7 +55,7 @@ impl AgentHandlers {
 
         // 验证请求
         let agent_id = req
-            .id
+            .agent_id
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("agent_id is required"))?;
 
@@ -82,6 +84,33 @@ impl AgentHandlers {
                 tracing::error!("{}", error_msg);
                 Err(Status::internal(error_msg))
             }
+        }
+    }
+
+    pub async fn set_info_agent(
+        srv: &OasisServer,
+        request: Request<SetInfoAgentRequest>,
+    ) -> std::result::Result<Response<SetInfoAgentResponse>, Status> {
+        let req = request.into_inner();
+
+        let agent_id = req
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("agent_id is required"))?;
+
+        // 调用 agent_service 的 set_info_agent 方法
+        let agent_id = oasis_core::core_types::AgentId::from(agent_id.value.clone());
+        match srv
+            .context()
+            .agent_service
+            .set_info_agent(&agent_id, &req.info)
+            .await
+        {
+            Ok(success) => Ok(Response::new(SetInfoAgentResponse {
+                success,
+                message: "success".to_string(),
+            })),
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 }

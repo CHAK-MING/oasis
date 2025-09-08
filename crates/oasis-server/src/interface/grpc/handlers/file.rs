@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
+use tokio::task;
 
 /// 文件上传会话
 #[derive(Debug, Clone)]
@@ -46,19 +47,26 @@ impl SessionManager {
         let max_sessions = manager.max_sessions;
         let max_memory_mb = manager.max_memory_mb;
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
+        // 仅在 Tokio runtime 存在时启动后台清理，避免在无 runtime 场景 panic
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
 
-                // 带错误恢复的清理逻辑
-                if let Err(e) =
-                    cleanup_sessions(&sessions, session_ttl, max_sessions, max_memory_mb).await
-                {
-                    error!("Session cleanup failed, but continuing: {}", e);
+                    // 带错误恢复的清理逻辑
+                    if let Err(e) =
+                        cleanup_sessions(&sessions, session_ttl, max_sessions, max_memory_mb).await
+                    {
+                        error!("Session cleanup failed, but continuing: {}", e);
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            warn!(
+                "Tokio runtime not available at SessionManager::new; skipping background cleanup task startup"
+            );
+        }
 
         manager
     }
@@ -243,7 +251,6 @@ impl FileHandlers {
             return Err(Status::invalid_argument("size must be greater than 0"));
         }
 
-        // TODO: 支持大文件
         if req.size > 100 * 1024 * 1024 {
             // 100MB 限制
             return Err(Status::invalid_argument("file too large (max 100MB)"));
@@ -333,10 +340,22 @@ impl FileHandlers {
             )));
         }
 
-        // 计算 SHA256
-        let mut hasher = Sha256::new();
-        hasher.update(&session.buffer);
-        let checksum = format!("{:x}", hasher.finalize());
+        // 计算 SHA256（大文件放到阻塞线程池）
+        let checksum = if session.size > 32 * 1024 * 1024 {
+            // >32MB 走阻塞池
+            let data = session.buffer.clone();
+            task::spawn_blocking(move || {
+                let mut hasher = Sha256::new();
+                hasher.update(&data);
+                format!("{:x}", hasher.finalize())
+            })
+            .await
+            .map_err(|e| Status::internal(format!("hash task join error: {}", e)))?
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(&session.buffer);
+            format!("{:x}", hasher.finalize())
+        };
 
         // 验证 SHA256
         if !session.checksum.is_empty() && session.checksum != checksum {
@@ -371,7 +390,6 @@ impl FileHandlers {
         srv: &OasisServer,
         request: Request<oasis_core::proto::FileApplyRequestMsg>,
     ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
-        // 修复类型
         let req = request.into_inner();
 
         // 验证参数
@@ -475,11 +493,18 @@ impl FileHandlers {
         request: Request<oasis_core::proto::RollbackFileRequest>,
     ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
         let req = request.into_inner();
-        
-        let config = req.config.as_ref().ok_or_else(|| Status::invalid_argument("config is required for rollback file"))?;
+
+        let config = req
+            .config
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("config is required for rollback file"))?;
 
         // 解析选择器
-        let selector_expr = &config.target.as_ref().map(|t| t.expression.as_str()).unwrap_or("");
+        let selector_expr = &config
+            .target
+            .as_ref()
+            .map(|t| t.expression.as_str())
+            .unwrap_or("");
         let result = srv
             .context()
             .agent_service

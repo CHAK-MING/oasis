@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use async_nats::ConnectOptions;
+use std::time::Duration;
 use async_nats::{Client, jetstream};
 use tracing::{error, info, warn};
 
@@ -48,6 +49,11 @@ impl NatsClientFactory {
         } else {
             info!(url = %nats_config.url, "Connecting to NATS without TLS");
         }
+
+        // 健壮的心跳与超时，避免长时间空闲后连接“假存活”
+        options = options
+            .ping_interval(Duration::from_secs(20))
+            .connection_timeout(Duration::from_secs(5));
 
         // 连接到 NATS
         let client = match options.connect(&nats_config.url).await {

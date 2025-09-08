@@ -13,7 +13,8 @@ use oasis_core::proto::{
     GetRolloutStatusRequest, GetRolloutStatusResponse, ListAgentsRequest, ListAgentsResponse,
     ListBatchesRequest, ListBatchesResponse, ListRolloutsRequest, ListRolloutsResponse,
     RemoveAgentRequest, RemoveAgentResponse, RollbackFileRequest, RollbackRolloutRequest,
-    RollbackRolloutResponse, SubmitBatchRequest, SubmitBatchResponse, oasis_service_server,
+    RollbackRolloutResponse, SetInfoAgentRequest, SetInfoAgentResponse, SubmitBatchRequest,
+    SubmitBatchResponse, oasis_service_server,
 };
 
 /// Oasis gRPC 服务器实现
@@ -138,6 +139,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<RemoveAgentRequest>,
     ) -> std::result::Result<Response<RemoveAgentResponse>, Status> {
         crate::interface::grpc::handlers::AgentHandlers::remove_agent(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn set_info_agent(
+        &self,
+        request: Request<SetInfoAgentRequest>,
+    ) -> std::result::Result<Response<SetInfoAgentResponse>, Status> {
+        crate::interface::grpc::handlers::AgentHandlers::set_info_agent(self, request).await
     }
 
     #[instrument(skip_all)]

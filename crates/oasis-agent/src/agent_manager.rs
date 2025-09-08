@@ -173,7 +173,7 @@ impl AgentManager {
         }
 
         let agent_info = AgentInfo {
-            id: self.agent_id.clone(),
+            agent_id: self.agent_id.clone(),
             status,
             info,
             last_heartbeat: chrono::Utc::now().timestamp(),

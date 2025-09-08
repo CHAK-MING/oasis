@@ -9,14 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 oasis-core = { path = "../oasis-core" }
-figment = { version = "0.10", features = ["toml", "env"] }
 
 # 从 workspace 继承的依赖
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 async-nats = { workspace = true }
 tonic = { workspace = true, features = ["tls"] }
 prost = { workspace = true }
@@ -24,22 +22,20 @@ clap = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
 futures-util = { workspace = true }
-
-
-# 本地依赖
-uuid = { version = "1.15", features = ["v4"] }
-governor = "0.6"
-sha2 = "0.10"
-tokio-stream = "0.1"
-dashmap = "5.5"
-chrono = { version = "0.4", features = ["clock", "serde"] }
+uuid = { workspace = true }
+governor = { workspace = true }
+sha2 = { workspace = true }
+tokio-stream = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
 anyhow = { workspace = true }
-futures = "0.3"
-tokio-util = "0.7"
-base64 = "0.21"
-once_cell = "1.19"
+futures = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+once_cell = { workspace = true }
+lazy_static = { workspace = true }
+figment = { workspace = true, features = ["toml", "env"] }
 
-# 选择器重构依赖
 roaring = "0.10"
 pest = "2.7"
 pest_derive = "2.7"
@@ -47,5 +43,3 @@ pest_derive = "2.7"
 # TLS 相关依赖
 rustls = "0.22"
 rustls-pemfile = "2.1"
-lazy_static = "1.5.0"
-

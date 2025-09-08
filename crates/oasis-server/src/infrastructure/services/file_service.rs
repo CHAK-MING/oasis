@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use futures::StreamExt;
+use oasis_core::backoff::{execute_with_backoff, fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{FILES_SUBJECT_PREFIX, file_types::*};
 
@@ -80,7 +81,21 @@ impl FileService {
         // 获取对象存储
         let store = self.get_object_store().await?;
 
-        match store.put(object_key.as_str(), &mut data.as_slice()).await {
+        let put_res = execute_with_backoff(
+            || async {
+                store
+                    .put(object_key.as_str(), &mut data.as_slice())
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to upload file: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })
+            },
+            fast_backoff(),
+        )
+        .await;
+
+        match put_res {
             Ok(info) => {
                 info!(
                     "Successfully uploaded file: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
@@ -97,10 +112,7 @@ impl FileService {
             }
             Err(e) => {
                 error!("Failed to upload file {}: {}", source_path, e);
-                Err(CoreError::Internal {
-                    message: format!("Failed to upload file: {}", e),
-                    severity: ErrorSeverity::Error,
-                })
+                Err(e)
             }
         }
     }
@@ -118,25 +130,33 @@ impl FileService {
             agent_ids
         );
 
-        // 向每个 Agent 发送文件应用任务
+        // 并行向每个 Agent 发送文件应用任务
+        let concurrency_limit = 32usize;
+        let futs = agent_ids.into_iter().map(|aid| async move {
+            let res = self.send_file_apply_task(&config, &aid).await;
+            (aid, res)
+        });
+
+        use futures::stream;
         let mut applied_agents = Vec::new();
         let mut failed_agents = Vec::new();
 
-        for agent_id in agent_ids {
-            match self.send_file_apply_task(&config, &agent_id).await {
-                Ok(_) => {
+        stream::iter(futs)
+            .buffer_unordered(concurrency_limit)
+            .for_each(|(agent_id, res)| {
+                if res.is_ok() {
                     applied_agents.push(agent_id.clone());
                     info!("Sent file apply task to agent: {}", agent_id);
-                }
-                Err(e) => {
+                } else if let Err(e) = res {
                     failed_agents.push(agent_id.clone());
                     error!(
                         "Failed to send file apply task to agent {}: {}",
                         agent_id, e
                     );
                 }
-            }
-        }
+                std::future::ready(())
+            })
+            .await;
 
         let message = if failed_agents.is_empty() {
             format!(
@@ -193,21 +213,25 @@ impl FileService {
         );
         headers.insert("Nats-Msg-Id", dedupe_key);
 
-        // 发布消息到 JS_STREAM_FILES
-        let ack = self
-            .jetstream
-            .publish_with_headers(subject.clone(), headers, data.into())
-            .await
-            .map_err(|e| CoreError::Internal {
-                message: format!("Failed to publish file task: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
-
-        // 等待确认
-        ack.await.map_err(|e| CoreError::Internal {
-            message: format!("Failed to confirm file task publish: {}", e),
-            severity: ErrorSeverity::Error,
-        })?;
+        // 发布并等待 ACK
+        execute_with_backoff(
+            || async {
+                let ack = self
+                    .jetstream
+                    .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to publish file task: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })?;
+                ack.await.map_err(|e| CoreError::Internal {
+                    message: format!("Failed to confirm file task publish: {}", e),
+                    severity: ErrorSeverity::Error,
+                })
+            },
+            network_publish_backoff(),
+        )
+        .await?;
 
         debug!("Published file apply task to subject: {}", subject);
         Ok(())

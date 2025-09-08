@@ -12,6 +12,12 @@ use oasis_core::proto::{
     SelectorExpression, SubmitBatchRequest, TaskExecutionMsg, TaskStateEnum,
     oasis_service_client::OasisServiceClient,
 };
+use std::fmt::Write as FmtWrite;
+
+// 统一 gRPC 错误格式
+fn format_grpc_error(e: &tonic::Status) -> String {
+    format!("[{}] {}", e.code(), e.message())
+}
 
 /// exec 子命令集合
 #[derive(Parser, Debug)]
@@ -148,7 +154,10 @@ async fn run_exec_run(
 
     // 提交任务
     print_status("正在提交任务...", true);
-    let response = client.submit_batch(request).await?;
+    let response = client
+        .submit_batch(request)
+        .await
+        .map_err(|e| anyhow!("提交任务失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();
 
     let batch_id = response
@@ -195,7 +204,7 @@ async fn run_exec_get(
         Ok(response) => response.into_inner(),
         Err(e) => {
             print_status("获取批次信息失败", false);
-            return Err(anyhow!("查询失败: {}", e));
+            return Err(anyhow!("查询失败: {}", format_grpc_error(&e)));
         }
     };
 
@@ -236,7 +245,10 @@ async fn run_exec_list(
         states: state_filters.unwrap_or_default(),
     };
 
-    let response = client.list_batches(request).await?;
+    let response = client
+        .list_batches(request)
+        .await
+        .map_err(|e| anyhow!("获取批量任务列表失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();
 
     if response.batches.is_empty() {
@@ -273,7 +285,10 @@ async fn run_exec_cancel(
         }),
     };
 
-    let response = client.cancel_batch(request).await?;
+    let response = client
+        .cancel_batch(request)
+        .await
+        .map_err(|e| anyhow!("取消批次任务失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();
 
     if response.success {
@@ -285,13 +300,39 @@ async fn run_exec_cancel(
     Ok(())
 }
 
-/// 显示任务执行详情表格
+fn format_output(s: &str, color: Option<Color>) -> Cell {
+    if s.is_empty() {
+        return Cell::new("-").set_alignment(CellAlignment::Left);
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    let max_lines = 3;
+    let max_len = 40;
+    let mut formatted = String::new();
+    for (i, line) in lines.iter().take(max_lines).enumerate() {
+        let mut l = line.chars().take(max_len).collect::<String>();
+        if line.chars().count() > max_len {
+            l.push_str("...");
+        }
+        if i > 0 {
+            formatted.push('\n');
+        }
+        write!(formatted, "{}", l).unwrap();
+    }
+    if lines.len() > max_lines {
+        formatted.push_str("\n...");
+    }
+    let mut cell = Cell::new(formatted).set_alignment(CellAlignment::Left);
+    if let Some(c) = color {
+        cell = cell.fg(c);
+    }
+    cell
+}
+
+// 你的 display_task_executions 函数
 fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
-
-    // 设置表格总宽度
     table.set_width(120);
 
     table.set_header(vec![
@@ -325,45 +366,26 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
         let task_id = execution
             .task_id
             .as_ref()
-            .map(|id| &id.value[..8]) // 只显示前8位
+            .map(|id| &id.value[..8])
             .unwrap_or("unknown");
-
         let agent_id = execution
             .agent_id
             .as_ref()
             .map(|id| id.value.as_str())
             .unwrap_or("unknown");
-
         let state = execution.state();
         let state_cn = state_to_cn(state);
-
-        // 使用不带颜色的状态文本，避免影响列宽计算
         let exit_code = execution
             .exit_code
             .map(|code| code.to_string())
             .unwrap_or("-".to_string());
-
-        let stdout = if execution.stdout.is_empty() {
-            "-".to_string()
-        } else {
-            truncate_string(&execution.stdout, 18) // 减少长度以适应列宽
-        };
-
-        let stderr = if execution.stderr.is_empty() {
-            "-".to_string()
-        } else {
-            truncate_string(&execution.stderr, 18) // 减少长度以适应列宽
-        };
-
         let duration = if let Some(dur) = execution.duration_ms {
             format!("{:.3}s", dur / 1000.0)
         } else {
             "-".to_string()
         };
-
         let created_at = format_timestamp(execution.started_at);
 
-        // 创建状态单元格，使用颜色但不影响列宽
         let mut state_cell = Cell::new(state_cn).set_alignment(CellAlignment::Center);
         state_cell = match state {
             TaskStateEnum::TaskCreated => state_cell.fg(Color::DarkGrey),
@@ -377,13 +399,16 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
             TaskStateEnum::TaskCancelled => state_cell.fg(Color::DarkGrey),
         };
 
+        let stdout_cell = format_output(&execution.stdout, Some(Color::Yellow));
+        let stderr_cell = format_output(&execution.stderr, Some(Color::Red));
+
         table.add_row(vec![
             Cell::new(task_id).set_alignment(CellAlignment::Center),
             Cell::new(agent_id).set_alignment(CellAlignment::Center),
             state_cell,
             Cell::new(exit_code).set_alignment(CellAlignment::Center),
-            Cell::new(stdout),
-            Cell::new(stderr),
+            stdout_cell,
+            stderr_cell,
             Cell::new(duration).set_alignment(CellAlignment::Center),
             Cell::new(created_at).set_alignment(CellAlignment::Center),
         ]);
@@ -501,11 +526,7 @@ fn display_batch_list(batches: &[BatchMsg]) -> Result<()> {
 
 /// 格式化时间戳
 fn format_timestamp(timestamp: i64) -> String {
-    if let Some(datetime) = chrono::DateTime::from_timestamp(timestamp, 0) {
-        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-    } else {
-        "无效时间".to_string()
-    }
+    crate::time::format_local_ts(timestamp)
 }
 
 // 状态中文映射
@@ -521,11 +542,3 @@ fn state_to_cn(state: TaskStateEnum) -> &'static str {
     }
 }
 
-// 截断字符串
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
-    }
-}

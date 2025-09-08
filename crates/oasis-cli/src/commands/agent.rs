@@ -6,9 +6,15 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, arg, command};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
-use oasis_core::proto::RemoveAgentRequest;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
+use oasis_core::proto::{RemoveAgentRequest, SetInfoAgentRequest};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+// 统一 gRPC 错误格式
+fn format_grpc_error(e: &tonic::Status) -> String {
+    format!("[{}] {}", e.code(), e.message())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -131,13 +137,9 @@ pub struct AgentRemoveArgs {
 
 #[derive(Parser, Debug)]
 pub struct AgentSetArgs {
-    /// 目标主机（SSH 连接串，如 user@host）
+    /// Agent ID
     #[arg(short, long)]
-    ssh_target: String,
-
-    /// SSH 私钥路径
-    #[arg(short, long)]
-    key: Option<PathBuf>,
+    agent_id: String,
 
     /// 标签
     #[arg(short, long)]
@@ -278,7 +280,7 @@ async fn run_agent_list(
         // 详细模式：显示 agent 信息（分离 groups、系统信息、普通标签）
         for agent in agents {
             let agent_id = agent
-                .id
+                .agent_id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
@@ -334,10 +336,7 @@ async fn run_agent_list(
             }
 
             // 系统信息 + 公共元数据
-            let datetime = chrono::DateTime::from_timestamp(agent.last_heartbeat, 0)
-                .unwrap_or_default()
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string();
+            let datetime = crate::time::format_local_ts(agent.last_heartbeat);
 
             // 组装系统信息项，按常见顺序展示
             let mut sys_items: Vec<(String, String)> = Vec::new();
@@ -399,12 +398,12 @@ async fn run_agent_list(
 
         for agent in agents {
             let agent_id = agent
-                .id
+                .agent_id
                 .as_ref()
                 .map(|id| id.value.clone())
                 .unwrap_or_default();
 
-            // 修复：状态处理
+            // 状态处理
             let status_cell = match agent.status {
                 0 => Cell::new("在线").fg(Color::Green),  // AGENT_ONLINE
                 1 => Cell::new("离线").fg(Color::Red),    // AGENT_OFFLINE
@@ -519,11 +518,12 @@ echo "Oasis Agent 已成功移除!"
 
     match client
         .remove_agent(RemoveAgentRequest {
-            id: Some(oasis_core::proto::AgentId {
+            agent_id: Some(oasis_core::proto::AgentId {
                 value: args.agent_id.clone(),
             }),
         })
         .await
+        .map_err(|e| anyhow::anyhow!("从服务器注销 Agent 失败: {}", format_grpc_error(&e)))
     {
         Ok(response) => {
             let resp = response.into_inner();
@@ -542,15 +542,50 @@ echo "Oasis Agent 已成功移除!"
     Ok(())
 }
 
-// TODO: 待实现
 async fn run_agent_set(
-    _client: &mut OasisServiceClient<tonic::transport::Channel>,
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: AgentSetArgs,
 ) -> Result<()> {
     print_header(&format!(
-        "设置 Agent 标签或者分组: {}",
-        style(&args.ssh_target).cyan()
+        "设置 Agent {} 标签或者分组",
+        style(&args.agent_id).cyan()
     ));
+
+    // agent_id 参数有提供
+    if args.agent_id.is_empty() {
+        return Err(anyhow::anyhow!("Agent ID 不能为空。"));
+    }
+
+    let mut info = HashMap::new();
+    // labels 是每一个参数输入的是 k=v 的形式，和 hashmap 的方式一样
+    // group 是每一个参数输入的是 xxx,xxx,xxx 的形式，需要设置成 key为__groups，value为 xxx,xxx,xxx
+    for label in args.labels.unwrap_or_default() {
+        let (k, v) = label.split_once('=').unwrap();
+        info.insert(k.to_string(), v.to_string());
+    }
+    for group in args.groups.unwrap_or_default() {
+        info.insert("__groups".to_string(), group);
+    }
+
+    // 调用 agent_service 的 set_info_agent 方法
+    match client
+        .set_info_agent(SetInfoAgentRequest {
+            agent_id: Some(oasis_core::proto::AgentId {
+                value: args.agent_id,
+            }),
+            info,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("设置失败: {}", format_grpc_error(&e)))
+    {
+        Ok(_) => {
+            print_status("设置 Agent 标签或者分组成功", true);
+        }
+        Err(e) => {
+            print_warning(&format!("设置 Agent 标签或者分组失败: {}", e));
+        }
+    }
+
     Ok(())
 }
 
@@ -861,7 +896,11 @@ OASIS__TELEMETRY__LOG_LEVEL=info
 OASIS__TELEMETRY__LOG_FORMAT=text
 OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}
 "#,
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        format!(
+            "{} {}",
+            crate::time::now_local_string(),
+            chrono::Local::now().format("%Z")
+        )
     );
 
     Ok(env)

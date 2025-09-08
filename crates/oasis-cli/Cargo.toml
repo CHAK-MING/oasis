@@ -13,10 +13,12 @@ clap = { workspace = true, features = ["derive", "env"] }
 tonic = { workspace = true }
 oasis-core = { path = "../oasis-core" }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 sysinfo = { workspace = true }
-humantime = "2.1"
-which = "6.0"
+serde_json = { workspace = true }
+rcgen = { workspace = true }
+chrono = { workspace = true }
+time = { workspace = true }
+futures = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
@@ -25,10 +27,11 @@ tokio = { workspace = true, features = [
   "process",
   "io-std",
 ] }
+
+humantime = "2.1"
+which = "6.0"
+
 console = "0.15"
 comfy-table = "7.1"
-rcgen = "0.12"
-chrono = "0.4"
-time = "0.3"
-futures = "0.3"
+
 bytesize = "1.3"

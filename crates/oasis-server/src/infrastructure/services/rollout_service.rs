@@ -2,33 +2,132 @@
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
 use async_nats::jetstream::Context;
 use dashmap::DashMap;
-use oasis_core::core_types::{AgentId, BatchId, RolloutId};
+use futures::StreamExt;
+use oasis_core::constants::JS_KV_ROLLOUTS;
+use oasis_core::core_types::{AgentId, BatchId, RolloutId, SelectorExpression};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::rollout_types::*;
-use oasis_core::task_types::TaskState;
+use oasis_core::task_types::{TaskExecution, TaskState};
+use prost::Message;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info, warn};
 
-/// 灰度发布服务 - 仅负责状态管理
+/// 灰度发布服务 - 负责状态管理和JetStream持久化
 pub struct RolloutService {
-    _jetstream: Arc<Context>,
+    jetstream: Arc<Context>,
     task_monitor: Arc<TaskMonitor>,
     /// 内存中的发布状态缓存
     rollout_cache: Arc<DashMap<RolloutId, RolloutStatus>>,
+    /// 仅用于展示的回滚行（不持久化）
+    rollback_runtime_rows: Arc<DashMap<RolloutId, RolloutStageStatus>>,
 }
 
 impl RolloutService {
-    pub async fn new(_jetstream: Arc<Context>, task_monitor: Arc<TaskMonitor>) -> Result<Self> {
+    pub async fn new(jetstream: Arc<Context>, task_monitor: Arc<TaskMonitor>) -> Result<Self> {
         info!("Initializing RolloutService");
 
-        Ok(Self {
-            _jetstream,
+        let service = Self {
+            jetstream,
             task_monitor,
             rollout_cache: Arc::new(DashMap::new()),
-        })
+            rollback_runtime_rows: Arc::new(DashMap::new()),
+        };
+
+        // 启动时从 JetStream 恢复状态
+        if let Err(e) = service.load_rollouts_from_jetstream().await {
+            warn!("Failed to load rollouts from JetStream: {}", e);
+        }
+
+        Ok(service)
     }
 
-    /// 创建灰度发布 - 只创建状态，不执行任务
+    /// 从 JetStream 加载所有 rollout 状态到内存缓存
+    async fn load_rollouts_from_jetstream(&self) -> Result<()> {
+        let kv_store = match self.jetstream.get_key_value(JS_KV_ROLLOUTS).await {
+            Ok(store) => store,
+            Err(e) => {
+                warn!("Failed to get rollouts KV store: {}, skipping load", e);
+                return Ok(()); // KV 不存在时不是错误，可能是首次启动
+            }
+        };
+
+        match kv_store.keys().await {
+            Ok(mut keys) => {
+                let mut loaded_count = 0;
+                while let Some(key) = keys.next().await {
+                    if let Ok(key_str) = key {
+                        if let Ok(entry) = kv_store.get(&key_str).await {
+                            if let Some(bytes) = entry {
+                                match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
+                                    Ok(proto_status) => {
+                                        match Self::proto_to_domain_status(proto_status) {
+                                            Ok(status) => {
+                                                let rollout_id = status.config.rollout_id.clone();
+                                                self.rollout_cache
+                                                    .insert(rollout_id.clone(), status);
+                                                loaded_count += 1;
+                                                info!(
+                                                    "Loaded rollout {} from JetStream",
+                                                    rollout_id
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to convert proto rollout from key {}: {}",
+                                                    key_str, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to decode rollout from key {}: {}",
+                                            key_str, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                info!("Loaded {} rollouts from JetStream", loaded_count);
+            }
+            Err(e) => {
+                warn!("Failed to list rollout keys: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 持久化 rollout 状态到 JetStream
+    async fn persist_rollout_to_jetstream(&self, rollout_status: &RolloutStatus) -> Result<()> {
+        let kv_store = self
+            .jetstream
+            .get_key_value(JS_KV_ROLLOUTS)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get rollouts KV store: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let key = format!("rollout.{}", rollout_status.config.rollout_id);
+        let proto: oasis_core::proto::RolloutStatusMsg =
+            oasis_core::proto::RolloutStatusMsg::from(rollout_status.clone());
+        let data = proto.encode_to_vec();
+
+        kv_store
+            .put(&key, data.into())
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to persist rollout to JetStream: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        Ok(())
+    }
+
+    /// 创建灰度发布 - 创建状态并持久化到JetStream
     pub async fn create_rollout(
         &self,
         request: CreateRolloutRequest,
@@ -65,14 +164,18 @@ impl RolloutService {
         // 创建发布状态，包含智能阶段划分
         let status = Self::create_rollout_status_with_smart_stages(config, all_target_agents);
 
+        // 持久化到 JetStream
+        self.persist_rollout_to_jetstream(&status).await?;
+
         // 缓存状态
         self.rollout_cache.insert(rollout_id.clone(), status);
+
 
         info!("Rollout created successfully: {}", rollout_id);
         Ok(rollout_id)
     }
 
-    /// 智能创建发布状态 - 处理Agent数量少的特殊情况
+    /// 智能创建发布状态
     fn create_rollout_status_with_smart_stages(
         config: RolloutConfig,
         all_target_agents: Vec<AgentId>,
@@ -114,6 +217,7 @@ impl RolloutService {
             started_at: None,
             completed_at: None,
             failed_executions: Vec::new(),
+            version_snapshot: None,
         };
 
         RolloutStatus {
@@ -124,16 +228,74 @@ impl RolloutService {
             all_target_agents,
             updated_at: chrono::Utc::now().timestamp(),
             error_message: None,
+            current_action: None,
         }
     }
 
-    /// 获取灰度发布状态
+    /// 获取灰度发布状态 - 优先内存缓存，后JetStream
     pub async fn get_rollout_status(&self, rollout_id: &RolloutId) -> Result<RolloutStatus> {
         if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
             // 更新阶段状态
             self.update_stage_status_from_monitor(status.value_mut())
                 .await;
-            Ok(status.value().clone())
+            let mut out = status.value().clone();
+            if let Some(row) = self.rollback_runtime_rows.get(rollout_id) {
+                // 附加回滚行用于展示，不影响持久化状态
+                out.stages.push(row.value().clone());
+            }
+            Ok(out)
+        } else {
+            // 从 JetStream 加载
+            match self.load_rollout_from_jetstream(rollout_id).await {
+                Ok(mut status) => {
+                    // 更新状态并缓存
+                    self.update_stage_status_from_monitor(&mut status).await;
+                    self.rollout_cache
+                        .insert(rollout_id.clone(), status.clone());
+                    if let Some(row) = self.rollback_runtime_rows.get(rollout_id) {
+                        let mut out = status.clone();
+                        out.stages.push(row.value().clone());
+                        Ok(out)
+                    } else {
+                        Ok(status)
+                    }
+                }
+                Err(_) => Err(CoreError::NotFound {
+                    entity_type: "Rollout".to_string(),
+                    entity_id: rollout_id.to_string(),
+                    severity: ErrorSeverity::Error,
+                }),
+            }
+        }
+    }
+
+    /// 从 JetStream 加载单个 rollout
+    async fn load_rollout_from_jetstream(&self, rollout_id: &RolloutId) -> Result<RolloutStatus> {
+        let kv_store = self
+            .jetstream
+            .get_key_value(JS_KV_ROLLOUTS)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get rollouts KV store: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let key = format!("rollout.{}", rollout_id);
+        let entry = kv_store.get(&key).await.map_err(|e| CoreError::Nats {
+            message: format!("Failed to get rollout from JetStream: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        if let Some(bytes) = entry {
+            let proto =
+                oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()).map_err(|e| {
+                    CoreError::InvalidTask {
+                        reason: format!("Failed to decode rollout: {}", e),
+                        severity: ErrorSeverity::Error,
+                    }
+                })?;
+            let status = Self::proto_to_domain_status(proto)?;
+            Ok(status)
         } else {
             Err(CoreError::NotFound {
                 entity_type: "Rollout".to_string(),
@@ -143,7 +305,145 @@ impl RolloutService {
         }
     }
 
-    /// 列出灰度发布
+    fn proto_to_domain_status(
+        proto_status: oasis_core::proto::RolloutStatusMsg,
+    ) -> Result<RolloutStatus> {
+        // 转换 RolloutConfig
+        let config_msg = proto_status.config.ok_or_else(|| CoreError::InvalidTask {
+            reason: "missing rollout config".to_string(),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        // strategy
+        let strategy = match config_msg.strategy.and_then(|s| s.strategy) {
+            Some(oasis_core::proto::rollout_strategy_msg::Strategy::Percentage(p)) => {
+                RolloutStrategy::Percentage {
+                    stages: p.stages.into_iter().map(|v| v as u8).collect(),
+                }
+            }
+            Some(oasis_core::proto::rollout_strategy_msg::Strategy::Count(c)) => {
+                RolloutStrategy::Count { stages: c.stages }
+            }
+            Some(oasis_core::proto::rollout_strategy_msg::Strategy::Groups(g)) => {
+                RolloutStrategy::Groups { groups: g.groups }
+            }
+            None => {
+                return Err(CoreError::InvalidTask {
+                    reason: "missing strategy".to_string(),
+                    severity: ErrorSeverity::Error,
+                });
+            }
+        };
+
+        // task_type
+        let task_type = match config_msg.task_type.and_then(|t| t.task_type) {
+            Some(oasis_core::proto::rollout_task_type_msg::TaskType::Command(cmd)) => {
+                RolloutTaskType::Command {
+                    command: cmd.command,
+                    args: cmd.args,
+                    timeout_seconds: cmd.timeout_seconds,
+                }
+            }
+            Some(oasis_core::proto::rollout_task_type_msg::TaskType::FileDeployment(file)) => {
+                // 这里复用 FileConfigMsg -> FileConfig 的 TryFrom
+                let cfg =
+                    oasis_core::file_types::FileConfig::try_from(file.config.ok_or_else(|| {
+                        CoreError::InvalidTask {
+                            reason: "missing file config".to_string(),
+                            severity: ErrorSeverity::Error,
+                        }
+                    })?)
+                    .map_err(|e| CoreError::InvalidTask {
+                        reason: format!("invalid file config: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })?;
+                RolloutTaskType::FileDeployment { config: cfg }
+            }
+            None => {
+                return Err(CoreError::InvalidTask {
+                    reason: "missing task_type".to_string(),
+                    severity: ErrorSeverity::Error,
+                });
+            }
+        };
+
+        let rollout_config = RolloutConfig {
+            rollout_id: RolloutId::from(
+                config_msg
+                    .rollout_id
+                    .ok_or_else(|| CoreError::InvalidTask {
+                        reason: "missing rollout_id".to_string(),
+                        severity: ErrorSeverity::Error,
+                    })?
+                    .value,
+            ),
+            name: config_msg.name,
+            target: SelectorExpression::from(
+                config_msg
+                    .target
+                    .ok_or_else(|| CoreError::InvalidTask {
+                        reason: "missing target".to_string(),
+                        severity: ErrorSeverity::Error,
+                    })?
+                    .expression,
+            ),
+            strategy,
+            task_type,
+            auto_advance: config_msg.auto_advance,
+            advance_interval_seconds: config_msg.advance_interval_seconds,
+            created_at: config_msg.created_at,
+        };
+
+        // stages
+        let mut stages: Vec<RolloutStageStatus> = Vec::new();
+        for s in proto_status.stages {
+            let target_agents: Vec<AgentId> = s
+                .target_agents
+                .into_iter()
+                .map(|id| AgentId::from(id.value))
+                .collect();
+            let state = RolloutState::from(s.state);
+            let failed_execs: Vec<TaskExecution> = s
+                .failed_executions
+                .into_iter()
+                .map(TaskExecution::from)
+                .collect();
+            stages.push(RolloutStageStatus {
+                stage_index: s.stage_index,
+                stage_name: s.stage_name,
+                target_agents,
+                batch_id: s.batch_id.map(|b| BatchId::from(b.value)),
+                started_count: s.started_count,
+                completed_count: s.completed_count,
+                failed_count: s.failed_count,
+                state,
+                started_at: s.started_at,
+                completed_at: s.completed_at,
+                failed_executions: failed_execs,
+                version_snapshot: None, // 版本快照不在 proto 中持久化
+            });
+        }
+
+        let all_target_agents: Vec<AgentId> = proto_status
+            .all_target_agents
+            .into_iter()
+            .map(|id| AgentId::from(id.value))
+            .collect();
+
+        let status = RolloutStatus {
+            config: rollout_config,
+            state: RolloutState::from(proto_status.state),
+            current_stage: proto_status.current_stage,
+            stages,
+            all_target_agents,
+            updated_at: proto_status.updated_at,
+            error_message: proto_status.error_message,
+            current_action: proto_status.current_action,
+        };
+        Ok(status)
+    }
+
+    /// 列出灰度发布 - 优先内存缓存，后JetStream
     pub async fn list_rollouts(
         &self,
         limit: u32,
@@ -154,9 +454,7 @@ impl RolloutService {
         // 遍历所有缓存的 rollout，并更新最新状态
         for mut entry in self.rollout_cache.iter_mut() {
             let status = entry.value_mut();
-
             self.update_stage_status_from_monitor(status).await;
-
             let updated_status = status.clone();
 
             // 应用状态过滤
@@ -213,6 +511,33 @@ impl RolloutService {
         }
     }
 
+    /// 保存版本快照到指定阶段
+    pub async fn save_version_snapshot(
+        &self,
+        rollout_id: &RolloutId,
+        stage_index: u32,
+        snapshot: VersionSnapshot,
+    ) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+            if let Some(stage) = status_val.stages.get_mut(stage_index as usize) {
+                stage.version_snapshot = Some(snapshot);
+                status_val.updated_at = chrono::Utc::now().timestamp();
+
+                // 持久化到 JetStream
+                if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                    warn!("Failed to persist version snapshot: {}", e);
+                }
+
+                info!(
+                    "Saved version snapshot for rollout {} stage {}",
+                    rollout_id, stage_index
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// 记录阶段开始执行（由 handlers 调用）
     pub async fn mark_stage_started(
         &self,
@@ -236,6 +561,11 @@ impl RolloutService {
                 let executed_stage = status_val.current_stage + 1;
                 status_val.current_stage += 1;
 
+                // 持久化到 JetStream
+                if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                    warn!("Failed to persist stage started: {}", e);
+                }
+
                 info!(
                     "Stage {} of rollout {} started with batch {}",
                     executed_stage, rollout_id, batch_id
@@ -256,16 +586,27 @@ impl RolloutService {
         }
     }
 
-    /// 获取已完成阶段的 Agent 列表（供回滚使用）
-    pub async fn get_completed_agents(&self, rollout_id: &RolloutId) -> Result<Vec<AgentId>> {
-        if let Some(status) = self.rollout_cache.get(rollout_id) {
-            let completed_agents: Vec<AgentId> = status
-                .stages
-                .iter()
-                .filter(|s| s.state == RolloutState::Completed)
-                .flat_map(|s| s.target_agents.iter().cloned())
-                .collect();
-            Ok(completed_agents)
+    /// 标记回滚开始：将状态置为 RollingBack 并持久化
+    pub async fn mark_rollback_started(&self, rollout_id: &RolloutId) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+            match status_val.state {
+                RolloutState::Running
+                | RolloutState::RollingBack
+                | RolloutState::RollbackFailed => {
+                    return Err(CoreError::InvalidTask {
+                        reason: format!("Rollout {} 当前状态不允许回滚", rollout_id),
+                        severity: ErrorSeverity::Error,
+                    });
+                }
+                _ => {}
+            }
+            status_val.state = RolloutState::RollingBack;
+            status_val.updated_at = chrono::Utc::now().timestamp();
+            if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                warn!("Failed to persist rollback started: {}", e);
+            }
+            Ok(())
         } else {
             Err(CoreError::NotFound {
                 entity_type: "Rollout".to_string(),
@@ -275,36 +616,224 @@ impl RolloutService {
         }
     }
 
-    /// 回滚灰度发布 - TODO: 需要实现完整的回滚逻辑
-    pub async fn rollback_rollout(
+    /// 设置当前动作（例如回滚命令），并持久化
+    pub async fn set_current_action(
         &self,
         rollout_id: &RolloutId,
-        _rollback_command: Option<String>,
+        action: Option<String>,
     ) -> Result<()> {
         if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
             let status_val = status.value_mut();
-            if !status_val.state.can_rollback() {
-                return Err(CoreError::InvalidTask {
-                    reason: format!("Rollout {} 当前状态不允许回滚", rollout_id),
-                    severity: ErrorSeverity::Error,
-                });
-            }
-
-            // TODO: 实现完整的回滚逻辑
-            // 1. 根据任务类型确定回滚策略
-            // 2. 对于文件部署：恢复备份文件
-            // 3. 对于命令执行：执行用户提供的回滚命令
-            // 4. 提交回滚任务到已完成的Agent
-            // 5. 更新状态为 RolledBack
-
-            status_val.state = RolloutState::RolledBack;
+            status_val.current_action = action;
             status_val.updated_at = chrono::Utc::now().timestamp();
-
-            info!(
-                "Rollout {} marked as rolled back (TODO: implement full rollback)",
-                rollout_id
-            );
+            if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                warn!("Failed to persist current_action: {}", e);
+            }
             Ok(())
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
+
+    /// 标记回滚阶段开始（不推进 current_stage），并持久化
+    pub async fn mark_rollback_stage_started(
+        &self,
+        rollout_id: &RolloutId,
+        stage_index: u32,
+        batch_id: BatchId,
+    ) -> Result<()> {
+        if let Some(status) = self.rollout_cache.get(rollout_id) {
+            // 构造一个只用于展示的“回滚行”
+            let mut row = RolloutStageStatus {
+                stage_index,
+                stage_name: format!("阶段 {} 回滚", stage_index + 1),
+                target_agents: status
+                    .value()
+                    .stages
+                    .get(stage_index as usize)
+                    .map(|s| s.target_agents.clone())
+                    .unwrap_or_default(),
+                batch_id: Some(batch_id),
+                started_count: 0,
+                completed_count: 0,
+                failed_count: 0,
+                state: RolloutState::Running,
+                started_at: Some(chrono::Utc::now().timestamp()),
+                completed_at: None,
+                failed_executions: Vec::new(),
+                version_snapshot: None,
+            };
+            // 用当前监控快照填充 counters（若有）
+            if let Some(task_ids) = self
+                .task_monitor
+                .get_batch_task_ids(row.batch_id.as_ref().unwrap())
+            {
+                let mut started = 0u32;
+                let mut completed = 0u32;
+                let mut failed = 0u32;
+                let mut failed_execs = Vec::new();
+                for task_id in task_ids {
+                    if let Some(exec) = self.task_monitor.latest_execution_from_cache(&task_id) {
+                        match exec.state {
+                            TaskState::Running => started += 1,
+                            TaskState::Success => completed += 1,
+                            TaskState::Failed => {
+                                failed += 1;
+                                failed_execs.push(exec);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                row.started_count = started + completed + failed;
+                row.completed_count = completed;
+                row.failed_count = failed;
+                row.failed_executions = failed_execs;
+            }
+            self.rollback_runtime_rows.insert(rollout_id.clone(), row);
+            Ok(())
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
+
+    /// 标记回滚完成并聚合总体状态
+    pub async fn mark_rollback_completed(&self, rollout_id: &RolloutId) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+            // 聚合总体状态：是否还有未执行阶段
+            if (status_val.current_stage as usize) < status_val.stages.len() {
+                status_val.state = RolloutState::Running;
+            } else if status_val
+                .stages
+                .iter()
+                .all(|s| s.state == RolloutState::Completed)
+            {
+                status_val.state = RolloutState::Completed;
+            } else {
+                status_val.state = RolloutState::Running;
+            }
+            status_val.current_action = None;
+            status_val.updated_at = chrono::Utc::now().timestamp();
+            if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                warn!("Failed to persist rollback completed: {}", e);
+            }
+        }
+        // 清除仅用于展示的回滚行
+        self.rollback_runtime_rows.remove(rollout_id);
+        Ok(())
+    }
+
+    /// 标记回滚失败
+    pub async fn mark_rollback_failed(&self, rollout_id: &RolloutId, reason: String) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+            status_val.state = RolloutState::RollbackFailed;
+            status_val.error_message = Some(format!("回滚失败: {}", reason));
+            status_val.current_action = None;
+            status_val.updated_at = chrono::Utc::now().timestamp();
+            if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                warn!("Failed to persist rollback failed: {}", e);
+            }
+        }
+        // 清除仅用于展示的回滚行
+        self.rollback_runtime_rows.remove(rollout_id);
+        Ok(())
+    }
+
+    /// 获取需要回滚的阶段信息（返回阶段索引、目标 agents、任务类型、版本快照）
+    pub async fn get_rollback_stage_info(
+        &self,
+        rollout_id: &RolloutId,
+    ) -> Result<Option<(u32, Vec<AgentId>, RolloutTaskType, Option<VersionSnapshot>)>> {
+        if let Some(status) = self.rollout_cache.get(rollout_id) {
+            // 优先取最近执行的阶段（Running/Failed/Completed），否则无
+            let prev_idx = status.current_stage.saturating_sub(1);
+            if let Some(stage) = status.stages.get(prev_idx as usize) {
+                if matches!(
+                    stage.state,
+                    RolloutState::Running | RolloutState::Failed | RolloutState::Completed
+                ) {
+                    return Ok(Some((
+                        stage.stage_index,
+                        stage.target_agents.clone(),
+                        status.config.task_type.clone(),
+                        stage.version_snapshot.clone(),
+                    )));
+                }
+            }
+            Ok(None)
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
+
+    /// 标记文件阶段完成（文件部署为同步操作，直接完成阶段并推进）
+    pub async fn mark_file_stage_completed(
+        &self,
+        rollout_id: &RolloutId,
+        stage_index: u32,
+    ) -> Result<u32> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+
+            // 安全检查：阶段索引有效
+            if let Some(stage) = status_val.stages.get_mut(stage_index as usize) {
+                // 仅当处于 Created 或 Running 时可置为 Completed
+                stage.state = RolloutState::Completed;
+                if stage.completed_at.is_none() {
+                    stage.completed_at = Some(chrono::Utc::now().timestamp());
+                }
+
+                // 文件部署为同步完成：按目标节点数量统计完成数
+                let total_targets = stage.target_agents.len() as u32;
+                stage.started_count = total_targets;
+                stage.completed_count = total_targets;
+                stage.failed_count = 0;
+
+                // 更新整体状态并推进 current_stage
+                status_val.state = if (stage_index as usize) + 1 >= status_val.stages.len() {
+                    // 这是最后一个阶段，整体完成
+                    RolloutState::Completed
+                } else {
+                    // 仍有阶段待执行
+                    RolloutState::Running
+                };
+
+                // 如果当前阶段等于传入索引，则推进
+                if status_val.current_stage == stage_index {
+                    status_val.current_stage += 1;
+                }
+                status_val.updated_at = chrono::Utc::now().timestamp();
+
+                // 持久化到 JetStream
+                if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                    warn!("Failed to persist file stage completed: {}", e);
+                }
+
+                info!(
+                    "File stage {} of rollout {} marked completed",
+                    stage_index, rollout_id
+                );
+                Ok(stage_index)
+            } else {
+                Err(CoreError::InvalidTask {
+                    reason: "无效的阶段索引".to_string(),
+                    severity: ErrorSeverity::Error,
+                })
+            }
         } else {
             Err(CoreError::NotFound {
                 entity_type: "Rollout".to_string(),
@@ -316,6 +845,15 @@ impl RolloutService {
 
     /// 从 TaskMonitor 更新阶段状态
     async fn update_stage_status_from_monitor(&self, status: &mut RolloutStatus) {
+        // 若处于回滚中，保持 RollingBack 状态，不用阶段失败覆盖
+        if status.state == RolloutState::RollingBack {
+            status.updated_at = chrono::Utc::now().timestamp();
+            if let Err(e) = self.persist_rollout_to_jetstream(status).await {
+                error!("Failed to persist status update: {}", e);
+            }
+            return;
+        }
+
         for stage in &mut status.stages {
             if let Some(batch_id) = &stage.batch_id {
                 // 从 task_monitor 获取任务执行详情
@@ -386,5 +924,10 @@ impl RolloutService {
         }
 
         status.updated_at = chrono::Utc::now().timestamp();
+
+        // 持久化更新的状态
+        if let Err(e) = self.persist_rollout_to_jetstream(status).await {
+            error!("Failed to persist status update: {}", e);
+        }
     }
 }

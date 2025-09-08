@@ -2,12 +2,12 @@
 
 在 OpenCloudOS Stream 23/OpenCloudOS 9 上的大规模集群节点管理工具
 
-## 快速开始（本机）
+## 快速开始
 
 1. 初始化（生成证书、配置与 docker-compose.yml）
 
 ```bash
-./oasis-cli system init --output-dir . --force
+./oasis-cli system init --output-dir .
 ```
 
 2. 启动 NATS
@@ -117,7 +117,7 @@ oasis-cli exec list --limit 20
 # 向 Web 服务器分发 nginx 配置
 oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
 
-# 原子替换并设置权限/属主
+# 设置权限/属主
 oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --owner root:root --mode 0644
 
 # 指定多个 agent ID
@@ -137,7 +137,7 @@ oasis-cli file clear"
 
 ```bash
 # 部署 Agent
-oasis-cli agent deploy --target user@host --output-dir ./deploy
+oasis-cli agent deploy --agent-id <agent_id> --ssh-target user@host --output-dir ./deploy
 
 # 列出 Agent（简洁模式）
 oasis-cli agent list
@@ -146,7 +146,7 @@ oasis-cli agent list
 oasis-cli agent list --verbose
 
 # 移除 Agent
-oasis-cli agent remove --target user@host
+oasis-cli agent remove --agent-id <agent_id> --ssh-target user@host
 ```
 
 ### rollout：灰度发布
@@ -157,7 +157,7 @@ oasis-cli rollout create \
   --name "系统更新" \
   --target 'labels["role"] == "web"' \
   --strategy percentage:10,30,60,100 \
-  --command "apt update && apt upgrade -y" \
+  --command "dnf update && dnf upgrade -y" \
   --timeout 300
 
 # 创建文件灰度发布
@@ -177,4 +177,47 @@ oasis-cli rollout advance rollout-12345678
 
 # 回滚发布
 oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
+```
+
+## 语法器用法说明
+
+### 基础语法
+```bash
+# all 或 true表示所有Agent
+all | true
+# 指定AgentId
+agent-1,agent-2,agent-3
+# 指定标签
+labels["version"] == "1.0"
+# 指定系统参数
+system["hostname"] == "server01"
+# 指定分组
+"production" in groups
+```
+
+
+### 基础逻辑运算
+```bash
+# 与运算
+labels["env"] == "prod" and system["os_name"] == "linux"
+
+# 或运算  
+labels["team"] == "backend" or labels["team"] == "frontend"
+
+# 非运算
+not labels["maintenance"] == "true"
+
+# 运算符优先级是not > and > or 符合常见的运算规则
+```
+
+### 复杂表达式
+```bash
+# 括号分组
+(labels["env"] == "prod" or labels["env"] == "staging") and system["cpu_cores"] == "8"
+
+# 多重嵌套
+not (labels["deprecated"] == "true" or system["os_name"] == "windows")
+
+# 混合条件
+"web-servers" in groups and labels["env"] == "prod" and not system["memory_total_gb"] == "1"
 ```

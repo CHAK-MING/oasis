@@ -10,6 +10,11 @@ use oasis_core::{
     },
 };
 
+// 统一 gRPC 错误格式
+fn format_grpc_error(e: &tonic::Status) -> String {
+    format!("[{}] {}", e.code(), e.message())
+}
+
 /// 分发文件到目标 Agent 并管理对象存储
 #[derive(Parser, Debug)]
 #[command(
@@ -169,7 +174,8 @@ async fn run_file_apply(
             content_type: "application/octet-stream".to_string(),
             created_at: chrono::Utc::now().timestamp(),
         })
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("开始上传失败: {}", format_grpc_error(&e)))?
         .into_inner();
     let upload_id = begin.upload_id;
 
@@ -209,7 +215,8 @@ async fn run_file_apply(
                 offset,
                 data: chunk_data,
             })
-            .await?
+            .await
+            .map_err(|e| anyhow::anyhow!("上传分片失败: {}", format_grpc_error(&e)))?
             .into_inner();
 
         offset = chunk_resp.received_bytes;
@@ -246,7 +253,8 @@ async fn run_file_apply(
             upload_id,
             verify_checksum: true,
         })
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("提交上传失败: {}", format_grpc_error(&e)))?
         .into_inner();
 
     if commit_result.success {
@@ -270,7 +278,8 @@ async fn run_file_apply(
                 target: Some(SelectorExpression::new(args.target).into()),
             }),
         })
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("分发文件失败: {}", format_grpc_error(&e)))?
         .into_inner();
 
     if apply_result.success {
@@ -360,9 +369,7 @@ async fn run_file_history(
             "历史"
         };
 
-        let created_at = chrono::DateTime::from_timestamp(version.created_at, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| "未知".to_string());
+        let created_at = crate::time::format_local_ts(version.created_at);
 
         let mut status_cell = Cell::new(status_text);
         if version.is_current {
@@ -413,7 +420,11 @@ async fn run_file_rollback(
         }),
     };
 
-    let response = client.rollback_file(request).await?.into_inner();
+    let response = client
+        .rollback_file(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("文件回滚失败: {}", format_grpc_error(&e)))?
+        .into_inner();
 
     if response.success {
         print_status("文件回滚成功", true);

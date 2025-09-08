@@ -1,11 +1,13 @@
+mod certificate;
+mod client;
+mod commands;
+mod time;
+mod ui;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use oasis_core::config::OasisConfig;
-mod certificate;
-mod client;
-mod commands;
-mod ui;
 
 #[tokio::main]
 async fn main() -> Result<()> {

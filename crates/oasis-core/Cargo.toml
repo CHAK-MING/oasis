@@ -10,40 +10,32 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 async-nats = { workspace = true }
 tonic = { workspace = true }
 async-trait = { workspace = true }
 figment = { workspace = true }
 futures-util = { workspace = true }
-futures = "0.3"
+futures = { workspace = true }
 prost = { workspace = true }
-# 配置解析所需
-toml = "0.8"
+toml = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+governor = { workspace = true }
+backoff = { workspace = true }
+sha2 = { workspace = true }
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
 
-# 本地依赖
 libc = "0.2"
 thiserror = "1.0"
 derive_more = "0.99"
 bytes = "1.6"
-uuid = { version = "1.15", features = ["v4"] }
-time = { version = "0.3", features = ["macros"] }
-governor = "0.6"
-backoff = { version = "0.4", features = ["tokio"] }
-sha2 = "0.10"
 rand = "0.8"
-dashmap = "5.5"
-once_cell = "1.19"
-tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-util = "0.7"
-url = "2.5"
-chrono = { version = "0.4", features = ["serde"] }
-
-
-# 字符串处理
-regex = "1.10"
-
-# 配置策略相关
 signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 

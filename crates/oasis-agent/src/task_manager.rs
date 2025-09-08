@@ -228,7 +228,6 @@ impl TaskManager {
             .await?;
         let key = kv_key_labels(self.agent_id.as_str());
 
-        // TODO：这里也需要换成 proto
         let data = serde_json::to_vec(&new_labels)?;
 
         kv.put(&key, data.into()).await?;

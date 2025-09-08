@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
 #[derive(Parser, Debug)]
@@ -148,11 +149,23 @@ async fn create_grpc_client(
         endpoint = endpoint.tls_config(tls).context("配置 TLS 失败")?;
     }
 
-    // Connect with TLS
-    let channel = endpoint
-        .connect()
-        .await
-        .with_context(|| format!("无法连接到服务器 {}", server_url))?;
+    // Keepalive & timeouts to avoid long-idle dead connections
+    endpoint = endpoint
+        .connect_timeout(Duration::from_secs(5))
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .timeout(Duration::from_secs(30))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(5))
+        .keep_alive_while_idle(true);
+
+    // Connect with retry using backoff (longer window) to cover server restarts
+    let backoff = oasis_core::backoff::network_connect_backoff();
+    let channel = oasis_core::backoff::execute_with_backoff(
+        || async { endpoint.connect().await.map_err(|e| anyhow::anyhow!(e)) },
+        backoff,
+    )
+    .await
+    .with_context(|| format!("无法连接到服务器 {}", server_url))?;
 
     Ok(OasisServiceClient::new(channel))
 }
