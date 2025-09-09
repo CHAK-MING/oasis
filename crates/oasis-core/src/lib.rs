@@ -4,16 +4,13 @@ pub mod file_types;
 pub mod task_types;
 pub mod rollout_types;
 
-// Proto conversion bridge
 pub mod proto_bridge;
 
 pub mod config;
 pub mod config_strategies;
 pub mod config_strategy;
 pub mod error;
-// --- End old modules ---
 
-// Modules to keep
 pub mod backoff;
 pub mod constants;
 pub mod nats;

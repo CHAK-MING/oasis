@@ -41,7 +41,7 @@ impl From<&LogConfig> for (LogLevel, LogFormat) {
     }
 }
 
-/// 使用提供的配置初始化 tracing（推荐：TOML 驱动）
+/// 使用提供的配置初始化 tracing
 pub fn init_tracing_with(cfg: &LogConfig) {
     let (lvl_enum, fmt_enum): (LogLevel, LogFormat) = cfg.into();
     let lvl_str = match lvl_enum {

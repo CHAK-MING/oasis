@@ -173,15 +173,11 @@ async fn run_agent_deploy(
 
     print_header(&format!("部署 Agent 到 {}", style(&args.ssh_target).cyan()));
 
-    // 加一个对 AgentId 的验证，不能超过 64 位，只支持字母和数字，并且不能为空
-    if args.agent_id.len() > 64 {
-        return Err(anyhow::anyhow!("Agent ID 不能超过 64 位。"));
-    }
-    if args.agent_id.is_empty() {
-        return Err(anyhow::anyhow!("Agent ID 不能为空。"));
-    }
-    if !args.agent_id.chars().all(|c| c.is_alphanumeric()) {
-        return Err(anyhow::anyhow!("Agent ID 只能包含字母和数字。"));
+    let re_id = regex::Regex::new(r"^[A-Za-z0-9]{1,64}$").unwrap();
+    if !re_id.is_match(&args.agent_id) {
+        return Err(anyhow::anyhow!(
+            "Agent ID 非法（仅允许 1-64 位字母或数字）。"
+        ));
     }
 
     // 创建部署目录
@@ -559,9 +555,18 @@ async fn run_agent_set(
     let mut info = HashMap::new();
     // labels 是每一个参数输入的是 k=v 的形式，和 hashmap 的方式一样
     // group 是每一个参数输入的是 xxx,xxx,xxx 的形式，需要设置成 key为__groups，value为 xxx,xxx,xxx
+    // labels: KEY=VALUE 格式，使用正则校验，避免 unwrap 崩溃
+    let re_label = regex::Regex::new(r"^[^=\s]+=[^\s]*$").unwrap();
     for label in args.labels.unwrap_or_default() {
-        let (k, v) = label.split_once('=').unwrap();
-        info.insert(k.to_string(), v.to_string());
+        if !re_label.is_match(&label) {
+            return Err(anyhow::anyhow!(format!(
+                "非法标签格式: {} (应为 KEY=VALUE)",
+                label
+            )));
+        }
+        if let Some((k, v)) = label.split_once('=') {
+            info.insert(k.to_string(), v.to_string());
+        }
     }
     for group in args.groups.unwrap_or_default() {
         info.insert("__groups".to_string(), group);
@@ -918,7 +923,8 @@ Type=simple
 ExecStart=/opt/oasis/agent/oasis-agent
 EnvironmentFile=/opt/oasis/agent/agent.env
 Restart=always
-RestartSec=5
+TimeoutStartSec=10
+RestartSec=1
 User=root
 WorkingDirectory=/opt/oasis/agent
 StandardOutput=journal

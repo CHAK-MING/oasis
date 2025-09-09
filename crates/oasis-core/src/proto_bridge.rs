@@ -744,12 +744,9 @@ impl From<RolloutStatus> for proto::RolloutStatusMsg {
     }
 }
 
-// Proto -> Domain: RolloutStatus
 impl From<&proto::RolloutStatusMsg> for RolloutStatus {
     fn from(msg: &proto::RolloutStatusMsg) -> Self {
-        // config
         let cfg = msg.config.as_ref().cloned().unwrap_or_default();
-        // strategy
         let strategy = match cfg.strategy.and_then(|s| s.strategy) {
             Some(crate::proto::rollout_strategy_msg::Strategy::Percentage(p)) => {
                 RolloutStrategy::Percentage {
@@ -761,7 +758,6 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             }
             None => RolloutStrategy::default(),
         };
-        // task_type
         let task_type = match cfg.task_type.and_then(|t| t.task_type) {
             Some(crate::proto::rollout_task_type_msg::TaskType::Command(cmd)) => {
                 RolloutTaskType::Command {
@@ -791,7 +787,6 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             created_at: cfg.created_at,
         };
 
-        // stages
         let mut stages: Vec<RolloutStageStatus> = Vec::new();
         for s in &msg.stages {
             let target_agents: Vec<AgentId> = s
@@ -837,8 +832,6 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
         }
     }
 }
-
-// (removed duplicate impl)
 
 // ===== RolloutConfig 转换 =====
 

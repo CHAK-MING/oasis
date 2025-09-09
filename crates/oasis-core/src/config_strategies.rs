@@ -1,4 +1,4 @@
-//! Concrete configuration strategy implementations for different runtime environments.
+//! 针对不同运行环境的具体配置策略实现。
 
 use crate::config::OasisConfig;
 use crate::config_strategy::{
@@ -10,7 +10,7 @@ use futures::StreamExt;
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 
-/// Server configuration strategy - supports hot reload via SIGHUP
+/// Server 配置策略 —— 通过 SIGHUP 支持热重载
 pub struct ServerConfigStrategy {
     config_path: PathBuf,
     current_config: std::sync::Arc<tokio::sync::RwLock<OasisConfig>>,
@@ -57,7 +57,7 @@ impl ConfigStrategy for ServerConfigStrategy {
     async fn start_hot_reload(&self) -> Result<broadcast::Receiver<ConfigChangeEvent>> {
         let rx = self.change_tx.subscribe();
 
-        // Start SIGHUP-based hot reload
+        // 基于 SIGHUP 的热重载
         self.start_signal_reload().await?;
 
         Ok(rx)
@@ -66,7 +66,7 @@ impl ConfigStrategy for ServerConfigStrategy {
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
-            .map_err(|e| anyhow::anyhow!("Server config validation failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Server 配置校验失败: {:?}", e))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -76,22 +76,8 @@ impl ConfigStrategy for ServerConfigStrategy {
 
 impl ServerConfigStrategy {
     async fn load_config_from_file(&self) -> Result<OasisConfig> {
-        use figment::{
-            Figment,
-            providers::{Env, Serialized, Toml},
-        };
-
-        let figment = Figment::from(Serialized::defaults(OasisConfig::default()))
-            .merge(Toml::file(&self.config_path))
-            .merge(Env::prefixed("OASIS__").split("__"));
-
-        let mut config: OasisConfig = figment
-            .extract()
-            .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-
-        // Resolve relative paths
-        config.resolve_relative_paths(&self.context.base_dir);
-
+        let path_str = self.config_path.to_string_lossy().to_string();
+        let config = OasisConfig::load_config(Some(&path_str))?;
         Ok(config)
     }
 
@@ -100,7 +86,7 @@ impl ServerConfigStrategy {
         let strategy = self.clone();
 
         tokio::spawn(async move {
-            tracing::info!("配置热重载已启用 (信号: SIGHUP)");
+            tracing::info!("配置热重载已启用（信号：SIGHUP）");
 
             while let Some(signal) = signals.next().await {
                 match signal {
@@ -109,14 +95,14 @@ impl ServerConfigStrategy {
 
                         match strategy.reload_config().await {
                             Ok(change_event) => {
-                                tracing::info!("配置重载成功: {:?}", change_event.changes);
+                                tracing::info!("配置重载成功：{:?}", change_event.changes);
 
                                 if let Err(e) = strategy.change_tx.send(change_event) {
-                                    tracing::warn!("配置变更通知发送失败: {}", e);
+                                    tracing::warn!("配置变更通知发送失败：{}", e);
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("配置重载失败: {}", e);
+                                tracing::error!("配置重载失败：{}", e);
                             }
                         }
                     }
@@ -140,7 +126,7 @@ impl ServerConfigStrategy {
     }
 }
 
-// Implement Clone for ServerConfigStrategy
+// 为 ServerConfigStrategy 实现 Clone
 impl Clone for ServerConfigStrategy {
     fn clone(&self) -> Self {
         Self {
@@ -152,7 +138,7 @@ impl Clone for ServerConfigStrategy {
     }
 }
 
-/// Agent configuration strategy - environment variable driven, restart-based reload
+/// Agent 配置策略 —— 由环境变量驱动，变更通过重启生效
 pub struct AgentConfigStrategy {
     context: ConfigContext,
 }
@@ -171,13 +157,13 @@ impl AgentConfigStrategy {
 #[async_trait::async_trait]
 impl ConfigStrategy for AgentConfigStrategy {
     async fn load_initial_config(&self) -> Result<OasisConfig> {
-        // Load base configuration
+        // 加载基础配置
         let mut config = self.load_base_config().await?;
 
-        // Apply Agent-specific environment variable overrides
+        // 应用 Agent 侧的环境变量覆盖
         self.apply_agent_env_overrides(&mut config)?;
 
-        // Validate configuration
+        // 校验配置
         self.validate_config(&config).await?;
 
         Ok(config)
@@ -185,14 +171,14 @@ impl ConfigStrategy for AgentConfigStrategy {
 
     fn supports_hot_reload(&self) -> bool {
         false
-    } // Agent reloads via restart
+    } // Agent 通过重启来“重载”
 
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
-            .map_err(|e| anyhow::anyhow!("Agent config validation failed: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Agent 配置校验失败: {:?}", e))?;
 
-        // Agent-specific validation
+        // Agent 侧特定校验
         self.validate_agent_specific(config).await
     }
 
@@ -210,7 +196,7 @@ impl AgentConfigStrategy {
 
         let mut figment = Figment::from(Serialized::defaults(OasisConfig::default()));
 
-        // Try to load config file (Agent might not have one)
+        // 尝试加载配置文件（Agent 可能没有配置文件）
         let config_file =
             std::env::var("OASIS_CONFIG_FILE").unwrap_or_else(|_| "oasis.toml".to_string());
 
@@ -218,91 +204,63 @@ impl AgentConfigStrategy {
             figment = figment.merge(Toml::file(config_file));
         }
 
-        // Add environment variable layer - only parse known fields
-        // We'll handle unknown fields gracefully in the extract step
+        // 追加环境变量层 —— 只解析已知字段
+        // 未知字段在 extract 阶段优雅处理
         figment = figment.merge(Env::prefixed("OASIS__").split("__"));
 
         let config: OasisConfig = figment
             .extract()
-            .map_err(|e| anyhow::anyhow!("Failed to load base config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("加载基础配置失败: {}", e))?;
 
         Ok(config)
     }
 
     fn apply_agent_env_overrides(&self, config: &mut OasisConfig) -> Result<()> {
-        // Agent ID - most important configuration (store for later use)
-        if let Ok(agent_id) = std::env::var("OASIS_AGENT_ID") {
-            if !agent_id.trim().is_empty() {
-                // Store agent_id in a way that doesn't conflict with config structure
-                unsafe {
-                    std::env::set_var("OASIS_AGENT_ID_INTERNAL", &agent_id);
-                }
-                tracing::info!("Agent ID from environment: {}", agent_id);
-            }
-        }
-
-        // Set a default listen_addr for Agent (not used but required by config validation)
-        if config.listen_addr.is_empty() {
-            config.listen_addr = "127.0.0.1:50051".to_string();
-        }
-
-        // NATS connection config - direct environment variables (keep backward compatibility)
-        if let Ok(nats_url) = std::env::var("OASIS_NATS_URL") {
+        // NATS 连接配置 —— 直接从环境变量读取
+        if let Ok(nats_url) = std::env::var("OASIS__NATS__URL") {
             config.nats.url = nats_url;
         }
 
-        // gRPC server address override
-        if let Ok(grpc_url) = std::env::var("OASIS__GRPC__URL") {
-            config.grpc.url = grpc_url.clone();
-            tracing::info!("gRPC URL from environment: {}", grpc_url);
-        } else if let Ok(server_url) = std::env::var("OASIS_SERVER_URL") {
-            // Store server_url in a way that doesn't conflict with config structure
-            unsafe {
-                std::env::set_var("OASIS_SERVER_URL_INTERNAL", &server_url);
-            }
-            tracing::info!("Server URL from environment: {}", server_url);
-        }
-
-        // Log configuration
-        if let Ok(log_level) = std::env::var("OASIS_LOG_LEVEL") {
+        // 日志配置
+        if let Ok(log_level) = std::env::var("OASIS__TELEMETRY__LOG_LEVEL") {
             config.telemetry.log_level = log_level;
         }
 
-        // Agent behavior configuration
-        if let Ok(heartbeat) = std::env::var("OASIS_HEARTBEAT_INTERVAL_SEC") {
-            if let Ok(interval) = heartbeat.parse::<u64>() {
-                config.agent.heartbeat_interval_sec = interval;
-            }
+        if let Ok(log_format) = std::env::var("OASIS__TELEMETRY__LOG_FORMAT") {
+            config.telemetry.log_format = log_format;
         }
 
-        if let Ok(fact_interval) = std::env::var("OASIS_FACT_COLLECTION_INTERVAL_SEC") {
-            if let Ok(interval) = fact_interval.parse::<u64>() {
-                config.agent.fact_collection_interval_sec = interval;
-            }
+        if let Ok(log_no_ansi) = std::env::var("OASIS__TELEMETRY__LOG_NO_ANSI") {
+            config.telemetry.log_no_ansi = log_no_ansi.parse().unwrap_or(false);
+        }
+
+        // 证书路径
+        if let Ok(certs_dir) = std::env::var("OASIS__TLS__CERTS_DIR") {
+            config.tls.certs_dir = PathBuf::from(certs_dir);
         }
 
         Ok(())
     }
 
     async fn validate_agent_specific(&self, config: &OasisConfig) -> Result<()> {
-        // Validate certificate files exist (Agent runtime must have certificates)
+        // 校验证书文件是否存在（Agent 运行环境必须具备相关证书）
         if !config.tls.nats_ca_path().exists() {
             return Err(anyhow::anyhow!(
-                "NATS CA certificate not found: {}",
+                "未找到 NATS CA 证书: {}",
                 config.tls.nats_ca_path().display()
             ));
         }
 
         if !config.tls.nats_client_cert_path().exists() {
             return Err(anyhow::anyhow!(
-                "NATS client certificate not found: {}",
+                "未找到 NATS 客户端证书: {}",
                 config.tls.nats_client_cert_path().display()
             ));
         }
 
         if !config.tls.nats_client_key_path().exists() {
             return Err(anyhow::anyhow!(
-                "NATS client key not found: {}",
+                "未找到 NATS 客户端私钥: {}",
                 config.tls.nats_client_key_path().display()
             ));
         }
@@ -311,9 +269,10 @@ impl AgentConfigStrategy {
     }
 }
 
-/// CLI configuration strategy - lightweight, fresh config each time
+/// CLI 配置策略 —— 轻量化，每次运行加载最新配置
 pub struct CliConfigStrategy {
     context: ConfigContext,
+    config_path: Option<PathBuf>,
 }
 
 impl CliConfigStrategy {
@@ -329,6 +288,7 @@ impl CliConfigStrategy {
                 base_dir,
                 runtime_env: RuntimeEnvironment::Cli,
             },
+            config_path,
         }
     }
 }
@@ -336,60 +296,26 @@ impl CliConfigStrategy {
 #[async_trait::async_trait]
 impl ConfigStrategy for CliConfigStrategy {
     async fn load_initial_config(&self) -> Result<OasisConfig> {
-        // CLI uses simple direct configuration loading
-        let config = OasisConfig::load_config(None)?;
-        self.validate_config(&config).await?;
+        // CLI 与 Server 一致：优先使用传入的 config_path，否则默认当前目录 oasis.toml
+        let path_str = self
+            .config_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let config = OasisConfig::load_config(path_str.as_deref())?;
         Ok(config)
     }
 
     fn supports_hot_reload(&self) -> bool {
         false
-    } // CLI loads fresh each time
-
-    async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
-        // CLI only needs to validate connection-related configuration
-        self.validate_connection_config(config).await
     }
 
     fn strategy_name(&self) -> &'static str {
         "cli"
     }
-}
 
-impl CliConfigStrategy {
-    async fn validate_connection_config(&self, config: &OasisConfig) -> Result<()> {
-        // Validate client certificates (CLI needs to connect to Server)
-        // Use context.base_dir to resolve relative paths
-        let cert_path = self
-            .context
-            .base_dir
-            .join(&config.tls.grpc_client_cert_path());
-        if !cert_path.exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC client certificate not found: {}",
-                cert_path.display()
-            ));
-        }
-
-        let key_path = self
-            .context
-            .base_dir
-            .join(&config.tls.grpc_client_key_path());
-        if !key_path.exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC client key not found: {}",
-                key_path.display()
-            ));
-        }
-
-        let ca_path = self.context.base_dir.join(&config.tls.grpc_ca_path());
-        if !ca_path.exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC CA certificate not found: {}",
-                ca_path.display()
-            ));
-        }
-
-        Ok(())
+    async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
+        config
+            .validate_with_context(&self.context)
+            .map_err(|e| anyhow::anyhow!("CLI 配置校验失败: {:?}", e))
     }
 }

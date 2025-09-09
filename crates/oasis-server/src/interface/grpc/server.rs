@@ -28,7 +28,7 @@ impl OasisServer {
     }
 }
 
-// ===== Public accessors for handler modules =====
+// ===== 公共访问器 =====
 impl OasisServer {
     pub(crate) fn context(&self) -> &Arc<ApplicationContext> {
         &self.context

@@ -64,7 +64,7 @@ impl GrpcServerManager {
                 };
 
                 // 启动服务器
-                // Server-side keepalive to keep connections healthy across idle periods
+                // 服务器端保持连接以保持连接健康
                 builder = builder
                     .http2_keepalive_interval(Some(Duration::from_secs(30)))
                     .http2_keepalive_timeout(Some(Duration::from_secs(5)))
@@ -79,7 +79,12 @@ impl GrpcServerManager {
                     .await;
 
                 if let Err(e) = result {
-                    error!("gRPC server error: {}", e);
+                    error!("gRPC server error: {} | debug: {:#?}", e, e);
+                    let mut source = std::error::Error::source(&e);
+                    while let Some(s) = source {
+                        error!("  caused by: {}", s);
+                        source = s.source();
+                    }
                     Err(e)
                 } else {
                     info!("gRPC server shut down successfully");
@@ -119,7 +124,12 @@ impl GrpcServerManager {
                                 info!("Server completed successfully");
                             }
                             Ok(Err(e)) => {
-                                error!("Server error: {}", e);
+                                error!("Server error: {} | debug: {:#?}", e, e);
+                                let mut source = std::error::Error::source(&e);
+                                while let Some(s) = source {
+                                    error!("  caused by: {}", s);
+                                    source = s.source();
+                                }
                                 return Err(e.into());
                             }
                             Err(e) => {

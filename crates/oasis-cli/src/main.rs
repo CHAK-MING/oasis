@@ -4,10 +4,11 @@ mod commands;
 mod time;
 mod ui;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use console::style;
-use oasis_core::config::OasisConfig;
+
+use oasis_core::{config_strategies::CliConfigStrategy, config_strategy::ConfigStrategy};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,10 +22,11 @@ async fn main() -> Result<()> {
     }
 
     // 统一从 oasis.toml 加载配置
-    let cfg = OasisConfig::load_config(cli.config.as_deref())
-        .with_context(|| "无法加载 oasis.toml 配置文件，请检查文件是否存在或路径是否正确。")?;
+    let strategy = CliConfigStrategy::new(cli.config.as_deref().map(std::path::PathBuf::from));
 
-    if let Err(e) = client::run(cli, &cfg).await {
+    let config = strategy.load_initial_config().await?;
+
+    if let Err(e) = client::run(cli, &config).await {
         eprintln!("{} {:#}", style("错误:").red().bold(), e);
         std::process::exit(1);
     }

@@ -1,28 +1,41 @@
-# Oasis
+# Oasis 文档
 
 在 OpenCloudOS Stream 23/OpenCloudOS 9 上的大规模集群节点管理工具
 
 ## 快速开始
 
-1. 初始化（生成证书、配置与 docker-compose.yml）
-
+1. 构建项目
 ```bash
-./oasis-cli system init --output-dir .
+git clone <gitee_url> 
+cd oasis
+cargo build --release
 ```
 
-2. 启动 NATS
+2. 初始化（生成证书、配置与 docker-compose.yml）
+
+```bash
+./target/release/oasis-cli system init
+```
+
+3. 启动 NATS
 
 ```bash
 docker compose up -d
 ```
 
-3. 启动服务器
+4. 安装服务器
 
 ```bash
-./oasis-cli system start -d
+sudo ./target/release/oasis-cli system install
 ```
 
-4. 部署 Agent
+5. 启动服务器
+
+```bash
+sudo ./target/release/oasis-cli system start
+```
+
+6. 部署 Agent
 
 ```bash
 ./oasis-cli agent deploy \
@@ -43,33 +56,38 @@ sudo ./install.sh
 sudo systemctl status oasis-agent
 ```
 
-5. 执行命令并获取结果
+7. 查看部署的所有 Agent 状态
 
+```bash
+./target/release/oasis-cli agent list -t 'all'
+```
+
+8. 发布任务
 ```bash
 # 下发任务
-./oasis-cli exec run -t 'true' -- /bin/echo hello
+./target/release/oasis-cli exec run -t 'all' -- /bin/echo hello
 
 # 获取任务结果
-./oasis-cli exec get <batch_id>
+./target/release/oasis-cli exec get <batch_id>
 
 # 列出最近任务
-./oasis-cli exec list --limit 20
+./target/release/oasis-cli exec list --limit 20
 
 # 取消任务
-./oasis-cli exec cancel <batch_id>
+./target/release/oasis-cli exec cancel <batch_id>
 ```
 
-6. 查看系统状态与停止
+9. 查看系统状态与停止
 
 ```bash
-oasis-cli system status
-oasis-cli system stop
+sudo ./target/release/oasis-cli system status
+sudo ./target/release/oasis-cli system stop
 ```
 
-7. 移除 Agent
+10. 移除 Agent
 
 ```bash
-./oasis-cli agent remove \
+./target/release/oasis-cli agent remove \
   --ssh-target root@localhost \
   --agent-id agent123456
 ```
@@ -82,14 +100,23 @@ oasis-cli system stop
 # 初始化系统
 oasis-cli system init --force
 
-# 启动服务器（守护模式，日志重定向到文件）
-oasis-cli system start --daemon --log-file ./oasis-server.log
+# 安装服务器
+oasis-cli system install
+
+# 启动服务器
+oasis-cli system start
 
 # 查看状态
 oasis-cli system status
 
+# 重启服务器
+oasis-cli system restart
+
 # 停止服务器
 oasis-cli system stop
+
+# 查看日志
+oasis-cli system logs --lines 150
 ```
 
 ### exec：执行命令
@@ -102,7 +129,7 @@ oasis-cli exec run -t 'labels["role"] == "worker"' -- /usr/bin/uptime
 oasis-cli exec run -t 'system["hostname"] == "server-name"' -- /usr/bin/uptime
 
 # 下发任务（支持下发全部在线的 Agent）
-oasis-cli exec run -t 'true' -- /usr/bin/uptime
+oasis-cli exec run -t 'all' -- /usr/bin/uptime
 
 # 获取某任务结果
 oasis-cli exec get <batch_id>
@@ -221,3 +248,17 @@ not (labels["deprecated"] == "true" or system["os_name"] == "windows")
 # 混合条件
 "web-servers" in groups and labels["env"] == "prod" and not system["memory_total_gb"] == "1"
 ```
+
+## 系统标签（用于选择器查找）
+
+| 系统信息名 | 标签名          |
+| ---------- | --------------- |
+| 主机名     | hostname        |
+| 主 IP      | primary_ip      |
+| 架构       | cpu_arch        |
+| CPU 核数   | cpu_cores       |
+| 内存       | memory_total_gb |
+| OS         | os_name         |
+| OS 版本    | os_version      |
+| 内核       | kernel_version  |
+

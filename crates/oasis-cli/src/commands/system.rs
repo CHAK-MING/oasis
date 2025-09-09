@@ -1,11 +1,8 @@
 use crate::certificate::CertificateGenerator;
-use crate::ui::{print_header, print_info, print_status};
+use crate::ui::{print_header, print_status};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, command};
-use console::style;
-use std::fs::{OpenOptions, metadata};
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -13,16 +10,22 @@ use std::time::Duration;
     about = "管理 Oasis 系统",
     after_help = r#"示例：
   # 初始化 Oasis 系统
-  oasis-cli system init --force
+  oasis-cli system init
 
-  # 启动 Oasis 服务器（后台）
-  oasis-cli system start --daemon --log-file ./oasis-server.log
+  # 启动 Oasis 服务器
+  oasis-cli system start
 
   # 查看 Oasis 服务器状态
   oasis-cli system status
 
   # 停止 Oasis 服务器
   oasis-cli system stop
+
+  # 查看 Oasis 服务器日志
+  oasis-cli system logs
+
+  # 卸载 Oasis 服务器
+  oasis-cli system uninstall
 "#
 )]
 pub struct SystemArgs {
@@ -32,14 +35,24 @@ pub struct SystemArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SystemCmd {
-    /// 初始化 Oasis 系统（生成证书、创建配置与 docker-compose）
+    /// 初始化 Oasis 系统
     Init(InitArgs),
+    /// 安装 Oasis 服务器为 systemd 服务
+    Install(InstallArgs),
+    /// 启用 Oasis 服务器开机自启
+    Enable,
     /// 启动 Oasis 服务器
-    Start(StartArgs),
+    Start,
     /// 停止 Oasis 服务器
     Stop,
+    /// 重启 Oasis 服务器
+    Restart,
     /// 查看 Oasis 服务器状态
     Status,
+    /// 查看 Oasis 服务器日志
+    Logs(LogsArgs),
+    /// 卸载 Oasis 服务器
+    Uninstall,
 }
 
 #[derive(Parser, Debug)]
@@ -54,20 +67,34 @@ pub struct InitArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct StartArgs {
-    /// 以守护进程方式运行
-    #[arg(short, long)]
-    daemon: bool,
+pub struct InstallArgs {
+    #[arg(long)]
+    cfg_dir: Option<PathBuf>,
+    #[arg(long)]
+    server_bin: Option<PathBuf>,
+    #[arg(long, default_value = "root")]
+    user: String,
+    #[arg(long, default_value = "root")]
+    group: String,
+}
 
-    /// 将服务端日志重定向到指定文件（仅守护模式生效）
-    #[arg(long, value_name = "LOG_FILE", default_value = "oasis-server.log")]
-    log_file: String,
+#[derive(Parser, Debug)]
+pub struct LogsArgs {
+    #[arg(long, short = 'f')]
+    follow: bool,
+    #[arg(long, short = 'n', default_value_t = 200)]
+    lines: u32,
 }
 
 pub async fn run_system(args: SystemArgs) -> Result<()> {
     match args.cmd {
         SystemCmd::Init(init) => run_system_init(&init).await,
-        SystemCmd::Start(start) => run_system_start(&start).await,
+        SystemCmd::Install(install) => run_system_install(&install).await,
+        SystemCmd::Enable => run_system_enable().await,
+        SystemCmd::Start => run_system_start().await,
+        SystemCmd::Restart => run_system_restart().await,
+        SystemCmd::Logs(logs) => run_system_logs(&logs).await,
+        SystemCmd::Uninstall => run_system_uninstall().await,
         SystemCmd::Stop => run_system_stop().await,
         SystemCmd::Status => run_system_status().await,
     }
@@ -87,14 +114,18 @@ async fn run_system_init(args: &InitArgs) -> Result<()> {
 
     // 写入 docker-compose.yml
     println!("步骤 2: 创建 docker-compose.yml...");
+    let docker_compose_path = args.output_dir.join("docker-compose.yml");
+    if docker_compose_path.exists() && !args.force {
+        anyhow::bail!(
+            "{} 已存在。若需覆盖，请使用 --force",
+            docker_compose_path.display()
+        );
+    }
+    if docker_compose_path.exists() && args.force {
+        let _ = std::fs::remove_file(&docker_compose_path);
+    }
     create_docker_compose(&args.output_dir).await?;
     println!("✓ docker-compose.yml 创建完成");
-
-    // 记录最近一次 init 的目录
-    println!("步骤 3: 记录初始化标记...");
-    let marker = std::env::current_dir()?.join(".oasis_last_init");
-    std::fs::write(&marker, args.output_dir.to_string_lossy().as_bytes())?;
-    println!("✓ 初始化标记记录完成");
 
     println!();
     println!("🎉 初始化完成！接下来需要执行的操作:");
@@ -103,345 +134,155 @@ async fn run_system_init(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_system_start(args: &StartArgs) -> Result<()> {
-    print_header("正在启动 Oasis 服务器");
-    match run_start(args.daemon, &args.log_file).await {
-        Ok(started) => {
-            if started {
-                print_status("Oasis 服务器启动成功", true);
-                if args.daemon {
-                    let log_path = if args.log_file.starts_with('/') {
-                        PathBuf::from(args.log_file.clone())
-                    } else {
-                        let cfg_dir = find_config_dir()?;
-                        cfg_dir.join(args.log_file.clone())
-                    };
+async fn run_system_install(args: &InstallArgs) -> Result<()> {
+    print_header("安装 Oasis Server 为 systemd 服务");
+    let cfg_dir = if let Some(d) = &args.cfg_dir {
+        d.clone()
+    } else {
+        std::env::current_dir()?
+    };
+    let server_bin = if let Some(b) = &args.server_bin {
+        b.clone()
+    } else if let Ok(p) = which::which("oasis-server") {
+        p
+    } else {
+        anyhow::bail!("未找到 oasis-server 可执行文件，请通过 --server-bin 指定或加入 PATH")
+    };
 
-                    print_info(&format!("后台日志: {}", log_path.display()));
-                } else {
-                    print_info("当前以前台模式运行，按 Ctrl+C 可停止");
-                }
-            }
-            Ok(())
-        }
-        Err(e) => {
-            print_status(&format!("Oasis 服务器启动失败: {}", e), false);
-            Err(e)
-        }
-    }
+    // 规范化为绝对路径，避免 systemd 的 bad-setting（ExecStart 必须为绝对路径）
+    let cfg_dir_abs = cfg_dir
+        .canonicalize()
+        .with_context(|| format!("无法解析 cfg_dir 路径: {}", cfg_dir.display()))?;
+    let server_bin_abs = server_bin
+        .canonicalize()
+        .with_context(|| format!("无法解析 server_bin 路径: {}", server_bin.display()))?;
+
+    let unit = format!(
+        r#"[Unit]
+Description=Oasis Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={wd}
+ExecStart={bin} --config oasis.toml
+User={user}
+Group={group}
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        wd = cfg_dir_abs.display(),
+        bin = server_bin_abs.display(),
+        user = args.user,
+        group = args.group,
+    );
+
+    let unit_path = PathBuf::from("/etc/systemd/system/oasis-server.service");
+    std::fs::write(&unit_path, unit)
+        .with_context(|| format!("无法写入 {}", unit_path.display()))?;
+    run_sysctl(["daemon-reload"]).await?;
+    print_status("systemd 单元已安装 (daemon-reload)", true);
+    Ok(())
+}
+
+async fn run_system_enable() -> Result<()> {
+    run_sysctl(["enable", "oasis-server"]).await?;
+    print_status("服务已启用开机自启", true);
+    Ok(())
+}
+
+async fn run_system_start() -> Result<()> {
+    run_sysctl(["start", "oasis-server"]).await?;
+    print_status("Oasis 服务器启动成功", true);
+    Ok(())
 }
 
 async fn run_system_stop() -> Result<()> {
-    print_header("正在停止 Oasis 服务器");
-    match run_stop().await {
-        Ok(_) => {
-            print_status("Oasis 服务器已停止", true);
-            Ok(())
-        }
-        Err(e) => {
-            print_status(&format!("停止服务器失败: {}", e), false);
-            Err(e)
-        }
-    }
+    run_sysctl(["stop", "oasis-server"]).await?;
+    print_status("Oasis 服务器已停止", true);
+    Ok(())
+}
+
+async fn run_system_restart() -> Result<()> {
+    run_sysctl(["restart", "oasis-server"]).await?;
+    print_status("Oasis 服务器已重启", true);
+    Ok(())
 }
 
 async fn run_system_status() -> Result<()> {
-    let cfg_dir = find_config_dir()?;
-    let state = load_server_state(&cfg_dir);
-    let running = state
-        .as_ref()
-        .map(|s| s.pid)
-        .map(pid_alive)
-        .unwrap_or(false);
-    if !running {
-        print_status("Oasis 服务器未运行", false);
-    } else {
-        let state = state.expect("State should be available");
-        let pid = state.pid;
-        let uptime = chrono::Utc::now().timestamp() - state.started_at;
-        let uptime_str = if uptime < 60 {
-            format!("{}秒", uptime)
-        } else if uptime < 3600 {
-            format!("{}分钟", uptime / 60)
-        } else {
-            format!("{}小时{}分钟", uptime / 3600, (uptime % 3600) / 60)
-        };
-        print_status(
-            &format!(
-                "Oasis 服务器正在运行 (PID: {}, 运行时间: {})",
-                pid, uptime_str
-            ),
-            true,
-        );
-    }
-    Ok(())
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct ServerState {
-    pid: u32,
-    cfg_dir: String,
-    log_file: String,
-    certs_fingerprint: String,
-    started_at: i64,
-}
-
-fn statefile_path(cfg_dir: &std::path::Path) -> std::path::PathBuf {
-    cfg_dir.join("oasis-server.state.json")
-}
-
-fn load_server_state(cfg_dir: &std::path::Path) -> Option<ServerState> {
-    let path = statefile_path(cfg_dir);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<ServerState>(&s).ok())
-}
-
-fn save_server_state(cfg_dir: &std::path::Path, state: &ServerState) -> Result<()> {
-    let path = statefile_path(cfg_dir);
-    let temp_path = path.with_extension("tmp");
-
-    // 先写入临时文件
-    std::fs::write(
-        &temp_path,
-        serde_json::to_string_pretty(state).unwrap_or_else(|_| "{}".to_string()),
-    )?;
-
-    // 原子性地重命名临时文件
-    std::fs::rename(&temp_path, &path)?;
-
-    Ok(())
-}
-
-fn clear_server_state(cfg_dir: &std::path::Path) -> Result<()> {
-    let path = statefile_path(cfg_dir);
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
+    print_header("oasis-server 状态");
+    let status = std::process::Command::new("systemctl")
+        .args(["status", "oasis-server", "--no-pager"])
         .status()
-        .map(|st| st.success())
-        .unwrap_or(false)
+        .context("无法执行 systemctl status")?;
+    if !status.success() {
+        print_status("服务未运行或获取状态失败", false);
+    }
+    Ok(())
 }
 
-fn compute_certs_fingerprint(
-    cfg: &oasis_core::config::OasisConfig,
-    cfg_dir: &std::path::Path,
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let paths = [
-        &cfg.tls.nats_ca_path(),
-        &cfg.tls.nats_client_cert_path(),
-        &cfg.tls.nats_client_key_path(),
-        &cfg.tls.grpc_ca_path(),
-        &cfg.tls.grpc_server_cert_path(),
-        &cfg.tls.grpc_server_key_path(),
-        &cfg.tls.grpc_client_cert_path(),
-        &cfg.tls.grpc_client_key_path(),
-    ];
-    let mut hasher = DefaultHasher::new();
-    for p in paths.iter() {
-        let p = p.as_path();
-        let resolved = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            cfg_dir.join(p)
-        };
-        let meta_opt = std::fs::metadata(&resolved).ok();
-        let modified = meta_opt
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let len = meta_opt.as_ref().map(|m| m.len()).unwrap_or(0);
-        resolved.to_string_lossy().hash(&mut hasher);
-        modified.hash(&mut hasher);
-        len.hash(&mut hasher);
+async fn run_system_logs(args: &LogsArgs) -> Result<()> {
+    let mut cmd = std::process::Command::new("journalctl");
+    cmd.args([
+        "-u",
+        "oasis-server",
+        "--no-pager",
+        "-n",
+        &args.lines.to_string(),
+    ]);
+    if args.follow {
+        cmd.arg("-f");
     }
-    format!("{:x}", hasher.finish())
+    let status = cmd.status().context("无法执行 journalctl")?;
+    if !status.success() {
+        anyhow::bail!("journalctl 返回非零状态码");
+    }
+    Ok(())
 }
 
-fn find_config_dir() -> Result<PathBuf> {
-    // 1. 检查环境变量
-    if let Ok(dir) = std::env::var("OASIS_CONFIG_DIR") {
-        let path = PathBuf::from(dir);
-        if path.join("oasis.toml").exists() {
-            return Ok(path);
-        }
+async fn run_system_uninstall() -> Result<()> {
+    let unit_path = PathBuf::from("/etc/systemd/system/oasis-server.service");
+    let _ = std::process::Command::new("systemctl")
+        .args(["disable", "oasis-server"])
+        .status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["stop", "oasis-server"])
+        .status();
+    if unit_path.exists() {
+        std::fs::remove_file(&unit_path)
+            .with_context(|| format!("无法删除 {}", unit_path.display()))?;
     }
-
-    // 2. 检查标记文件
-    let cwd = std::env::current_dir()?;
-    let marker = cwd.join(".oasis_last_init");
-    if let Ok(path_str) = std::fs::read_to_string(&marker) {
-        let path = PathBuf::from(path_str.trim());
-        if path.join("oasis.toml").exists() {
-            return Ok(path);
-        }
-    }
-
-    // 3. 检查当前目录
-    if cwd.join("oasis.toml").exists() {
-        return Ok(cwd);
-    }
-
-    // 4. 如果都没找到，返回当前目录（用于 init）
-    Ok(cwd)
+    run_sysctl(["daemon-reload"]).await?;
+    print_status("服务已卸载", true);
+    Ok(())
 }
 
-async fn run_start(daemon: bool, log_file: &str) -> Result<bool> {
-    // 检查 NATS 是否运行
-    if !check_nats_running().await? {
-        anyhow::bail!("未检测到 NATS 运行，请先执行 `docker compose up -d`");
+async fn run_sysctl<I, S>(args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut cmd = std::process::Command::new("systemctl");
+    for a in args {
+        cmd.arg(a.as_ref());
     }
-
-    // 查找服务器进程（通过 statefile），如果已运行则无需启动
-    let cfg_dir = find_config_dir()?;
-    if let Some(s) = load_server_state(&cfg_dir) {
-        if pid_alive(s.pid) {
-            println!(
-                "  {} {}",
-                style("ℹ").yellow(),
-                style("服务器已在运行中，无需重复启动").yellow()
-            );
-            return Ok(false);
-        } else {
-            // 清理无效 state
-            clear_server_state(&cfg_dir)?;
-        }
-    }
-
-    let server_bin = find_server_binary()?;
-
-    let mut cmd = std::process::Command::new(&server_bin);
-    cmd.current_dir(&cfg_dir);
-    cmd.arg("--config").arg("oasis.toml");
-
-    if daemon {
-        // 将服务端 stdout/stderr 重定向到日志文件
-        let log_path = if log_file.starts_with('/') {
-            PathBuf::from(log_file)
-        } else {
-            let rel = log_file.strip_prefix("./").unwrap_or(log_file);
-            cfg_dir.join(rel)
-        };
-
-        // 轮转日志：超过 10MB 时按时间戳滚动，最多保留 5 个历史文件
-        rotate_log_file(&log_path, 10 * 1024 * 1024, 5)?;
-
-        let logfile = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("无法打开日志文件: {}", log_path.display()))?;
-        let logfile_err = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("无法打开日志文件: {}", log_path.display()))?;
-        // 彻底脱离终端：关闭子进程标准输入
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(logfile);
-        cmd.stderr(logfile_err);
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("无法以守护进程模式启动服务器: {}", server_bin.display()))?;
-        // 记录 statefile
-        let cfg_path = cfg_dir.join("oasis.toml");
-        let cfg = oasis_core::config::OasisConfig::load_config(Some(
-            cfg_path.to_string_lossy().as_ref(),
-        ))?;
-        let fingerprint = compute_certs_fingerprint(&cfg, &cfg_dir);
-        let state = ServerState {
-            pid: child.id(),
-            cfg_dir: cfg_dir.to_string_lossy().to_string(),
-            log_file: log_path.to_string_lossy().to_string(),
-            certs_fingerprint: fingerprint,
-            started_at: chrono::Utc::now().timestamp(),
-        };
-        save_server_state(&cfg_dir, &state)?;
-    } else {
-        let status = cmd
-            .status()
-            .with_context(|| format!("无法以前台模式启动服务器: {}", server_bin.display()))?;
-        if !status.success() {
-            anyhow::bail!("服务器进程异常退出，状态码: {}", status);
-        }
-    }
-
-    Ok(true)
-}
-
-async fn run_stop() -> Result<()> {
-    let cfg_dir = find_config_dir()?;
-    let state = load_server_state(&cfg_dir);
-    let pid = state.as_ref().map(|s| s.pid).filter(|pid| pid_alive(*pid));
-    if pid.is_none() {
-        println!(
-            "  {} {}",
-            style("ℹ").yellow(),
-            style("未发现服务器进程").yellow()
-        );
-        return Ok(());
-    }
-
-    if let Some(pid) = pid {
-        // 优雅停止
-        let status = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(&pid.to_string())
-            .status()
-            .context("发送 SIGTERM 信号失败")?;
-
-        if !status.success() {
-            anyhow::bail!("发送 SIGTERM 信号到进程 {} 失败", pid);
-        }
-
-        // 等待进程退出（最多 5 秒），否则升级为 SIGKILL
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            // kill -0 检查是否仍存活
-            let alive = std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .status()
-                .map(|st| st.success())
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                // 强制杀死
-                let _ = std::process::Command::new("kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .status();
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        clear_server_state(&cfg_dir)?;
-        println!("  {} {}", style("✔").green(), style("服务器已停止").green());
+    let status = cmd.status().context("无法执行 systemctl")?;
+    if !status.success() {
+        anyhow::bail!("systemctl 返回非零状态码");
     }
     Ok(())
 }
 
 async fn create_docker_compose(output_dir: &PathBuf) -> Result<()> {
     let docker_compose_path = output_dir.join("docker-compose.yml");
-    // Ensure data directories exist
     let nats_data_dir = output_dir.join("data").join("nats");
     std::fs::create_dir_all(&nats_data_dir)?;
 
-    // Generate docker-compose with NATS (no direct host ports)
     let content = r#"services:
   oasis-nats:
     image: nats:2.10-alpine
@@ -482,154 +323,8 @@ networks:
     driver: bridge
 "#;
 
-    // Write compose file
+    // 写入 compose 文件
     std::fs::write(&docker_compose_path, content)?;
 
-    Ok(())
-}
-
-async fn check_nats_running() -> Result<bool> {
-    // 1. 检查容器是否存在
-    let output = std::process::Command::new("docker")
-        .args(&[
-            "ps",
-            "--filter",
-            "name=oasis-nats",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .context("Failed to check NATS container")?;
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    if output_str.trim() != "oasis-nats" {
-        return Ok(false);
-    }
-
-    // 2. 检查 8222 监控端口是否可达（避免触发 TLS EOF）
-    for attempt in 1..=3 {
-        match tokio::net::TcpStream::connect("127.0.0.1:8222").await {
-            Ok(_) => return Ok(true),
-            Err(_) => {
-                if attempt < 3 {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        }
-    }
-
-    // 3. 如果端口检查失败，尝试通过 docker exec 检查容器内部状态
-    let status_output = std::process::Command::new("docker")
-        .args(&["exec", "oasis-nats", "pgrep", "-f", "nats-server"])
-        .output();
-
-    Ok(status_output.map(|o| o.status.success()).unwrap_or(false))
-}
-
-#[allow(dead_code)]
-async fn check_certificates_exist() -> Result<bool> {
-    let cfg_dir = find_config_dir()?;
-    let cfg_path = cfg_dir.join("oasis.toml");
-    let cfg =
-        oasis_core::config::OasisConfig::load_config(Some(cfg_path.to_string_lossy().as_ref()))?;
-    let paths = [
-        cfg.tls.nats_ca_path(),
-        cfg.tls.nats_client_cert_path(),
-        cfg.tls.nats_client_key_path(),
-        cfg.tls.grpc_ca_path(),
-        cfg.tls.grpc_server_cert_path(),
-        cfg.tls.grpc_server_key_path(),
-        cfg.tls.grpc_client_cert_path(),
-        cfg.tls.grpc_client_key_path(),
-    ];
-
-    for p in paths {
-        let resolved = if p.is_absolute() {
-            p.clone()
-        } else {
-            cfg_dir.join(p)
-        };
-        if !resolved.exists() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn find_server_binary() -> Result<PathBuf> {
-    // 1. 检查环境变量
-    if let Ok(bin_path) = std::env::var("OASIS_SERVER_BIN") {
-        let path = PathBuf::from(bin_path);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // 2. 检查 PATH 中的 oasis-server
-    if let Ok(path) = which::which("oasis-server") {
-        return Ok(path);
-    }
-
-    // 3. 检查 target 目录
-    let cwd = std::env::current_dir()?;
-    let candidates = [
-        cwd.join("target/release/oasis-server"),
-        cwd.join("target/debug/oasis-server"),
-    ];
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
-        }
-    }
-
-    anyhow::bail!(
-        "未找到 oasis-server 二进制文件。请尝试:\n  1. 在项目根目录执行 `cargo build -p oasis-server`\n  2. 将 `oasis-server` 路径加入到 PATH 环境变量\n  3. 设置 OASIS_SERVER_BIN 环境变量指向正确的二进制文件路径"
-    )
-}
-
-/// 简单的按大小轮转日志
-/// 超过 max_bytes 时，将现有日志重命名为 filename.YYYYmmdd-HHMMSS，最多保留 max_files 个
-fn rotate_log_file(path: &PathBuf, max_bytes: u64, max_files: usize) -> Result<()> {
-    // 若不存在或未超限，直接返回
-    if let Ok(meta) = metadata(path) {
-        if meta.len() <= max_bytes {
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    }
-
-    // 构造带时间戳的新文件名
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let rotated = path.with_extension(format!("log.{}", ts));
-    std::fs::rename(path, &rotated).with_context(|| format!("无法轮转日志: {}", path.display()))?;
-
-    // 清理多余历史日志
-    if let Some(parent) = path.parent() {
-        let stem = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        let mut rotated_files: Vec<_> = std::fs::read_dir(parent)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name();
-                let s = name.to_string_lossy();
-                s.starts_with(&stem) && s != stem
-            })
-            .collect();
-        rotated_files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
-        // 保留最新 max_files 个
-        if rotated_files.len() > max_files {
-            let to_delete = rotated_files.len() - max_files;
-            for i in 0..to_delete {
-                if let Some(entry) = rotated_files.get(i) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
     Ok(())
 }

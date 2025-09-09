@@ -224,18 +224,37 @@ impl SelectorEngine {
     ) -> CoreResult<RoaringBitmap> {
         if self.cache_config.enable_cache {
             if let Some(cached_bitmap) = self.get_cached_result(cache_key).await? {
-                debug!("Cache hit for key: {}", cache_key);
+                debug!(
+                    "Cache hit for key: {} (len={})",
+                    cache_key,
+                    cached_bitmap.len()
+                );
                 return Ok(cached_bitmap);
             }
         }
 
+        let t0 = std::time::Instant::now();
         let bitmap = self.evaluate_to_bitmap(expression)?;
+        let elapsed = t0.elapsed();
+        debug!(
+            "selector_evaluate elapsed={}ms size={}",
+            elapsed.as_millis(),
+            bitmap.len()
+        );
 
-        if self.cache_config.enable_cache {
+        // 不缓存空结果，避免在系统刚启动时把空查询结果缓存太久
+        if self.cache_config.enable_cache && !bitmap.is_empty() {
             if let Err(e) = self.cache_result(cache_key, &bitmap).await {
                 warn!(
                     "Failed to cache query result for key '{}': {}",
                     cache_key, e
+                );
+            } else {
+                debug!(
+                    "Cached key={} size={} ttl={}s",
+                    cache_key,
+                    bitmap.len(),
+                    self.cache_config.ttl_seconds
                 );
             }
         }

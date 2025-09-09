@@ -39,7 +39,7 @@ pub const FILES_SUBJECT_PREFIX: &str = "files";
 
 // 统一管理的消费者命名常量
 pub const DEFAULT_CONSUMER_NAME: &str = "oasis-workers-default-new";
-pub const UNICAST_CONSUMER_PREFIX_VERSION: &str = "v2";
+pub const UNICAST_CONSUMER_PREFIX_VERSION: &str = "v1";
 pub const UNICAST_CONSUMER_PREFIX: &str = "oasis-agent-"; // 最终名称将携带版本
 
 use crate::core_types::{AgentId, TaskId};

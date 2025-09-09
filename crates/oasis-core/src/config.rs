@@ -1,17 +1,10 @@
-//! The unified configuration module for the entire Oasis application.
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The unified configuration for the Oasis application.
-/// This structure is loaded from the oasis.toml file.
+/// 整个 Oasis 统一配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OasisConfig {
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr: String,
-    #[serde(default = "default_data_dir")]
-    pub data_dir: PathBuf,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
@@ -22,8 +15,6 @@ pub struct OasisConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub server: ServerConfig,
-    #[serde(default)]
-    pub agent: AgentConfig,
 }
 
 impl OasisConfig {
@@ -64,52 +55,22 @@ impl OasisConfig {
         // 解析相对路径
         cfg.resolve_relative_paths(&base_dir);
 
-        // 验证配置
-        cfg.validate()?;
         Ok(cfg)
     }
 
-    /// 验证配置参数的有效性
-    pub fn validate(&self) -> Result<(), anyhow::Error> {
-        // 验证监听地址格式
-        if let Err(_) = self.listen_addr.parse::<std::net::SocketAddr>() {
-            return Err(anyhow::anyhow!(
-                "Invalid listen_addr format: {}",
-                self.listen_addr
-            ));
-        }
+  
 
-        // 验证 Agent 相关配置
-        if self.agent.heartbeat_interval_sec < 5 || self.agent.heartbeat_interval_sec > 300 {
-            return Err(anyhow::anyhow!(
-                "heartbeat_interval_sec must be between 5 and 300"
-            ));
+    pub fn build_grpc_url(&self) -> Result<String, anyhow::Error> {
+        let url = self.grpc.url.trim().to_string();
+        // 这里是TLS 连接，必须是输入 https，否则返回错误
+        if !url.starts_with("https://") {
+            return Err(anyhow::anyhow!("gRPC URL 必须是 https:// 开头的"));
         }
-
-        if self.agent.fact_collection_interval_sec < 30
-            || self.agent.fact_collection_interval_sec > 3600
-        {
-            return Err(anyhow::anyhow!(
-                "fact_collection_interval_sec must be between 30 and 3600"
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// 构建 gRPC URL，支持 IPv6 地址
-    pub fn build_grpc_url(&self) -> String {
-        if self.listen_addr.contains('[') && self.listen_addr.contains(']') {
-            // IPv6 地址，保持方括号格式
-            format!("https://{}", self.listen_addr)
-        } else {
-            // IPv4 地址或主机名
-            format!("https://{}", self.listen_addr)
-        }
+        Ok(url)
     }
 }
 
-/// Telemetry configuration.
+/// 遥测配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
@@ -121,11 +82,11 @@ pub struct TelemetryConfig {
     pub log_no_ansi: bool,
 }
 
-/// NATS configuration.
+/// NATS 配置
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
-    /// NATS server URL
+    /// NATS 服务器 URL
     #[serde(default = "default_nats_url")]
     pub url: String,
 }
@@ -138,7 +99,7 @@ impl Default for NatsConfig {
     }
 }
 
-/// gRPC configuration (shared by server listen and agent connect URL)
+/// gRPC 配置 (服务器监听和代理连接 URL 共享)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcConfig {
@@ -154,11 +115,11 @@ impl Default for GrpcConfig {
     }
 }
 
-/// TLS configuration with fixed certificate paths.
+/// TLS 配置
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
-    /// Certificate root directory
+    /// 证书根目录
     #[serde(default = "default_certs_dir")]
     pub certs_dir: PathBuf,
 }
@@ -172,73 +133,59 @@ impl Default for TlsConfig {
 }
 
 impl TlsConfig {
-    /// Get NATS CA certificate path
+    /// 获取 NATS CA 证书路径
     pub fn nats_ca_path(&self) -> PathBuf {
         self.certs_dir.join("nats-ca.pem")
     }
 
-    /// Get NATS client certificate path
+    /// 获取 NATS 客户端证书路径
     pub fn nats_client_cert_path(&self) -> PathBuf {
         self.certs_dir.join("nats-client.pem")
     }
 
-    /// Get NATS client key path
+    /// 获取 NATS 客户端密钥路径
     pub fn nats_client_key_path(&self) -> PathBuf {
         self.certs_dir.join("nats-client-key.pem")
     }
 
-    /// Get gRPC CA certificate path
+    /// 获取 gRPC CA 证书路径
     pub fn grpc_ca_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-ca.pem")
     }
 
-    /// Get gRPC server certificate path
+    /// 获取 gRPC 服务器证书路径
     pub fn grpc_server_cert_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-server.pem")
     }
 
-    /// Get gRPC server key path
+    /// 获取 gRPC 服务器密钥路径
     pub fn grpc_server_key_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-server-key.pem")
     }
 
-    /// Get gRPC client certificate path
+    /// 获取 gRPC 客户端证书路径
     pub fn grpc_client_cert_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-client.pem")
     }
 
-    /// Get gRPC client key path
+    /// 获取 gRPC 客户端密钥路径
     pub fn grpc_client_key_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-client-key.pem")
     }
 }
 
-/// Server-specific configuration.
+/// 服务器特定配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
     #[serde(default = "default_heartbeat_ttl")]
     pub heartbeat_ttl_sec: u64,
 }
 
-/// Agent-specific configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AgentConfig {
-    #[serde(default = "default_heartbeat_interval")]
-    pub heartbeat_interval_sec: u64,
-    #[serde(default = "default_fact_collection_interval")]
-    pub fact_collection_interval_sec: u64,
-}
-
-// --- Default value functions ---
-
 fn default_listen_addr() -> String {
     "127.0.0.1:50051".to_string()
-}
-
-fn default_data_dir() -> PathBuf {
-    std::env::temp_dir().join("oasis")
 }
 
 fn default_log_level() -> String {
@@ -269,24 +216,15 @@ fn default_grpc_url() -> String {
     "https://127.0.0.1:50051".to_string()
 }
 
-fn default_heartbeat_interval() -> u64 {
-    30
-}
-
-fn default_fact_collection_interval() -> u64 {
-    300
-}
-
 impl OasisConfig {
     pub fn resolve_relative_paths(&mut self, base_dir: &std::path::Path) {
-        // Helper to make path absolute if it's relative
+        // 辅助函数，如果路径是相对的，则将其转换为绝对路径
         fn make_absolute(path: &mut PathBuf, base: &std::path::Path) {
             if path.is_relative() {
                 *path = base.join(&*path);
             }
         }
 
-        make_absolute(&mut self.data_dir, base_dir);
         make_absolute(&mut self.tls.certs_dir, base_dir);
     }
 }

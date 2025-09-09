@@ -395,11 +395,13 @@ async fn run_rollout_rollback(
 fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrategyMsg> {
     use oasis_core::proto::*;
 
-    if let Some(percentage_part) = strategy_str.strip_prefix("percentage:") {
-        let stages: Result<Vec<u32>, _> = percentage_part
-            .split(',')
-            .map(|s| s.trim().parse::<u32>())
-            .collect();
+    let re_pct = regex::Regex::new(r"(?i)^percentage:(\d+(?:,\d+)*)$").unwrap();
+    let re_cnt = regex::Regex::new(r"(?i)^count:(\d+(?:,\d+)*)$").unwrap();
+
+    if let Some(caps) = re_pct.captures(strategy_str.trim()) {
+        let list = caps.get(1).unwrap().as_str();
+        let stages: Result<Vec<u32>, _> =
+            list.split(',').map(|s| s.trim().parse::<u32>()).collect();
 
         match stages {
             Ok(stages) => {
@@ -414,11 +416,10 @@ fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrate
             }
             Err(_) => Err(anyhow!("无效的百分比格式")),
         }
-    } else if let Some(count_part) = strategy_str.strip_prefix("count:") {
-        let stages: Result<Vec<u32>, _> = count_part
-            .split(',')
-            .map(|s| s.trim().parse::<u32>())
-            .collect();
+    } else if let Some(caps) = re_cnt.captures(strategy_str.trim()) {
+        let list = caps.get(1).unwrap().as_str();
+        let stages: Result<Vec<u32>, _> =
+            list.split(',').map(|s| s.trim().parse::<u32>()).collect();
 
         match stages {
             Ok(stages) => Ok(RolloutStrategyMsg {

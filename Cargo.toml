@@ -1,3 +1,10 @@
+[package]
+name = "oasis"
+version = "0.1.0"
+edition = "2024"
+description = "OpenCloudOS大规模集群节点管理工具"
+
+
 [workspace]
 members = [
   "crates/oasis-core",
@@ -49,7 +56,7 @@ sha2 = "0.10"
 tokio-stream = "0.1"
 tokio-util = "0.7"
 url = "2.5"
-regex = "1.10"
+regex = { version = "1", default-features = false, features = ["std"] }
 base64 = "0.21"
 once_cell = "1.19"
 lazy_static = "1.5.0"

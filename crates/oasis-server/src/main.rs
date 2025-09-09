@@ -9,10 +9,10 @@ use crate::infrastructure::bootstrap::Bootstrap;
 
 #[derive(Parser)]
 #[command(name = "oasis-server")]
-#[command(about = "Oasis Server - DDD-based cluster management server")]
+#[command(about = "Oasis Server 大规模集群节点管理服务器")]
 #[command(version)]
 struct Args {
-    /// Path to the configuration file
+    /// 配置文件路径
     #[arg(short, long, value_name = "FILE")]
     config: Option<String>,
 }

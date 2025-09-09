@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tracing::{info};
 
-/// TLS service for managing certificates and TLS configuration
+/// TLS 服务
 pub struct TlsService {
     config: TlsConfig,
     tls_config: Arc<RwLock<Option<ServerTlsConfig>>>,
@@ -16,7 +16,7 @@ pub struct TlsService {
 }
 
 impl TlsService {
-    /// Create a new TLS service
+    /// 创建一个新的 TLS 服务
     pub fn new(config: TlsConfig, reload_notifier: broadcast::Sender<()>) -> Self {
         Self {
             config,
@@ -25,7 +25,7 @@ impl TlsService {
         }
     }
 
-    /// Create a new TLS service with file paths
+    /// 创建一个新的 TLS 服务
     pub async fn new_with_paths(
         cert_path: std::path::PathBuf,
     ) -> Result<Self> {
@@ -37,13 +37,13 @@ impl TlsService {
         let (reload_tx, _) = broadcast::channel(1);
         let service = Self::new(config, reload_tx);
 
-        // Load certificates
+        // 加载证书
         service.load_certificates().await?;
 
         Ok(service)
     }
 
-    /// Load certificates from files
+    /// 从文件加载证书
     pub async fn load_certificates(&self) -> Result<(), anyhow::Error> {
         let server_cert_path = self.config.grpc_server_cert_path();
         let server_key_path = self.config.grpc_server_key_path();
@@ -56,7 +56,7 @@ impl TlsService {
             "Loading TLS certificates..."
         );
 
-        // Load server certificate and private key
+        // 加载服务器证书和私钥
         let server_cert = self
             .load_certificate(&server_cert_path.to_string_lossy())
             .await?;
@@ -64,13 +64,13 @@ impl TlsService {
             .load_private_key(&server_key_path.to_string_lossy())
             .await?;
 
-        // Create server identity
+        // 创建服务器身份
         let identity = Identity::from_pem(server_cert, server_key);
 
-        // Create TLS configuration
+        // 创建 TLS 配置
         let mut tls_config = ServerTlsConfig::new().identity(identity);
 
-        // Load CA certificate for client verification
+        // 加载 CA 证书用于客户端验证
         let ca_cert_data = self
             .load_certificate(&ca_cert_path.to_string_lossy())
             .await?;
@@ -78,7 +78,7 @@ impl TlsService {
         tls_config = tls_config.client_ca_root(ca_cert);
         info!("mTLS enabled - client certificates required");
 
-        // Store the TLS configuration
+        // 存储 TLS 配置
         {
             let mut tls_config_guard = self.tls_config.write().await;
             *tls_config_guard = Some(tls_config);
@@ -88,31 +88,19 @@ impl TlsService {
         Ok(())
     }
 
-    /// Get TLS reload receiver for monitoring certificate changes
+    /// 获取 TLS 重新加载接收器用于监控证书变化
     pub fn get_reload_receiver(&self) -> broadcast::Receiver<()> {
         self.reload_notifier.subscribe()
     }
 
-    /// Reload certificates (for hot reload)
-    // pub async fn reload_certificates(&self) -> Result<(), anyhow::Error> {
-    //     info!("Reloading TLS certificates...");
-    //     self.load_certificates().await?;
 
-    //     // Notify listeners that certificates have been reloaded
-    //     if self.reload_notifier.send(()).is_err() {
-    //         warn!("No active listeners for TLS reload notifications.");
-    //     }
-
-    //     Ok(())
-    // }
-
-    /// Get current ServerTlsConfig clone if available
+    /// 获取当前 ServerTlsConfig 克隆如果可用
     pub async fn get_server_tls_config(&self) -> Option<ServerTlsConfig> {
         let guard = self.tls_config.read().await;
         guard.clone()
     }
 
-    /// Load certificate from file
+    /// 从文件加载证书
     async fn load_certificate(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
         let cert_path = PathBuf::from(path);
         if !cert_path.exists() {
@@ -127,7 +115,7 @@ impl TlsService {
         })
     }
 
-    /// Load private key from file
+    /// 从文件加载私钥
     async fn load_private_key(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
         let key_path = PathBuf::from(path);
         if !key_path.exists() {
@@ -141,28 +129,6 @@ impl TlsService {
             anyhow::Error::msg(format!("Failed to read private key file {}: {}", path, e))
         })
     }
-
-    // /// Start certificate monitoring for hot reload
-    // pub async fn start_certificate_monitoring(&self) -> Result<(), anyhow::Error> {
-    //     // Hardcoded check interval: 300 seconds (5 minutes)
-    //     let check_interval = Duration::from_secs(300);
-
-    //     let service_clone = self.clone();
-
-    //     tokio::spawn(async move {
-    //         let mut interval = interval(check_interval);
-    //         loop {
-    //             interval.tick().await;
-
-    //             if let Err(e) = service_clone.reload_certificates().await {
-    //                 error!("Failed to reload certificates: {}", e);
-    //             }
-    //         }
-    //     });
-
-    //     info!("Certificate monitoring started with interval 300s");
-    //     Ok(())
-    // }
 }
 
 impl Clone for TlsService {

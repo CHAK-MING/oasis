@@ -1,67 +1,67 @@
-//! Configuration strategy module for different runtime environments.
+//! 不同运行环境的配置策略模块。
 //!
-//! This module provides a unified interface for loading and managing configuration
-//! across different components (Server, Agent, CLI) with their specific requirements.
+//! 本模块为不同组件（Server、Agent、CLI）提供统一的配置加载与管理接口，
+//! 以满足各自的运行需求。
 
 use crate::config::OasisConfig;
 use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 
-/// Configuration strategy trait for different runtime environments.
+/// 不同运行环境的配置策略接口。
 ///
-/// Each component (Server, Agent, CLI) can implement this trait to define
-/// how it loads and manages configuration according to its specific needs.
+/// 每个组件（Server、Agent、CLI）都可以实现该接口，
+/// 以定义如何根据其特定需求加载与管理配置。
 #[async_trait::async_trait]
 pub trait ConfigStrategy: Send + Sync {
-    /// Load initial configuration for the component.
+    /// 加载组件的初始配置。
     ///
-    /// This method should handle the specific configuration loading logic
-    /// for the component (e.g., file-based for Server, env-var-based for Agent).
+    /// 该方法应处理组件的具体配置加载逻辑
+    /// （例如：Server 基于文件，Agent 基于环境变量）。
     async fn load_initial_config(&self) -> Result<OasisConfig>;
 
-    /// Whether this strategy supports hot reloading of configuration.
+    /// 是否支持配置热重载。
     ///
-    /// - Server: true (supports SIGHUP and file watching)
-    /// - Agent: false (configuration changes require restart)
-    /// - CLI: false (configuration is loaded fresh each time)
+    /// - Server：true（支持 SIGHUP 与文件监听）
+    /// - Agent：false（配置变更需要重启）
+    /// - CLI：false（每次运行重新加载配置）
     fn supports_hot_reload(&self) -> bool {
         false
     }
 
-    /// Start hot reload monitoring if supported.
+    /// 若支持，启动配置热重载监听。
     ///
-    /// Returns a receiver for configuration change events.
-    /// If hot reload is not supported, returns an error.
+    /// 返回一个用于接收配置变更事件的接收端。
+    /// 若不支持热重载，则返回错误。
     async fn start_hot_reload(&self) -> Result<broadcast::Receiver<ConfigChangeEvent>> {
         Err(anyhow::anyhow!("Hot reload not supported by this strategy"))
     }
 
-    /// Validate configuration for this specific runtime environment.
+    /// 针对特定运行环境校验配置。
     ///
-    /// This allows each component to perform environment-specific validation
-    /// (e.g., Agent must have agent_id, Server must have valid TLS certs).
+    /// 允许每个组件执行环境相关的校验
+    /// （例如：Agent 必须具备 agent_id，Server 必须持有有效 TLS 证书）。
     async fn validate_config(&self, config: &OasisConfig) -> Result<()>;
 
-    /// Get the name of this configuration strategy.
+    /// 获取该配置策略的名称。
     fn strategy_name(&self) -> &'static str;
 }
 
-/// Configuration change event for hot reloading.
+/// 热重载的配置变更事件。
 #[derive(Debug, Clone)]
 pub struct ConfigChangeEvent {
-    /// The previous configuration
+    /// 旧配置
     pub old_config: OasisConfig,
-    /// The new configuration
+    /// 新配置
     pub new_config: OasisConfig,
-    /// What parts of the configuration changed
+    /// 配置项发生了变化
     pub changes: ConfigChanges,
-    /// When the change occurred
+    /// 变更发生的时间
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 impl ConfigChangeEvent {
-    /// Create a new configuration change event.
+    /// 创建一个新的配置变更事件。
     pub fn new(old_config: OasisConfig, new_config: OasisConfig) -> Self {
         let changes = old_config.diff(&new_config);
         Self {
@@ -73,7 +73,7 @@ impl ConfigChangeEvent {
     }
 }
 
-/// Tracks which parts of the configuration have changed.
+/// 跟踪哪些配置项发生了变化。
 #[derive(Debug, Clone, Default)]
 pub struct ConfigChanges {
     pub tls_changed: bool,
@@ -81,59 +81,55 @@ pub struct ConfigChanges {
     pub telemetry_changed: bool,
     pub grpc_changed: bool,
     pub server_changed: bool,
-    pub agent_changed: bool,
 }
 
 impl ConfigChanges {
-    /// Create a new empty ConfigChanges.
+    /// 创建一个空的 ConfigChanges。
     pub fn new() -> Self {
         Default::default()
     }
 
-    /// Check if any configuration has changed.
+    /// 检查是否有任意配置发生了变化。
     pub fn has_changes(&self) -> bool {
         self.tls_changed
             || self.nats_changed
             || self.telemetry_changed
             || self.grpc_changed
             || self.server_changed
-            || self.agent_changed
     }
 
-    /// Check if the changes require a full restart.
+    /// 检查这些变更是否需要完全重启。
     ///
-    /// Some configuration changes (like NATS URL or gRPC settings)
-    /// require a full restart rather than hot reload.
+    /// 某些配置变更（如 NATS URL 或 gRPC 设置）需要完全重启，而不是热重载。
     pub fn requires_restart(&self) -> bool {
         self.nats_changed || self.grpc_changed
     }
 }
 
-/// Configuration context for validation and path resolution.
+/// 用于校验与路径解析的配置上下文。
 #[derive(Debug, Clone)]
 pub struct ConfigContext {
-    /// Base directory for resolving relative paths
+    /// 用于解析相对路径的基目录
     pub base_dir: PathBuf,
-    /// Runtime environment type
+    /// 运行环境类型
     pub runtime_env: RuntimeEnvironment,
 }
 
-/// Runtime environment types.
+/// 运行环境类型。
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeEnvironment {
-    /// Server runtime - supports hot reload, uses config files
+    /// Server 运行时 - 支持热重载，使用配置文件
     Server,
-    /// Agent runtime - environment variable driven, restart-based reload
+    /// Agent 运行时 - 基于环境变量，需重启生效
     Agent,
-    /// CLI runtime - lightweight, fresh config each time
+    /// CLI 运行时 - 轻量级，每次运行加载新配置
     Cli,
 }
 
 impl OasisConfig {
-    /// Compare two configurations and return what changed.
+    /// 比较两个配置并返回变更项。
     ///
-    /// This is used for hot reload to determine which parts of the
-    /// configuration have changed and need to be updated.
+    /// 用于热重载，以确定哪些配置项发生变化并需要更新。
     pub fn diff(&self, other: &Self) -> ConfigChanges {
         let mut changes = ConfigChanges::new();
 
@@ -157,21 +153,10 @@ impl OasisConfig {
             changes.server_changed = true;
         }
 
-        if self.agent != other.agent {
-            changes.agent_changed = true;
-        }
-
         changes
     }
 
-    /// Validate configuration with runtime context.
-    ///
-    /// This extends the basic validation with runtime-specific checks.
     pub fn validate_with_context(&self, context: &ConfigContext) -> Result<()> {
-        // Basic validation
-        self.validate()?;
-
-        // Runtime-specific validation
         match context.runtime_env {
             RuntimeEnvironment::Server => {
                 self.validate_server_context()?;
@@ -187,26 +172,26 @@ impl OasisConfig {
         Ok(())
     }
 
-    /// Server-specific validation.
+    /// Server 侧校验。
     fn validate_server_context(&self) -> Result<()> {
-        // Server needs valid TLS certificates
+        // Server 需要有效的 TLS 证书
         if !self.tls.grpc_server_cert_path().exists() {
             return Err(anyhow::anyhow!(
-                "Server certificate not found: {}",
+                "未找到服务端证书: {}",
                 self.tls.grpc_server_cert_path().display()
             ));
         }
 
         if !self.tls.grpc_server_key_path().exists() {
             return Err(anyhow::anyhow!(
-                "Server key not found: {}",
+                "未找到服务端私钥: {}",
                 self.tls.grpc_server_key_path().display()
             ));
         }
 
         if !self.tls.grpc_ca_path().exists() {
             return Err(anyhow::anyhow!(
-                "CA certificate not found: {}",
+                "未找到 CA 证书: {}",
                 self.tls.grpc_ca_path().display()
             ));
         }
@@ -214,57 +199,15 @@ impl OasisConfig {
         Ok(())
     }
 
-    /// Agent-specific validation.
+    /// Agent 侧校验。
     fn validate_agent_context(&self) -> Result<()> {
-        // Agent needs client certificates for NATS and gRPC
-        if !self.tls.nats_ca_path().exists() {
-            return Err(anyhow::anyhow!(
-                "NATS CA certificate not found: {}",
-                self.tls.nats_ca_path().display()
-            ));
-        }
-
-        if !self.tls.nats_client_cert_path().exists() {
-            return Err(anyhow::anyhow!(
-                "NATS client certificate not found: {}",
-                self.tls.nats_ca_path().display()
-            ));
-        }
-
-        if !self.tls.nats_client_key_path().exists() {
-            return Err(anyhow::anyhow!(
-                "NATS client key not found: {}",
-                self.tls.nats_client_key_path().display()
-            ));
-        }
-
+        // 什么都不做
         Ok(())
     }
 
-    /// CLI-specific validation.
+    /// CLI 侧校验。
     fn validate_cli_context(&self) -> Result<()> {
-        // CLI needs client certificates to connect to server
-        if !self.tls.grpc_client_cert_path().exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC client certificate not found: {}",
-                self.tls.grpc_client_cert_path().display()
-            ));
-        }
-
-        if !self.tls.grpc_client_key_path().exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC client key not found: {}",
-                self.tls.grpc_client_key_path().display()
-            ));
-        }
-
-        if !self.tls.grpc_ca_path().exists() {
-            return Err(anyhow::anyhow!(
-                "gRPC CA certificate not found: {}",
-                self.tls.grpc_ca_path().display()
-            ));
-        }
-
+        // 什么都不用做
         Ok(())
     }
 }

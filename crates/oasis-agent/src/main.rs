@@ -2,6 +2,8 @@ use anyhow::Result;
 use oasis_agent::{agent_manager::AgentManager, nats_client::NatsClient};
 use oasis_core::{
     config::{NatsConfig, TlsConfig},
+    config_strategies::AgentConfigStrategy,
+    config_strategy::ConfigStrategy,
     core_types::AgentId,
     shutdown::GracefulShutdown,
     telemetry::init_tracing_with,
@@ -60,39 +62,28 @@ async fn main() -> Result<()> {
 
     let info = build_agent_info(labels, groups.clone());
 
-    let nats_url =
-        std::env::var("OASIS__NATS__URL").unwrap_or_else(|_| "tls://127.0.0.1:4222".to_string());
-
-    let certs_dir =
-        std::env::var("OASIS__TLS__CERTS_DIR").unwrap_or_else(|_| "./certs".to_string());
-
-    let log_level =
-        std::env::var("OASIS__TELEMETRY__LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-
-    let log_format =
-        std::env::var("OASIS__TELEMETRY__LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
-
-    let log_no_ansi = std::env::var("OASIS__TELEMETRY__LOG_NO_ANSI")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse()
-        .unwrap_or(false);
+    // 通过统一的 Agent 配置策略加载（仅环境变量）
+    let strategy = AgentConfigStrategy::new();
+    let cfg = strategy.load_initial_config().await?;
 
     // 初始化遥测
     init_tracing_with(&oasis_core::telemetry::LogConfig {
-        level: log_level,
-        format: log_format,
-        no_ansi: log_no_ansi,
+        level: cfg.telemetry.log_level.clone(),
+        format: cfg.telemetry.log_format.clone(),
+        no_ansi: cfg.telemetry.log_no_ansi,
     });
 
     info!("Starting Oasis Agent...");
     info!("  Agent ID: {}", agent_id);
-    info!("  NATS URL: {}", nats_url);
+    info!("  NATS URL: {}", cfg.nats.url);
 
     // 连接到 NATS
     let nats_client = NatsClient::connect_with_oasis_config(
-        &NatsConfig { url: nats_url },
+        &NatsConfig {
+            url: cfg.nats.url.clone(),
+        },
         &TlsConfig {
-            certs_dir: PathBuf::from(certs_dir),
+            certs_dir: PathBuf::from(cfg.tls.certs_dir.clone()),
         },
     )
     .await?;

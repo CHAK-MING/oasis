@@ -1,6 +1,4 @@
 # Oasis 系统配置文件
-listen_addr = "127.0.0.1:50051"
-data_dir = "./data"
 
 [telemetry]
 log_level = "info"
@@ -17,8 +15,5 @@ url = "https://127.0.0.1:50051"
 certs_dir = "./certs"
 
 [server]
+listen_addr = "0.0.0.0:50051"
 heartbeat_ttl_sec = 60
-
-[agent]
-heartbeat_interval_sec = 30
-fact_collection_interval_sec = 300
