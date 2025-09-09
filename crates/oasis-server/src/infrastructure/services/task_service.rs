@@ -30,10 +30,6 @@ impl TaskService {
         })
     }
 
-    pub fn monitor(&self) -> Arc<TaskMonitor> {
-        self.task_monitor.clone()
-    }
-
     /// 提交新批次任务 - 接收已解析的代理列表
     pub async fn submit_batch(
         &self,

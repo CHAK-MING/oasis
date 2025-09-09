@@ -284,7 +284,6 @@ message RolloutStrategyMsg {
   oneof strategy {
     PercentageStrategy percentage = 1;
     CountStrategy count = 2;
-    GroupsStrategy groups = 3;
   }
 }
 
@@ -296,9 +295,7 @@ message CountStrategy {
   repeated uint32 stages = 1; // [2, 5, 10, 0]
 }
 
-message GroupsStrategy {
-  repeated string groups = 1; // ["canary", "staging", "prod"]
-}
+
 
 // 灰度发布任务类型
 message RolloutTaskTypeMsg {
@@ -332,24 +329,22 @@ message RolloutConfigMsg {
 
 // 灰度发布阶段状态
 message RolloutStageStatusMsg {
-  uint32 stage_index = 1;
-  string stage_name = 2;
-  repeated AgentId target_agents = 3;
-  optional BatchId batch_id = 4;
-  uint32 started_count = 5;
-  uint32 completed_count = 6;
-  uint32 failed_count = 7;
-  RolloutStateEnum state = 8;
-  optional int64 started_at = 9;
-  optional int64 completed_at = 10;
-  repeated TaskExecutionMsg failed_executions = 11;
+  string stage_name = 1;
+  repeated AgentId target_agents = 2;
+  optional BatchId batch_id = 3;
+  uint32 started_count = 4;
+  uint32 completed_count = 5;
+  uint32 failed_count = 6;
+  optional int64 started_at = 7;
+  optional int64 completed_at = 8;
+  repeated TaskExecutionMsg failed_executions = 9;
 }
 
 // 灰度发布状态
 message RolloutStatusMsg {
   RolloutConfigMsg config = 1;
   RolloutStateEnum state = 2;
-  uint32 current_stage = 3;
+  uint64 current_stage_idx = 3;
   repeated RolloutStageStatusMsg stages = 4;
   repeated AgentId all_target_agents = 5;
   int64 updated_at = 6;

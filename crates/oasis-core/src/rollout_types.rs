@@ -26,12 +26,12 @@ impl RolloutState {
 
     /// 检查是否可以推进
     pub fn can_advance(&self) -> bool {
-        matches!(self, RolloutState::Created | RolloutState::Running)
+        matches!(self, RolloutState::Created | RolloutState::Running | RolloutState::RolledBack)
     }
 
     /// 检查是否可以回滚
     pub fn can_rollback(&self) -> bool {
-        !matches!(self, RolloutState::Running | RolloutState::Failed)
+        matches!(self, RolloutState::Running | RolloutState::Failed)
     }
 
     pub fn is_busy(&self) -> bool {
@@ -64,8 +64,6 @@ pub enum RolloutStrategy {
     Percentage { stages: Vec<u8> }, // [10, 30, 60, 100]
     /// 按Agent数量分阶段
     Count { stages: Vec<u32> }, // [2, 5, 10, 0] (0表示剩余全部)
-    /// 按Agent分组
-    Groups { groups: Vec<String> }, // ["canary", "staging", "prod"]
 }
 
 impl Default for RolloutStrategy {
@@ -115,17 +113,6 @@ impl RolloutStrategy {
                 }
                 Err(_) => Err("无效的计数格式".to_string()),
             }
-        } else if let Some(groups_part) = strategy_str.strip_prefix("groups:") {
-            let groups: Vec<String> = groups_part
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            if groups.is_empty() {
-                return Err("分组策略至少需要一个分组".to_string());
-            }
-            Ok(RolloutStrategy::Groups { groups })
         } else {
             Err(
                 "策略格式无效，支持: percentage:10,30,100 或 count:2,5,0 或 groups:canary,prod"
@@ -172,8 +159,6 @@ pub struct RolloutConfig {
 /// 灰度发布阶段状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutStageStatus {
-    /// 阶段索引
-    pub stage_index: u32,
     /// 阶段名称/描述
     pub stage_name: String,
     /// 目标Agent列表
@@ -186,8 +171,6 @@ pub struct RolloutStageStatus {
     pub completed_count: u32,
     /// 失败的Agent数量
     pub failed_count: u32,
-    /// 阶段状态
-    pub state: RolloutState,
     /// 开始时间
     pub started_at: Option<i64>,
     /// 完成时间
@@ -247,7 +230,7 @@ pub struct RolloutStatus {
     /// 当前状态
     pub state: RolloutState,
     /// 当前阶段索引
-    pub current_stage: u32,
+    pub current_stage_idx: u64,
     /// 所有阶段状态
     pub stages: Vec<RolloutStageStatus>,
     /// 解析的所有目标Agent
@@ -256,8 +239,8 @@ pub struct RolloutStatus {
     pub updated_at: i64,
     /// 错误信息（如果有）
     pub error_message: Option<String>,
-    /// 当前动作（如回滚命令）
-    pub current_action: Option<String>,
+    /// 当前动作
+    pub current_action: String,
 }
 
 impl RolloutStatus {
@@ -267,12 +250,12 @@ impl RolloutStatus {
         Self {
             config,
             state: RolloutState::Created,
-            current_stage: 0,
+            current_stage_idx: 0,
             stages,
             all_target_agents,
             updated_at: chrono::Utc::now().timestamp(),
             error_message: None,
-            current_action: None,
+            current_action: "".to_string(),
         }
     }
 
@@ -302,14 +285,12 @@ impl RolloutStatus {
                         .collect();
 
                     stages.push(RolloutStageStatus {
-                        stage_index: i as u32,
                         stage_name: format!("阶段{} ({}%)", i + 1, percentage),
                         target_agents: stage_agents,
                         batch_id: None,
                         started_count: 0,
                         completed_count: 0,
                         failed_count: 0,
-                        state: RolloutState::Created,
                         started_at: None,
                         completed_at: None,
                         failed_executions: Vec::new(),
@@ -336,44 +317,12 @@ impl RolloutStatus {
                         .collect();
 
                     stages.push(RolloutStageStatus {
-                        stage_index: i as u32,
                         stage_name: format!("阶段{} ({}个节点)", i + 1, stage_agents.len()),
                         target_agents: stage_agents,
                         batch_id: None,
                         started_count: 0,
                         completed_count: 0,
                         failed_count: 0,
-                        state: RolloutState::Created,
-                        started_at: None,
-                        completed_at: None,
-                        failed_executions: Vec::new(),
-                        version_snapshot: None,
-                    });
-
-                    if remaining_agents.is_empty() {
-                        break;
-                    }
-                }
-            }
-            RolloutStrategy::Groups { groups } => {
-                // 基于分组的策略，按照agent数量平均分组
-                let agents_per_group = (total_agents + groups.len() - 1) / groups.len();
-                let mut remaining_agents: Vec<_> = all_agents.iter().cloned().collect();
-
-                for (i, group_name) in groups.iter().enumerate() {
-                    let stage_agents: Vec<_> = remaining_agents
-                        .drain(..agents_per_group.min(remaining_agents.len()))
-                        .collect();
-
-                    stages.push(RolloutStageStatus {
-                        stage_index: i as u32,
-                        stage_name: format!("组: {}", group_name),
-                        target_agents: stage_agents,
-                        batch_id: None,
-                        started_count: 0,
-                        completed_count: 0,
-                        failed_count: 0,
-                        state: RolloutState::Created,
                         started_at: None,
                         completed_at: None,
                         failed_executions: Vec::new(),
@@ -392,39 +341,31 @@ impl RolloutStatus {
 
     /// 获取当前阶段状态
     pub fn current_stage_status(&self) -> Option<&RolloutStageStatus> {
-        self.stages.get(self.current_stage as usize)
+        self.stages.get(self.current_stage_idx as usize)
     }
 
     /// 获取当前阶段状态（可变）
     pub fn current_stage_status_mut(&mut self) -> Option<&mut RolloutStageStatus> {
-        self.stages.get_mut(self.current_stage as usize)
+        self.stages.get_mut(self.current_stage_idx as usize)
+    }
+
+    /// 获取上一阶段状态
+    pub fn previous_stage_status(&self) -> Option<&RolloutStageStatus> {
+        self.stages.get(self.current_stage_idx as usize - 1)
+    }
+
+    /// 获取上一阶段状态（可变）
+    pub fn previous_stage_status_mut(&mut self) -> Option<&mut RolloutStageStatus> {
+        self.stages.get_mut(self.current_stage_idx as usize - 1)
     }
 
     /// 检查是否可以推进到下一阶段
     pub fn can_advance(&self) -> bool {
-        if !self.state.can_advance() {
-            return false;
-        }
-
-        if let Some(current) = self.current_stage_status() {
-            // 如果当前阶段是 Created 状态，可以推进（开始第一个阶段）
-            // 如果当前阶段是 Completed 状态，可以推进到下一阶段
-            matches!(
-                current.state,
-                RolloutState::Created | RolloutState::Completed
-            )
-        } else {
-            false
-        }
+        self.state.can_advance()
     }
 
-    /// 检查整个发布是否完成
-    pub fn is_completed(&self) -> bool {
-        self.current_stage as usize >= self.stages.len()
-            && self
-                .stages
-                .iter()
-                .all(|s| s.state == RolloutState::Completed)
+    pub fn can_rollback(&self) -> bool {
+        self.state.can_rollback()
     }
 
     /// 计算总体进度百分比
@@ -472,11 +413,6 @@ impl CreateRolloutRequest {
             RolloutStrategy::Count { stages } => {
                 if stages.is_empty() {
                     return Err("计数策略至少需要一个阶段".to_string());
-                }
-            }
-            RolloutStrategy::Groups { groups } => {
-                if groups.is_empty() {
-                    return Err("分组策略至少需要一个分组".to_string());
                 }
             }
         }

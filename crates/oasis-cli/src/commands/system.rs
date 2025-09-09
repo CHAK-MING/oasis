@@ -3,6 +3,7 @@ use crate::ui::{print_header, print_info, print_status};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, command};
 use console::style;
+use std::fs::{OpenOptions, metadata};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -333,12 +334,16 @@ async fn run_start(daemon: bool, log_file: &str) -> Result<bool> {
             let rel = log_file.strip_prefix("./").unwrap_or(log_file);
             cfg_dir.join(rel)
         };
-        let logfile = std::fs::OpenOptions::new()
+
+        // 轮转日志：超过 10MB 时按时间戳滚动，最多保留 5 个历史文件
+        rotate_log_file(&log_path, 10 * 1024 * 1024, 5)?;
+
+        let logfile = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
             .with_context(|| format!("无法打开日志文件: {}", log_path.display()))?;
-        let logfile_err = std::fs::OpenOptions::new()
+        let logfile_err = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
@@ -581,4 +586,50 @@ fn find_server_binary() -> Result<PathBuf> {
     anyhow::bail!(
         "未找到 oasis-server 二进制文件。请尝试:\n  1. 在项目根目录执行 `cargo build -p oasis-server`\n  2. 将 `oasis-server` 路径加入到 PATH 环境变量\n  3. 设置 OASIS_SERVER_BIN 环境变量指向正确的二进制文件路径"
     )
+}
+
+/// 简单的按大小轮转日志
+/// 超过 max_bytes 时，将现有日志重命名为 filename.YYYYmmdd-HHMMSS，最多保留 max_files 个
+fn rotate_log_file(path: &PathBuf, max_bytes: u64, max_files: usize) -> Result<()> {
+    // 若不存在或未超限，直接返回
+    if let Ok(meta) = metadata(path) {
+        if meta.len() <= max_bytes {
+            return Ok(());
+        }
+    } else {
+        return Ok(());
+    }
+
+    // 构造带时间戳的新文件名
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let rotated = path.with_extension(format!("log.{}", ts));
+    std::fs::rename(path, &rotated).with_context(|| format!("无法轮转日志: {}", path.display()))?;
+
+    // 清理多余历史日志
+    if let Some(parent) = path.parent() {
+        let stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut rotated_files: Vec<_> = std::fs::read_dir(parent)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.starts_with(&stem) && s != stem
+            })
+            .collect();
+        rotated_files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        // 保留最新 max_files 个
+        if rotated_files.len() > max_files {
+            let to_delete = rotated_files.len() - max_files;
+            for i in 0..to_delete {
+                if let Some(entry) = rotated_files.get(i) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    Ok(())
 }

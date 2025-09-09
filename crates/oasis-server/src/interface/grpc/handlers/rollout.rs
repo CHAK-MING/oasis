@@ -19,7 +19,7 @@ use crate::interface::grpc::server::OasisServer;
 pub struct RolloutHandlers;
 
 impl RolloutHandlers {
-    /// 执行一次推进（基于服务Arc，便于在后台任务中复用）
+    /// 执行一次推进
     async fn advance_once_with_services(
         rollout_service: std::sync::Arc<RolloutService>,
         task_service: std::sync::Arc<TaskService>,
@@ -31,12 +31,14 @@ impl RolloutHandlers {
             .get_next_stage_info(rollout_id)
             .await
             .map_err(map_core_error)?
-            .ok_or_else(|| Status::failed_precondition("Rollout已完成所有阶段"))?;
+            .ok_or_else(|| Status::failed_precondition("Rollout 已完成所有阶段"))?;
 
-        let (stage_index, target_agents, task_type) = stage_info;
+        let (target_agents, task_type) = stage_info;
 
         // 根据任务类型构建并执行
-        let maybe_batch_id = match &task_type {
+        let mut batch_id = None;
+        let mut version_snapshot = None;
+        match &task_type {
             RolloutTaskType::Command {
                 command,
                 args,
@@ -53,11 +55,12 @@ impl RolloutHandlers {
                     timeout_seconds: *timeout_seconds,
                 };
 
-                let bid = task_service
-                    .submit_batch(batch_request, target_agents)
-                    .await
-                    .map_err(map_core_error)?;
-                Some(bid)
+                batch_id = Some(
+                    task_service
+                        .submit_batch(batch_request, target_agents)
+                        .await
+                        .map_err(map_core_error)?,
+                );
             }
             RolloutTaskType::FileDeployment { config } => {
                 let file_config = proto::FileConfigMsg {
@@ -85,33 +88,27 @@ impl RolloutHandlers {
                     .map_err(map_core_error)?;
 
                 // 保存文件版本快照
-                let version_snapshot =
-                    VersionSnapshot::new_file_snapshot(config.clone(), Some(config.revision));
-                rollout_service
-                    .save_version_snapshot(rollout_id, stage_index, version_snapshot)
-                    .await
-                    .map_err(map_core_error)?;
+                version_snapshot = Some(VersionSnapshot::new_file_snapshot(
+                    config.clone(),
+                    Some(config.revision),
 
-                // 文件部署为同步完成，直接标记阶段完成并推进
-                rollout_service
-                    .mark_file_stage_completed(rollout_id, stage_index)
-                    .await
-                    .map_err(map_core_error)?;
-
-                None
+                ));
             }
         };
 
-        // 命令任务：标记阶段开始（推进到下一阶段）
-        if let Some(batch_id) = maybe_batch_id {
-            rollout_service
-                .mark_stage_started(rollout_id, batch_id.clone())
-                .await
-                .map_err(map_core_error)?;
-        }
+        rollout_service
+            .mark_advance_next_stage(
+                rollout_id,
+                task_type.clone(),
+                batch_id.clone(),
+                version_snapshot.clone(),
+            )
+            .await
+            .map_err(map_core_error)?;
 
         Ok(())
     }
+
     /// 创建灰度发布
     #[instrument(skip_all)]
     pub async fn create_rollout(
@@ -135,9 +132,6 @@ impl RolloutHandlers {
                 }
                 Some(proto::rollout_strategy_msg::Strategy::Count(c)) => {
                     RolloutStrategy::Count { stages: c.stages }
-                }
-                Some(proto::rollout_strategy_msg::Strategy::Groups(g)) => {
-                    RolloutStrategy::Groups { groups: g.groups }
                 }
                 None => {
                     return Err(Status::invalid_argument("strategy is required"));
@@ -234,7 +228,7 @@ impl RolloutHandlers {
                     }),
                     total_agents,
                     success: true,
-                    message: "Rollout created successfully".to_string(),
+                    message: "灰度发布创建成功".to_string(),
                 };
 
                 // 若开启 auto_advance，后台循环自动推进直到完成/失败/回滚
@@ -255,7 +249,7 @@ impl RolloutHandlers {
                             if status.state == RolloutState::Failed
                                 || status.state == RolloutState::RollingBack
                                 || status.state == RolloutState::RollbackFailed
-                                || status.is_completed()
+                                || status.state == RolloutState::Completed
                             {
                                 break;
                             }
@@ -427,24 +421,8 @@ impl RolloutHandlers {
             }
         };
 
-        // 1) 回滚开始：校验并置 RollingBack，持久化；命令回滚设置 current_action
-        srv.context()
-            .rollout_service
-            .mark_rollback_started(&rollout_id)
-            .await
-            .map_err(map_core_error)?;
-
-        // 若是命令回滚，记录当前动作
-        if let Some(cmd) = proto_request.rollback_command.clone() {
-            let _ = srv
-                .context()
-                .rollout_service
-                .set_current_action(&rollout_id, Some(format!("rollback: {}", cmd)))
-                .await;
-        }
-
-        // 2) 选择回滚阶段与目标 agents
-        let (stage_index, target_agents, task_type, version_snapshot) = srv
+        //  获取回滚阶段与目标 agents 信息
+        let (target_agents, task_type, version_snapshot) = srv
             .context()
             .rollout_service
             .get_rollback_stage_info(&rollout_id)
@@ -452,44 +430,17 @@ impl RolloutHandlers {
             .map_err(map_core_error)?
             .ok_or_else(|| Status::failed_precondition("没有找到可回滚的阶段"))?;
 
-        // 若该阶段有失败任务，仅选择失败的 agents
-        let agents = {
-            // 直接从状态缓存中读取失败任务的 agent
-            let status = srv
-                .context()
-                .rollout_service
-                .get_rollout_status(&rollout_id)
-                .await
-                .map_err(map_core_error)?;
-            if let Some(stage) = status.stages.get(stage_index as usize) {
-                if stage.failed_count > 0 && !stage.failed_executions.is_empty() {
-                    stage
-                        .failed_executions
-                        .iter()
-                        .map(|e| e.agent_id.clone())
-                        .collect::<Vec<_>>()
-                } else {
-                    target_agents.clone()
-                }
-            } else {
-                target_agents.clone()
-            }
-        };
-
-        // 3) 按类型执行回滚
+        // 按类型执行回滚
+        let mut batch_id = None;
         let message = match &task_type {
             RolloutTaskType::Command { .. } => {
-                let rollback_cmd = proto_request
-                    .rollback_command
-                    .ok_or_else(|| Status::invalid_argument("命令回滚需要提供 rollback_command"))?;
-
                 // 提交批次
                 let batch_request = oasis_core::task_types::BatchRequest {
-                    command: rollback_cmd.clone(),
+                    command: proto_request.rollback_command.clone().unwrap_or_default(),
                     args: vec![],
                     selector: SelectorExpression::from(format!(
                         "agent_id in [{}]",
-                        agents
+                        target_agents
                             .iter()
                             .map(|id| format!("\"{}\"", id))
                             .collect::<Vec<_>>()
@@ -498,73 +449,18 @@ impl RolloutHandlers {
                     timeout_seconds: 300,
                 };
 
-                let batch_id = srv
-                    .context()
-                    .task_service
-                    .submit_batch(batch_request, agents.clone())
-                    .await
-                    .map_err(map_core_error)?;
-
-                // 关联到回滚阶段（不推进 current_stage）并持久化
-                srv.context()
-                    .rollout_service
-                    .mark_rollback_stage_started(&rollout_id, stage_index, batch_id.clone())
-                    .await
-                    .map_err(map_core_error)?;
-
-                // 监控：使用 backoff 直到批次完成
-                let rollout_service = srv.context().rollout_service.clone();
-                let task_monitor = srv.context().task_service.monitor().clone();
-                let rid = rollout_id.clone();
-                tokio::spawn(async move {
-                    let backoff = oasis_core::backoff::network_publish_backoff();
-                    let check_once = || async {
-                        if let Some(task_ids) = task_monitor.get_batch_task_ids(&batch_id) {
-                            let mut all_done = true;
-                            let mut any_failed = false;
-                            for task_id in task_ids {
-                                if let Some(exec) =
-                                    task_monitor.latest_execution_from_cache(&task_id)
-                                {
-                                    match exec.state {
-                                        oasis_core::task_types::TaskState::Success => {}
-                                        oasis_core::task_types::TaskState::Failed => {
-                                            any_failed = true;
-                                        }
-                                        _ => {
-                                            all_done = false;
-                                        }
-                                    }
-                                } else {
-                                    all_done = false;
-                                }
-                            }
-                            if all_done {
-                                if any_failed {
-                                    let _ = rollout_service
-                                        .mark_rollback_failed(
-                                            &rid,
-                                            "部分回滚任务执行失败".to_string(),
-                                        )
-                                        .await;
-                                } else {
-                                    let _ = rollout_service.mark_rollback_completed(&rid).await;
-                                }
-                                return Ok::<(), anyhow::Error>(());
-                            }
-                        }
-                        Err(anyhow::anyhow!("rollback not completed"))
-                    };
-
-                    let _ = oasis_core::backoff::execute_with_backoff(check_once, backoff)
+                batch_id = Some(
+                    srv.context()
+                        .task_service
+                        .submit_batch(batch_request, target_agents.clone())
                         .await
-                        .map_err(|_| ());
-                });
+                        .map_err(map_core_error)?,
+                );
 
                 format!(
                     "回滚命令已提交，影响 {} 个Agent，命令: {}",
-                    agents.len(),
-                    rollback_cmd
+                    target_agents.len(),
+                    proto_request.rollback_command.clone().unwrap_or_default()
                 )
             }
             RolloutTaskType::FileDeployment { .. } => {
@@ -585,7 +481,7 @@ impl RolloutHandlers {
                                 target: Some(proto::SelectorExpression {
                                     expression: format!(
                                         "agent_id in [{}]",
-                                        agents
+                                        target_agents
                                             .iter()
                                             .map(|id| id.to_string())
                                             .collect::<Vec<_>>()
@@ -596,15 +492,15 @@ impl RolloutHandlers {
                             // 执行回滚
                             srv.context()
                                 .file_service
-                                .apply(&cfg, agents.clone())
+                                .rollback_file(&cfg, target_agents.clone())
                                 .await
                                 .map_err(map_core_error)?;
-                            srv.context()
-                                .rollout_service
-                                .mark_rollback_completed(&rollout_id)
-                                .await
-                                .map_err(map_core_error)?;
-                            format!("文件回滚成功，影响 {} 个Agent，版本 {}", agents.len(), prev)
+
+                            format!(
+                                "文件回滚成功，影响 {} 个Agent，版本 {}",
+                                target_agents.len(),
+                                prev
+                            )
                         } else {
                             return Err(Status::failed_precondition(
                                 "缺少 previous_revision，无法回滚",
@@ -622,6 +518,18 @@ impl RolloutHandlers {
                 }
             }
         };
+
+
+        srv.context()
+            .rollout_service
+            .mark_rollback_stage(
+                &rollout_id,
+                task_type,
+                proto_request.rollback_command.clone(),
+                batch_id,
+            )
+            .await
+            .map_err(map_core_error)?;
 
         Ok(Response::new(proto::RollbackRolloutResponse {
             success: true,

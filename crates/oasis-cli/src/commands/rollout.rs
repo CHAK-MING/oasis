@@ -8,7 +8,6 @@ use console::style;
 use oasis_core::proto::{
     AdvanceRolloutRequest, CreateRolloutRequest, GetRolloutStatusRequest, ListRolloutsRequest,
     RolloutId, RolloutStateEnum, oasis_service_client::OasisServiceClient,
-    rollout_task_type_msg::TaskType,
 };
 use std::path::PathBuf;
 
@@ -429,22 +428,6 @@ fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrate
             }),
             Err(_) => Err(anyhow!("无效的计数格式")),
         }
-    } else if let Some(groups_part) = strategy_str.strip_prefix("groups:") {
-        let groups: Vec<String> = groups_part
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if groups.is_empty() {
-            return Err(anyhow!("分组策略至少需要一个分组"));
-        }
-
-        Ok(RolloutStrategyMsg {
-            strategy: Some(rollout_strategy_msg::Strategy::Groups(GroupsStrategy {
-                groups,
-            })),
-        })
     } else {
         Err(anyhow!(
             "策略格式无效，支持: percentage:10,30,100 或 count:2,5,0 或 groups:canary,prod"
@@ -593,31 +576,15 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
                 .map(|id| id.value.as_str())
                 .unwrap_or("unknown")
         ));
-        print_info(&format!("状态: {}", rollout_state_to_cn(status.state())));
-        if let Some(action) = &status.current_action {
-            if !action.is_empty() {
-                println!(
-                    "{} {}",
-                    console::style("当前操作:").bold(),
-                    console::style(action).yellow().bold()
-                );
-            }
-        }
-        // 计算计划阶段总数（不把临时“回滚行”计入总数）
-        let total_planned = config
-            .strategy
-            .as_ref()
-            .and_then(|s| s.strategy.as_ref())
-            .map(|st| match st {
-                oasis_core::proto::rollout_strategy_msg::Strategy::Percentage(p) => p.stages.len(),
-                oasis_core::proto::rollout_strategy_msg::Strategy::Count(c) => c.stages.len(),
-                oasis_core::proto::rollout_strategy_msg::Strategy::Groups(g) => g.groups.len(),
-            })
-            .unwrap_or_else(|| status.stages.len());
+        print_info(&format!(
+            "状态: {}",
+            create_colored_status_text(status.state())
+        ));
 
         print_info(&format!(
             "当前阶段: {}/{}",
-            status.current_stage, total_planned
+            status.current_stage_idx,
+            status.stages.len()
         ));
 
         // 显示错误信息（如果有）
@@ -627,40 +594,11 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
             }
         }
 
-        // 显示配置详情（若存在 current_action，优先展示“当前操作”，原始命令改为“原始命令”）
-        if let Some(task_type) = &config.task_type {
-            match &task_type.task_type {
-                Some(TaskType::Command(cmd)) => {
-                    if let Some(action) = &status.current_action {
-                        if !action.is_empty() {
-                            // 当前在执行回滚等动作，隐藏“执行命令”，显示“原始命令”
-                            print_info(&format!("原始命令: {}", cmd.command));
-                        } else {
-                            print_info(&format!("执行命令: {}", cmd.command));
-                        }
-                    } else {
-                        print_info(&format!("执行命令: {}", cmd.command));
-                    }
-                    if !cmd.args.is_empty() {
-                        print_info(&format!("命令参数: {}", cmd.args.join(" ")));
-                    }
-                    print_info(&format!("超时时间: {} 秒", cmd.timeout_seconds));
-                }
-                Some(TaskType::FileDeployment(file)) => {
-                    if let Some(file_config) = &file.config {
-                        print_info(&format!("文件部署: {}", file_config.source_path));
-                        print_info(&format!("目标路径: {}", file_config.destination_path));
-                        print_info(&format!("文件权限: {}", file_config.mode));
-                        if !file_config.owner.is_empty() {
-                            print_info(&format!("文件所有者: {}", file_config.owner));
-                        }
-                    }
-                }
-                None => {
-                    print_info("任务类型: 未知");
-                }
-            }
-        }
+        // 显示配置详情
+        print_info(&format!(
+            "当前操作: {}",
+            status.current_action.clone().unwrap_or("无".to_string())
+        ));
 
         // 显示阶段详情
         let mut table = Table::new();
@@ -675,13 +613,15 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
             Cell::new("完成/失败").add_attribute(Attribute::Bold),
         ]);
 
+        let mut stage_index = 0;
         for stage in &status.stages {
             table.add_row(vec![
-                Cell::new((stage.stage_index + 1).to_string()),
+                Cell::new((stage_index + 1).to_string()),
                 Cell::new(&stage.stage_name),
                 Cell::new(stage.target_agents.len().to_string()),
                 Cell::new(format!("{}/{}", stage.completed_count, stage.failed_count)),
             ]);
+            stage_index += 1;
         }
 
         println!("{}", table);
@@ -695,6 +635,7 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
 fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]) {
     let mut has_failures = false;
 
+    let mut stage_index = 0;
     for stage in stages {
         if !stage.failed_executions.is_empty() {
             if !has_failures {
@@ -706,7 +647,7 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
             println!(
                 "{} 阶段 {} ({}):",
                 console::style("-").bold(),
-                console::style((stage.stage_index + 1).to_string()).bold(),
+                console::style((stage_index + 1).to_string()).bold(),
                 console::style(&stage.stage_name).bold()
             );
 
@@ -747,6 +688,7 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
                 }
             }
         }
+        stage_index += 1;
     }
 }
 
@@ -778,7 +720,7 @@ fn display_rollouts_table(rollouts: &[oasis_core::proto::RolloutStatusMsg]) {
                 .map(|id| id.value.clone())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let progress = format!("{}/{}", rollout.current_stage, rollout.stages.len());
+            let progress = format!("{}/{}", rollout.current_stage_idx, rollout.stages.len());
             let created_at = format_timestamp(config.created_at);
 
             // 为状态添加颜色
@@ -838,6 +780,20 @@ fn create_colored_state_cell(state: RolloutStateEnum) -> Cell {
             cell.fg(Color::Red).add_attribute(Attribute::Bold)
         }
         RolloutStateEnum::RolloutRolledback => cell.fg(Color::Green),
+    }
+}
+
+fn create_colored_status_text(state: RolloutStateEnum) -> console::StyledObject<&'static str> {
+    let state_cn = rollout_state_to_cn(state);
+
+    match state {
+        RolloutStateEnum::RolloutCreated => console::style(state_cn).yellow(),
+        RolloutStateEnum::RolloutRunning => console::style(state_cn).blue(),
+        RolloutStateEnum::RolloutCompleted => console::style(state_cn).green().bold(),
+        RolloutStateEnum::RolloutFailed => console::style(state_cn).red().bold(),
+        RolloutStateEnum::RolloutRollingback => console::style(state_cn).magenta(),
+        RolloutStateEnum::RolloutRollbackfailed => console::style(state_cn).red().bold(),
+        RolloutStateEnum::RolloutRolledback => console::style(state_cn).green(),
     }
 }
 

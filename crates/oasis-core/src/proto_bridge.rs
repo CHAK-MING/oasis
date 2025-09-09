@@ -722,7 +722,7 @@ impl From<&RolloutStatus> for proto::RolloutStatusMsg {
         proto::RolloutStatusMsg {
             config: Some(config),
             state: proto::RolloutStateEnum::from(status.state) as i32,
-            current_stage: status.current_stage,
+            current_stage_idx: status.current_stage_idx,
             stages,
             all_target_agents: status
                 .all_target_agents
@@ -733,7 +733,7 @@ impl From<&RolloutStatus> for proto::RolloutStatusMsg {
                 .collect(),
             updated_at: status.updated_at,
             error_message: status.error_message.clone(),
-            current_action: status.current_action.clone(),
+            current_action: Some(status.current_action.clone()),
         }
     }
 }
@@ -758,9 +758,6 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             }
             Some(crate::proto::rollout_strategy_msg::Strategy::Count(c)) => {
                 RolloutStrategy::Count { stages: c.stages }
-            }
-            Some(crate::proto::rollout_strategy_msg::Strategy::Groups(g)) => {
-                RolloutStrategy::Groups { groups: g.groups }
             }
             None => RolloutStrategy::default(),
         };
@@ -809,14 +806,12 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
                 .map(TaskExecution::from)
                 .collect();
             stages.push(RolloutStageStatus {
-                stage_index: s.stage_index,
                 stage_name: s.stage_name.clone(),
                 target_agents,
                 batch_id: s.batch_id.as_ref().map(|b| BatchId::from(b.value.clone())),
                 started_count: s.started_count,
                 completed_count: s.completed_count,
                 failed_count: s.failed_count,
-                state: RolloutState::from(s.state),
                 started_at: s.started_at,
                 completed_at: s.completed_at,
                 failed_executions: failed_execs,
@@ -833,12 +828,12 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
         RolloutStatus {
             config: rollout_config,
             state: RolloutState::from(msg.state),
-            current_stage: msg.current_stage,
+            current_stage_idx: msg.current_stage_idx,
             stages,
             all_target_agents,
             updated_at: msg.updated_at,
             error_message: msg.error_message.clone(),
-            current_action: msg.current_action.clone(),
+            current_action: msg.current_action.clone().unwrap_or_default(),
         }
     }
 }
@@ -894,13 +889,6 @@ impl From<&RolloutStrategy> for proto::RolloutStrategyMsg {
                     },
                 )),
             },
-            RolloutStrategy::Groups { groups } => proto::RolloutStrategyMsg {
-                strategy: Some(proto::rollout_strategy_msg::Strategy::Groups(
-                    proto::GroupsStrategy {
-                        groups: groups.clone(),
-                    },
-                )),
-            },
         }
     }
 }
@@ -951,7 +939,6 @@ impl From<RolloutTaskType> for proto::RolloutTaskTypeMsg {
 impl From<&RolloutStageStatus> for proto::RolloutStageStatusMsg {
     fn from(stage: &RolloutStageStatus) -> Self {
         proto::RolloutStageStatusMsg {
-            stage_index: stage.stage_index,
             stage_name: stage.stage_name.clone(),
             target_agents: stage
                 .target_agents
@@ -966,7 +953,6 @@ impl From<&RolloutStageStatus> for proto::RolloutStageStatusMsg {
             started_count: stage.started_count,
             completed_count: stage.completed_count,
             failed_count: stage.failed_count,
-            state: proto::RolloutStateEnum::from(stage.state) as i32,
             started_at: stage.started_at,
             completed_at: stage.completed_at,
             failed_executions: stage
