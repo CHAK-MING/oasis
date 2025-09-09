@@ -1,10 +1,3 @@
-[package]
-name = "oasis"
-version = "0.1.0"
-edition = "2024"
-description = "OpenCloudOS大规模集群节点管理工具"
-
-
 [workspace]
 members = [
   "crates/oasis-core",
