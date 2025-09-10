@@ -176,7 +176,7 @@ impl RolloutService {
         };
 
         if should_merge_stages {
-            info!("Agent数量较少({}), 合并为单阶段执行", total_agents);
+            info!("Agent number is less than 2, merge to single stage");
             Self::create_single_stage_rollout(config, all_target_agents)
         } else {
             // 使用原有的阶段划分逻辑
@@ -490,6 +490,10 @@ impl RolloutService {
                                     TaskState::Running => started_count += 1,
                                     TaskState::Success => completed_count += 1,
                                     TaskState::Failed => {
+                                        failed_count += 1;
+                                        failed_executions.push(execution);
+                                    }
+                                    TaskState::Timeout => {
                                         failed_count += 1;
                                         failed_executions.push(execution);
                                     }

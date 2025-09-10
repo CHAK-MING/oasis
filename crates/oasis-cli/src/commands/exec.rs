@@ -53,7 +53,7 @@ pub enum ExecCmd {
 #[derive(Parser, Debug)]
 pub struct ExecRunArgs {
     /// 目标（选择器语法）
-    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     pub target: String,
 
     /// 要执行的命令与参数，必须在 -- 之后给出
@@ -116,14 +116,6 @@ async fn run_exec_run(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: ExecRunArgs,
 ) -> Result<()> {
-    // 验证输入参数
-    if args.target.is_empty() {
-        return Err(anyhow!("必须提供 --target 参数"));
-    }
-    if args.command.is_empty() {
-        return Err(anyhow!("必须在 -- 后提供要执行的命令"));
-    }
-
     print_header(&format!(
         "提交批量任务: {}",
         style(args.command.join(" ")).cyan()

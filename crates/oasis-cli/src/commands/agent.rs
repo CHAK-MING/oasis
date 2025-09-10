@@ -109,7 +109,7 @@ pub struct AgentListArgs {
     #[arg(short, long)]
     verbose: bool,
 
-    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     target: String,
 
     /// 是否只显示在线的 Agent
@@ -242,10 +242,6 @@ async fn run_agent_list(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: AgentListArgs,
 ) -> Result<()> {
-    if args.target.is_empty() {
-        return Err(anyhow::anyhow!("必须提供 --target 参数。"));
-    }
-
     print_header("列出所有已连接的 Agent");
 
     // 获取节点列表

@@ -533,6 +533,33 @@ impl SelectorEngine {
     pub async fn update_agent_info(&self, agent_id: AgentId, info: AgentInfo) {
         self.agent_info.update_agent_info(agent_id, info).await;
     }
+
+    pub fn remove_agent(&self, agent_id: &AgentId) {
+        // 计算该 Agent 的位图键
+        let Some(id32) = self.agent_info.get_id32(agent_id) else {
+            tracing::debug!(agent_id = %agent_id, "remove_agent: id32 not found (maybe already removed)");
+            return;
+        };
+
+        // 1) 精确更新已缓存的查询结果：从每个缓存位图中移除该 id32
+        let mut affected = 0usize;
+        for mut entry in self.parse_cache.iter_mut() {
+            let bm = &mut entry.value_mut().bitmap;
+            if bm.contains(id32) {
+                bm.remove(id32);
+                affected += 1;
+            }
+        }
+
+        // 2) 更新 "all" 的缓存位图：移除该 id32
+        if let Ok(mut cache) = self.all_agents_cache.try_write() {
+            if let Some((ref mut bm, _ts)) = *cache {
+                bm.remove(id32);
+            }
+        }
+
+        tracing::debug!(agent_id = %agent_id, affected_cache_entries = affected, "SelectorEngine: removed agent from cached bitmaps");
+    }
 }
 
 fn unquote(s: &str) -> String {

@@ -38,6 +38,8 @@ cargo build --release
 docker compose up -d
 ```
 
+> 提示：启动后可在浏览器访问 `http://localhost:8222/` 查看 NATS 监控页面（若在远程主机或容器环境，请将 `localhost` 替换为对应主机 IP）。常用端点：`/varz`（服务概览）、`/connz`（连接）、`/routez`（路由）、`/jsz`（JetStream）。
+
 ### 4. 安装并启动服务器
 
 ```bash
@@ -219,7 +221,8 @@ oasis-cli rollout create \
   --name "系统更新" \
   --target 'labels["role"] == "web"' \
   --strategy percentage:10,30,60,100 \
-  --command "apt update && apt upgrade -y" \
+  --command "dnf upgrade" \
+  --args "-y" \
   --timeout 300
 
 # 创建文件灰度发布

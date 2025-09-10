@@ -251,7 +251,7 @@ pub(crate) fn format_grpc_error(e: &tonic::Status) -> String {
         }
     };
 
-    format!("{}: [{}] {}", hint, code, raw)
+    format!("{}: {}", hint, raw)
 }
 
 pub async fn call_with_retry<F, Fut, T>(mut op: F) -> Result<T, Status>

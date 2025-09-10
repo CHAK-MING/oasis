@@ -1,7 +1,10 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{confirm_action, print_header, print_info, print_next_step, print_warning};
+use crate::ui::{
+    confirm_action, log_detail, print_header, print_info, print_next_step, print_warning,
+};
 use anyhow::{Result, anyhow};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
@@ -70,7 +73,7 @@ pub struct CreateArgs {
     name: String,
 
     /// 目标（选择器语法）
-    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     target: String,
 
     /// 灰度策略
@@ -228,7 +231,6 @@ async fn run_rollout_create(
         unreachable!()
     };
 
-    // 创建请求
     let request = CreateRolloutRequest {
         name: args.name,
         target: Some(oasis_core::proto::SelectorExpression {
@@ -634,17 +636,15 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
     for stage in stages {
         if !stage.failed_executions.is_empty() {
             if !has_failures {
-                // 加粗显示
-                println!("{}", console::style("失败任务详情").bold(),);
+                print_header("失败任务详情");
                 has_failures = true;
             }
 
-            println!(
-                "{} 阶段 {} ({}):",
-                console::style("-").bold(),
+            print_info(&format!(
+                "阶段 {} ({})",
                 console::style((stage_index + 1).to_string()).bold(),
                 console::style(&stage.stage_name).bold()
-            );
+            ));
 
             for execution in &stage.failed_executions {
                 let task_id = execution
@@ -659,27 +659,35 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
                     .map(|id| id.value.as_str())
                     .unwrap_or("unknown");
 
-                println!(
-                    "  {} Task: {}  Agent: {}",
-                    console::style("∙").bold(),
-                    console::style(task_id).bold(),
-                    console::style(agent_id).bold()
-                );
+                log_detail("Task", &console::style(task_id).bold().to_string());
+                log_detail("Agent", &console::style(agent_id).bold().to_string());
 
                 if !execution.stdout.is_empty() {
-                    println!("  输出: {}", execution.stdout);
+                    let out = if let Some(rest) = execution.stdout.strip_prefix("base64:") {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(rest)
+                            .map(|b: Vec<u8>| String::from_utf8_lossy(&b).to_string())
+                            .unwrap_or(execution.stdout.clone())
+                    } else {
+                        execution.stdout.clone()
+                    };
+                    log_detail("输出", &out);
                 }
 
                 if !execution.stderr.is_empty() {
-                    println!(
-                        "  {} 错误: {}",
-                        console::style("! ").red().bold(),
-                        execution.stderr
-                    );
+                    let err = if let Some(rest) = execution.stderr.strip_prefix("base64:") {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(rest)
+                            .map(|b: Vec<u8>| String::from_utf8_lossy(&b).to_string())
+                            .unwrap_or(execution.stderr.clone())
+                    } else {
+                        execution.stderr.clone()
+                    };
+                    print_warning(&format!("错误: {}", err));
                 }
 
                 if let Some(exit_code) = execution.exit_code {
-                    println!("  退出码: {}", exit_code);
+                    log_detail("退出码", &exit_code.to_string());
                 }
             }
         }

@@ -59,7 +59,7 @@ pub struct ApplyArgs {
     #[arg(long, value_name = "FILE_PATH", help = "本地文件路径")]
     src: String,
     /// 目标（选择器语法）
-    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     target: String,
     /// 目标机器上的目标路径
     #[arg(long, value_name = "DEST_PATH", help = "目标路径（远端）")]
@@ -98,7 +98,7 @@ pub struct RollbackArgs {
     #[arg(long, value_name = "DEST_PATH", help = "目标路径（远端）")]
     dest: String,
     /// 目标（选择器语法）
-    #[arg(long, short = 't', help = "目标（选择器语法）")]
+    #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     target: String,
     /// 目标文件属主（user:group）
     #[arg(
@@ -132,10 +132,6 @@ async fn run_file_apply(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: ApplyArgs,
 ) -> Result<()> {
-    if args.target.is_empty() {
-        return Err(anyhow::anyhow!("必须提供 --target 参数"));
-    }
-
     print_header(&format!(
         "分发文件: {} -> {}",
         style(&args.src).cyan(),

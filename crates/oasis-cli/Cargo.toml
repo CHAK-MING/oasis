@@ -8,6 +8,7 @@ name = "oasis-cli"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 tonic = { workspace = true }

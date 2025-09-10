@@ -202,9 +202,7 @@ impl RolloutHandlers {
         let target_agents = result.to_online_agents();
         let total_agents = target_agents.len() as i64;
         if target_agents.is_empty() {
-            return Err(Status::failed_precondition(
-                "No online agents match the target",
-            ));
+            return Err(Status::failed_precondition("没有在线的Agent匹配目标"));
         }
 
         info!(

@@ -67,9 +67,13 @@ impl AgentService {
         out
     }
 
-    // 写：删除 Agent 相关数据（KV）
+    // 删除 Agent 相关数据（KV）
     pub async fn remove_agent(&self, agent_id: &AgentId) -> CoreResult<bool> {
         let mut removed = false;
+
+        // 移除缓存
+        self.engine.remove_agent(agent_id);
+
 
         if let Ok(store) = self
             .jetstream

@@ -1,6 +1,7 @@
 use crate::nats_client::NatsClient;
 use anyhow::Result;
 use async_nats::jetstream;
+use base64::Engine;
 use futures::StreamExt;
 use oasis_core::{
     constants::*,
@@ -309,8 +310,8 @@ impl TaskManager {
                     agent_id: self.agent_id.clone(),
                     state,
                     exit_code: Some(exit_code),
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    stdout: Self::encode_output(&output.stdout),
+                    stderr: Self::encode_output(&output.stderr),
                     started_at: start_time,
                     finished_at: Some(finish_time),
                     duration_ms: Some(start_instant.elapsed().as_millis() as f64),
@@ -353,6 +354,11 @@ impl TaskManager {
                 }
             }
         }
+    }
+
+    fn encode_output(bytes: &[u8]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        format!("base64:{}", b64)
     }
 
     async fn publish_task_result(&self, execution: &TaskExecution) -> Result<()> {

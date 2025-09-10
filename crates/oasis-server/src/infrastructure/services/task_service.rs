@@ -11,7 +11,7 @@ use prost::Message;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// 任务服务
+/// n任务服务
 pub struct TaskService {
     /// JetStream 上下文
     jetstream: Arc<Context>,
@@ -252,7 +252,8 @@ impl TaskService {
         let proto_task = oasis_core::proto::TaskMsg::from(task);
         let payload = proto_task.encode_to_vec();
 
-        self.jetstream
+        let ack = self
+            .jetstream
             .publish(subject, payload.into())
             .await
             .map_err(|e| {
@@ -261,6 +262,13 @@ impl TaskService {
                     Some(task.task_id.clone()),
                 )
             })?;
+
+        ack.await.map_err(|e| {
+            CoreError::from_anyhow(
+                anyhow::anyhow!("Failed to confirm unicast task publish: {}", e),
+                Some(task.task_id.clone()),
+            )
+        })?;
 
         Ok(())
     }
@@ -278,7 +286,8 @@ impl TaskService {
 
         let payload = cancel_msg.encode_to_vec();
 
-        self.jetstream
+        let ack = self
+            .jetstream
             .publish(subject, payload.into())
             .await
             .map_err(|e| {
@@ -287,6 +296,13 @@ impl TaskService {
                     Some(task_id.clone()),
                 )
             })?;
+
+        ack.await.map_err(|e| {
+            CoreError::from_anyhow(
+                anyhow::anyhow!("Failed to confirm cancel publish: {}", e),
+                Some(task_id.clone()),
+            )
+        })?;
 
         Ok(())
     }
