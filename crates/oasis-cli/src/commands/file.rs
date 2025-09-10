@@ -1,3 +1,5 @@
+use crate::client::format_grpc_error;
+use crate::grpc_retry;
 use crate::ui::{confirm_action, print_header, print_info, print_progress_bar, print_status};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -9,11 +11,6 @@ use oasis_core::{
         GetFileHistoryRequest, RollbackFileRequest, oasis_service_client::OasisServiceClient,
     },
 };
-
-// 统一 gRPC 错误格式
-fn format_grpc_error(e: &tonic::Status) -> String {
-    format!("[{}] {}", e.code(), e.message())
-}
 
 /// 分发文件到目标 Agent 并管理对象存储
 #[derive(Parser, Debug)]
@@ -136,7 +133,7 @@ async fn run_file_apply(
     args: ApplyArgs,
 ) -> Result<()> {
     if args.target.is_empty() {
-        return Err(anyhow::anyhow!("必须提供 --target 参数。"));
+        return Err(anyhow::anyhow!("必须提供 --target 参数"));
     }
 
     print_header(&format!(
@@ -267,17 +264,17 @@ async fn run_file_apply(
     print_info(&format!("目标: {}", args.target));
     print_info(&format!("路径: {}", args.dest));
 
-    let apply_result = client
-        .apply_file(FileApplyRequestMsg {
-            config: Some(FileConfigMsg {
-                source_path: abs_path.to_string_lossy().to_string(),
-                destination_path: args.dest,
-                revision: commit_result.revision,
-                owner: args.owner.unwrap_or_default(),
-                mode: args.mode.unwrap_or_default(),
-                target: Some(SelectorExpression::new(args.target).into()),
-            }),
-        })
+    let base_req = FileApplyRequestMsg {
+        config: Some(FileConfigMsg {
+            source_path: abs_path.to_string_lossy().to_string(),
+            destination_path: args.dest,
+            revision: commit_result.revision,
+            owner: args.owner.unwrap_or_default(),
+            mode: args.mode.unwrap_or_default(),
+            target: Some(SelectorExpression::new(args.target).into()),
+        }),
+    };
+    let apply_result = grpc_retry!(client, apply_file(base_req.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("分发文件失败: {}", format_grpc_error(&e)))?
         .into_inner();
@@ -300,7 +297,10 @@ async fn run_file_clear(client: &mut OasisServiceClient<tonic::transport::Channe
         return Ok(());
     }
 
-    let clear_result = client.clear_files(EmptyMsg {}).await?.into_inner();
+    let base_req = EmptyMsg {};
+    let clear_result = grpc_retry!(client, clear_files(base_req.clone()))
+        .await?
+        .into_inner();
 
     if clear_result.success {
         print_status(clear_result.message.as_str(), true);
@@ -322,10 +322,10 @@ async fn run_file_history(
         .canonicalize()
         .unwrap();
 
-    let response = client
-        .get_file_history(GetFileHistoryRequest {
-            source_path: source_path.to_string_lossy().to_string(),
-        })
+    let base_req = GetFileHistoryRequest {
+        source_path: source_path.to_string_lossy().to_string(),
+    };
+    let response = grpc_retry!(client, get_file_history(base_req.clone()))
         .await?
         .into_inner();
 
@@ -420,8 +420,8 @@ async fn run_file_rollback(
         }),
     };
 
-    let response = client
-        .rollback_file(request)
+    let base_req = request.clone();
+    let response = grpc_retry!(client, rollback_file(base_req.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("文件回滚失败: {}", format_grpc_error(&e)))?
         .into_inner();

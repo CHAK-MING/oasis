@@ -51,6 +51,13 @@ impl TaskHandlers {
 
         let agent_nums = resolved_agent_ids.len() as i64;
 
+        // 如果没有解析到任何在线的 Agent，直接返回错误，避免创建空批次
+        if resolved_agent_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "未找到任何在线的 Agent，批次任务未创建（请检查选择器）",
+            ));
+        }
+
         match srv
             .context()
             .task_service

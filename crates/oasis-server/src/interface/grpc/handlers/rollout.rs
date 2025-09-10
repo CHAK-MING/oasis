@@ -91,7 +91,6 @@ impl RolloutHandlers {
                 version_snapshot = Some(VersionSnapshot::new_file_snapshot(
                     config.clone(),
                     Some(config.revision),
-
                 ));
             }
         };
@@ -518,7 +517,6 @@ impl RolloutHandlers {
                 }
             }
         };
-
 
         srv.context()
             .rollout_service

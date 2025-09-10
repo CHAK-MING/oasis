@@ -166,7 +166,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory={wd}
-ExecStart={bin} --config oasis.toml
+ExecStartPre=/usr/bin/mkdir -p /run/oasis
+ExecStart={bin} --config oasis.toml --lock-file /run/oasis/oasis-server.lock
+RuntimeDirectory=oasis
+RuntimeDirectoryMode=0755
 User={user}
 Group={group}
 Restart=always
@@ -198,7 +201,37 @@ async fn run_system_enable() -> Result<()> {
 
 async fn run_system_start() -> Result<()> {
     run_sysctl(["start", "oasis-server"]).await?;
-    print_status("Oasis 服务器启动成功", true);
+
+    // 启动后等待服务变为 active
+    let max_wait_secs = 20;
+    let mut waited = 0;
+    loop {
+        let status = std::process::Command::new("systemctl")
+            .args(["is-active", "oasis-server"]) // active|activating|failed|inactive
+            .output()
+            .context("无法执行 systemctl is-active")?;
+        let ok = status.status.success();
+        let out = String::from_utf8_lossy(&status.stdout).trim().to_string();
+
+        if ok && out == "active" {
+            print_status("Oasis 服务器启动成功", true);
+            break;
+        }
+
+        if waited >= max_wait_secs {
+            print_status("Oasis 服务器启动失败或超时", false);
+            // 打印最近日志帮助定位
+            let _ = std::process::Command::new("journalctl")
+                .args(["-u", "oasis-server", "--no-pager", "-n", "80"])
+                .status();
+            anyhow::bail!("服务未在预期时间内进入 active 状态 (状态: {out})");
+        }
+
+        // 等待 1 秒后重试
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited += 1;
+    }
+
     Ok(())
 }
 

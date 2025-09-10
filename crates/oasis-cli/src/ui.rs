@@ -117,11 +117,11 @@ pub fn confirm_action(message: &str, danger: bool) -> bool {
         " {} 是否继续? [y/N]: ",
         get_theme().dim.apply_to(Symbols::ARROW)
     );
-    std::io::stdout().flush().expect("Failed to flush stdout");
+    std::io::stdout().flush().expect("刷新标准输出失败");
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap_or_else(|e| {
-        eprintln!("Failed to read user input: {}", e);
+        eprintln!("读取用户输入失败: {}", e);
         0
     });
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes" | "是")

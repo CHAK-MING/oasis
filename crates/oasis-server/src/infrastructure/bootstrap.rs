@@ -26,23 +26,11 @@ impl Bootstrap {
         // 2. 加载初始配置
         let config = strategy.load_initial_config().await?;
 
-        // 3. 启动热重载监控
-        let config_rx = if strategy.supports_hot_reload() {
-            Some(strategy.start_hot_reload().await?)
-        } else {
-            None
-        };
-
-        // 4. 启动服务器
-        Self::start_with_config(config, config_rx).await
+        // 3. 启动服务器
+        Self::start_with_config(config).await
     }
 
-    async fn start_with_config(
-        config: OasisConfig,
-        config_rx: Option<
-            tokio::sync::broadcast::Receiver<oasis_core::config_strategy::ConfigChangeEvent>,
-        >,
-    ) -> Result<()> {
+    async fn start_with_config(config: OasisConfig) -> Result<()> {
         // 设置 panic hook
         std::panic::set_hook(Box::new(|panic_info| {
             eprintln!("PANIC occurred: {}", panic_info);
@@ -224,48 +212,7 @@ impl Bootstrap {
             );
         }
 
-        // 12. 启动配置热重载监听
-        let hot_reload_handle = if let Some(mut rx) = config_rx {
-            let tls_service_for_reload = tls_service.clone();
-            Some(tokio::spawn(async move {
-                use tracing::{info, warn};
-                while let Ok(event) = rx.recv().await {
-                    let changes = event.changes;
-                    // 需要重启的改动（例如 NATS/grpc 地址）
-                    if changes.requires_restart() {
-                        warn!(
-                            "检测到需要重启的配置变更（nats/grpc/server/agent），请重启服务以生效"
-                        );
-                    }
-
-                    // 在线 TLS 证书热重载
-                    if changes.tls_changed {
-                        if let Some(tls) = tls_service_for_reload.as_ref() {
-                            match tls.load_certificates().await {
-                                Ok(_) => info!("TLS 证书已热重载生效"),
-                                Err(e) => warn!("TLS 证书热重载失败: {}", e),
-                            }
-                        } else {
-                            warn!("未启用 TLS，忽略 TLS 相关配置变更");
-                        }
-                    }
-
-                    // 日志配置等其它轻量变更可在此扩展（例如动态调整日志级别）
-                    if changes.telemetry_changed {
-                        warn!("检测到日志配置变更，目前需重启服务以完整生效");
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
-        if let Some(hot_reload_handle) = hot_reload_handle {
-            lifecycle_manager
-                .register_low_priority_service("hot_reload".to_string(), hot_reload_handle);
-        }
-
-        // 13. 运行生命周期管理器
+        // 12. 运行生命周期管理器
         info!("Starting lifecycle manager...");
         info!("Server startup completed, waiting for shutdown signal...");
         if let Err(e) = lifecycle_manager.run().await {

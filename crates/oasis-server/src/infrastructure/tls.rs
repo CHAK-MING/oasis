@@ -88,11 +88,6 @@ impl TlsService {
         Ok(())
     }
 
-    /// 获取 TLS 重新加载接收器用于监控证书变化
-    pub fn get_reload_receiver(&self) -> broadcast::Receiver<()> {
-        self.reload_notifier.subscribe()
-    }
-
 
     /// 获取当前 ServerTlsConfig 克隆如果可用
     pub async fn get_server_tls_config(&self) -> Option<ServerTlsConfig> {

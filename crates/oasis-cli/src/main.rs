@@ -14,7 +14,7 @@ use oasis_core::{config_strategies::CliConfigStrategy, config_strategy::ConfigSt
 async fn main() -> Result<()> {
     let cli = client::Cli::parse();
 
-    // 强制启用 ANSI 颜色
+    // 启用 ANSI 颜色
     if std::env::var("CLICOLOR_FORCE").is_err() {
         unsafe {
             std::env::set_var("CLICOLOR_FORCE", "1");

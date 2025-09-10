@@ -1,5 +1,5 @@
-//! 灰度发布命令实现
-
+use crate::client::format_grpc_error;
+use crate::grpc_retry;
 use crate::ui::{confirm_action, print_header, print_info, print_next_step, print_warning};
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
@@ -10,11 +10,6 @@ use oasis_core::proto::{
     RolloutId, RolloutStateEnum, oasis_service_client::OasisServiceClient,
 };
 use std::path::PathBuf;
-
-// 统一 gRPC 错误格式
-fn format_grpc_error(e: &tonic::Status) -> String {
-    format!("[{}] {}", e.code(), e.message())
-}
 
 /// 灰度发布管理
 #[derive(Parser, Debug)]
@@ -246,7 +241,7 @@ async fn run_rollout_create(
     };
 
     // 发送请求
-    match client.create_rollout(request).await {
+    match grpc_retry!(client, create_rollout(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             if resp.success {
@@ -286,7 +281,7 @@ async fn run_rollout_status(
         }),
     };
 
-    match client.get_rollout_status(request).await {
+    match grpc_retry!(client, get_rollout_status(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             if let Some(status) = resp.status {
@@ -318,7 +313,7 @@ async fn run_rollout_list(
         states: states.unwrap_or_default(),
     };
 
-    match client.list_rollouts(request).await {
+    match grpc_retry!(client, list_rollouts(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             display_rollouts_table(&resp.rollouts);
@@ -339,7 +334,7 @@ async fn run_rollout_advance(
         }),
     };
 
-    match client.advance_rollout(request).await {
+    match grpc_retry!(client, advance_rollout(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             if resp.success {
@@ -376,8 +371,7 @@ async fn run_rollout_rollback(
     };
 
     print_info("正在提交回滚...");
-    let resp = client
-        .rollback_rollout(request)
+    let resp = grpc_retry!(client, rollback_rollout(request.clone()))
         .await
         .map_err(|e| anyhow!("回滚发布失败: {}", format_grpc_error(&e)))?
         .into_inner();

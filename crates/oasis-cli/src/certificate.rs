@@ -6,7 +6,7 @@ use rcgen::{
 };
 use std::net::IpAddr;
 
-/// 简化的证书生成器
+/// 证书生成器
 pub struct CertificateGenerator;
 
 impl CertificateGenerator {

@@ -156,37 +156,63 @@ impl HeartbeatMonitor {
 
         tokio::spawn(async move {
             info!("Starting heartbeat data watcher");
+            let mut backoff_ms: u64 = 500;
+            loop {
+                // 1) 获取 KV store
+                let heartbeat_store = match jetstream.get_key_value(JS_KV_AGENT_HEARTBEAT).await {
+                    Ok(store) => store,
+                    Err(e) => {
+                        error!("Failed to get heartbeat store for watcher: {}", e);
+                        // 等待后重试或退出
+                        tokio::select! {
+                            _ = shutdown_token.cancelled() => { info!("Heartbeat watcher shutdown requested"); return; }
+                            _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                        }
+                        backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+                        continue;
+                    }
+                };
 
-            let heartbeat_store = match jetstream.get_key_value(JS_KV_AGENT_HEARTBEAT).await {
-                Ok(store) => store,
-                Err(e) => {
-                    error!("Failed to get heartbeat store for watcher: {}", e);
-                    return;
-                }
-            };
+                // 2) 建立 watcher
+                match heartbeat_store.watch_all().await {
+                    Ok(mut watcher) => {
+                        info!("Heartbeat watcher established");
+                        backoff_ms = 500; // 成功后重置退避
 
-            match heartbeat_store.watch_all().await {
-                Ok(mut watcher) => loop {
-                    tokio::select! {
-                        Some(entry) = watcher.next() => {
-                            match entry {
-                                Ok(entry) => {
-                                    Self::handle_heartbeat_change(entry, &status_cache).await;
+                        loop {
+                            tokio::select! {
+                                msg = watcher.next() => {
+                                    match msg {
+                                        Some(Ok(entry)) => {
+                                            Self::handle_heartbeat_change(entry, &status_cache).await;
+                                        }
+                                        Some(Err(e)) => {
+                                            warn!("Error watching heartbeat changes: {}", e);
+                                        }
+                                        None => {
+                                            warn!("Heartbeat watcher stream ended; will restart after backoff");
+                                            break; // 跳出内层循环，重新建立 watcher
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Error watching heartbeat changes: {}", e);
+                                _ = shutdown_token.cancelled() => {
+                                    info!("Heartbeat watcher stopped");
+                                    return;
                                 }
                             }
                         }
-                        _ = shutdown_token.cancelled() => {
-                            info!("Heartbeat watcher stopped");
-                            break;
-                        }
                     }
-                },
-                Err(e) => {
-                    error!("Failed to start heartbeat watcher: {}", e);
+                    Err(e) => {
+                        error!("Failed to start heartbeat watcher: {}", e);
+                    }
                 }
+
+                // 3) 退避后重试
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => { info!("Heartbeat watcher shutdown requested"); return; }
+                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                }
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
             }
         });
 

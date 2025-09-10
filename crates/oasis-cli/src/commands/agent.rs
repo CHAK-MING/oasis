@@ -1,8 +1,10 @@
+use crate::client::format_grpc_error;
+use crate::grpc_retry;
 use crate::ui::{
     log_operation, print_header, print_info, print_next_step, print_progress, print_status,
     print_warning,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand, arg, command};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
@@ -10,11 +12,6 @@ use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use oasis_core::proto::{RemoveAgentRequest, SetInfoAgentRequest};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-// 统一 gRPC 错误格式
-fn format_grpc_error(e: &tonic::Status) -> String {
-    format!("[{}] {}", e.code(), e.message())
-}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -168,16 +165,14 @@ async fn run_agent_deploy(
     args: AgentDeployArgs,
 ) -> Result<()> {
     if args.ssh_target.is_empty() {
-        return Err(anyhow::anyhow!("必须提供 --ssh-target 参数。"));
+        return Err(anyhow::anyhow!("必须提供 --ssh-target 参数"));
     }
 
     print_header(&format!("部署 Agent 到 {}", style(&args.ssh_target).cyan()));
 
     let re_id = regex::Regex::new(r"^[A-Za-z0-9]{1,64}$").unwrap();
     if !re_id.is_match(&args.agent_id) {
-        return Err(anyhow::anyhow!(
-            "Agent ID 非法（仅允许 1-64 位字母或数字）。"
-        ));
+        return Err(anyhow::anyhow!("Agent ID 非法（仅允许 1-64 位字母或数字）"));
     }
 
     // 创建部署目录
@@ -254,16 +249,14 @@ async fn run_agent_list(
     print_header("列出所有已连接的 Agent");
 
     // 获取节点列表
-    let response = client
-        .list_agents(oasis_core::proto::ListAgentsRequest {
-            target: Some(oasis_core::proto::SelectorExpression {
-                expression: args.target.clone(),
-            }),
-            verbose: args.verbose,
-            is_online: args.is_online,
-        })
-        .await
-        .context("Failed to get nodes from server")?;
+    let base_req = oasis_core::proto::ListAgentsRequest {
+        target: Some(oasis_core::proto::SelectorExpression {
+            expression: args.target.clone(),
+        }),
+        verbose: args.verbose,
+        is_online: args.is_online,
+    };
+    let response = grpc_retry!(client, list_agents(base_req.clone())).await?;
 
     let agents = response.into_inner().agents;
 
@@ -512,14 +505,16 @@ echo "Oasis Agent 已成功移除!"
         key_arg, args.ssh_target, script_name, script_name
     );
 
-    match client
-        .remove_agent(RemoveAgentRequest {
+    match grpc_retry!(
+        client,
+        remove_agent(RemoveAgentRequest {
             agent_id: Some(oasis_core::proto::AgentId {
                 value: args.agent_id.clone(),
             }),
         })
-        .await
-        .map_err(|e| anyhow::anyhow!("从服务器注销 Agent 失败: {}", format_grpc_error(&e)))
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("从服务器注销 Agent 失败: {}", format_grpc_error(&e)))
     {
         Ok(response) => {
             let resp = response.into_inner();
@@ -573,15 +568,17 @@ async fn run_agent_set(
     }
 
     // 调用 agent_service 的 set_info_agent 方法
-    match client
-        .set_info_agent(SetInfoAgentRequest {
+    match grpc_retry!(
+        client,
+        set_info_agent(SetInfoAgentRequest {
             agent_id: Some(oasis_core::proto::AgentId {
-                value: args.agent_id,
+                value: args.agent_id.clone()
             }),
-            info,
+            info: info.clone(),
         })
-        .await
-        .map_err(|e| anyhow::anyhow!("设置失败: {}", format_grpc_error(&e)))
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("设置失败: {}", format_grpc_error(&e)))
     {
         Ok(_) => {
             print_status("设置 Agent 标签或者分组成功", true);

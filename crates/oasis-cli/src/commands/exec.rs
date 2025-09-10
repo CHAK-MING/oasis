@@ -1,5 +1,5 @@
-//! 重构后的 exec 命令 - 适配新的任务系统
-
+use crate::client::format_grpc_error;
+use crate::grpc_retry;
 use crate::ui::{print_header, print_info, print_next_step, print_status, print_warning};
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
@@ -13,11 +13,6 @@ use oasis_core::proto::{
     oasis_service_client::OasisServiceClient,
 };
 use std::fmt::Write as FmtWrite;
-
-// 统一 gRPC 错误格式
-fn format_grpc_error(e: &tonic::Status) -> String {
-    format!("[{}] {}", e.code(), e.message())
-}
 
 /// exec 子命令集合
 #[derive(Parser, Debug)]
@@ -123,10 +118,10 @@ async fn run_exec_run(
 ) -> Result<()> {
     // 验证输入参数
     if args.target.is_empty() {
-        return Err(anyhow!("必须提供 --target 参数。"));
+        return Err(anyhow!("必须提供 --target 参数"));
     }
     if args.command.is_empty() {
-        return Err(anyhow!("必须在 -- 后提供要执行的命令。"));
+        return Err(anyhow!("必须在 -- 后提供要执行的命令"));
     }
 
     print_header(&format!(
@@ -154,8 +149,8 @@ async fn run_exec_run(
 
     // 提交任务
     print_status("正在提交任务...", true);
-    let response = client
-        .submit_batch(request)
+    let base_req = request.clone();
+    let response = grpc_retry!(client, submit_batch(base_req.clone()))
         .await
         .map_err(|e| anyhow!("提交任务失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();
@@ -200,7 +195,8 @@ async fn run_exec_get(
         states: state_filters.unwrap_or_default(),
     };
 
-    let batch_details = match client.get_batch_details(details_request).await {
+    let base_req = details_request.clone();
+    let batch_details = match grpc_retry!(client, get_batch_details(base_req.clone())).await {
         Ok(response) => response.into_inner(),
         Err(e) => {
             print_status("获取批次信息失败", false);
@@ -245,8 +241,8 @@ async fn run_exec_list(
         states: state_filters.unwrap_or_default(),
     };
 
-    let response = client
-        .list_batches(request)
+    let base_req = request.clone();
+    let response = grpc_retry!(client, list_batches(base_req.clone()))
         .await
         .map_err(|e| anyhow!("获取批量任务列表失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();
@@ -285,8 +281,8 @@ async fn run_exec_cancel(
         }),
     };
 
-    let response = client
-        .cancel_batch(request)
+    let base_req = request.clone();
+    let response = grpc_retry!(client, cancel_batch(base_req.clone()))
         .await
         .map_err(|e| anyhow!("取消批次任务失败: {}", format_grpc_error(&e)))?;
     let response = response.into_inner();

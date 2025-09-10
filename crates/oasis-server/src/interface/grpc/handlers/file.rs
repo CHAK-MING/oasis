@@ -236,24 +236,21 @@ impl FileHandlers {
 
         // 验证参数
         if req.source_path.is_empty() {
-            return Err(Status::invalid_argument("source_path cannot be empty"));
+            return Err(Status::invalid_argument("源文件路径不能为空"));
         }
 
         // 使用新的验证模块
         if let Err(e) = oasis_core::constants::validation::validate_file_path(&req.source_path) {
-            return Err(Status::invalid_argument(format!(
-                "Invalid file path: {}",
-                e
-            )));
+            return Err(Status::invalid_argument(format!("无效的文件路径: {}", e)));
         }
 
         if req.size == 0 {
-            return Err(Status::invalid_argument("size must be greater than 0"));
+            return Err(Status::invalid_argument("文件大小必须大于 0"));
         }
 
         if req.size > 100 * 1024 * 1024 {
             // 100MB 限制
-            return Err(Status::invalid_argument("file too large (max 100MB)"));
+            return Err(Status::invalid_argument("文件过大 (最大 100MB)"));
         }
 
         // 生成上传 ID

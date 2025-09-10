@@ -45,7 +45,7 @@ pub fn network_connect_backoff() -> ExponentialBackoff {
         initial_interval: Duration::from_millis(200),
         max_interval: Duration::from_millis(5000),
         multiplier: 2.0,
-        max_elapsed_time: Some(Duration::from_secs(120)),
+        max_elapsed_time: Some(Duration::from_secs(5)),
         randomization_factor: 0.2,
         ..Default::default()
     }

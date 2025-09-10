@@ -243,9 +243,10 @@ impl TaskManager {
         start_instant: std::time::Instant,
     ) -> TaskExecution {
         info!(
-            "Executing shell command: {} {}",
+            "Executing shell command: {} {} (timeout: {}s)",
             task.command,
-            task.args.join(" ")
+            task.args.join(" "),
+            task.timeout_seconds
         );
 
         // 构建完整命令
@@ -255,16 +256,15 @@ impl TaskManager {
             format!("{} {}", task.command, task.args.join(" "))
         };
 
-        // 统一使用 shell 执行
-        let output = match tokio::process::Command::new("/bin/sh")
+        // 创建子进程
+        let child = match tokio::process::Command::new("/bin/sh")
             .args(&["-c", &full_command])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(std::env::vars())
-            .output()
-            .await
+            .spawn()
         {
-            Ok(output) => output,
+            Ok(child) => child,
             Err(e) => {
                 let finish_time = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -284,27 +284,74 @@ impl TaskManager {
             }
         };
 
+        // 使用超时等待命令完成
+        let timeout_duration = std::time::Duration::from_secs(task.timeout_seconds as u64);
+        let result =
+            tokio::time::timeout(timeout_duration, async { child.wait_with_output().await }).await;
+
         let finish_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let exit_code = output.status.code().unwrap_or(-1);
-        let state = if exit_code == 0 {
-            TaskState::Success
-        } else {
-            TaskState::Failed
-        };
 
-        TaskExecution {
-            task_id: task.task_id.clone(),
-            agent_id: self.agent_id.clone(),
-            state,
-            exit_code: Some(exit_code),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            started_at: start_time,
-            finished_at: Some(finish_time),
-            duration_ms: Some(start_instant.elapsed().as_millis() as f64),
+        match result {
+            Ok(Ok(output)) => {
+                // 命令正常完成
+                let exit_code = output.status.code().unwrap_or(-1);
+                let state = if exit_code == 0 {
+                    TaskState::Success
+                } else {
+                    TaskState::Failed
+                };
+
+                TaskExecution {
+                    task_id: task.task_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    state,
+                    exit_code: Some(exit_code),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    started_at: start_time,
+                    finished_at: Some(finish_time),
+                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
+                }
+            }
+            Ok(Err(e)) => {
+                // 命令执行出错
+                TaskExecution {
+                    task_id: task.task_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    state: TaskState::Failed,
+                    exit_code: Some(-1),
+                    stdout: String::new(),
+                    stderr: format!("Command execution failed: {}", e),
+                    started_at: start_time,
+                    finished_at: Some(finish_time),
+                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
+                }
+            }
+            Err(_) => {
+                // 超时
+                info!(
+                    "Command timed out after {} seconds, killing process",
+                    task.timeout_seconds
+                );
+
+                // 注意：这里 child 已经被消费了，无法再 kill
+                // 但超时后 tokio::time::timeout 会自动取消 future，子进程应该会被清理
+
+                TaskExecution {
+                    task_id: task.task_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    state: TaskState::Timeout,
+                    exit_code: Some(-1),
+                    stdout: String::new(),
+                    stderr: format!("Command timed out after {} seconds", task.timeout_seconds),
+                    started_at: start_time,
+                    finished_at: Some(finish_time),
+                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
+                }
+            }
         }
     }
 

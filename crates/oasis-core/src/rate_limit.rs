@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::error::{CoreError, Result};
 
-/// 简化的限流器类型
+/// 限流器类型
 pub type SimpleRateLimiter = RateLimiter<governor::state::NotKeyed, InMemoryState, DefaultClock>;
 
 /// 限流配置

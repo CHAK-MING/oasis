@@ -1,27 +1,20 @@
 //! 针对不同运行环境的具体配置策略实现。
 
 use crate::config::OasisConfig;
-use crate::config_strategy::{
-    ConfigChangeEvent, ConfigContext, ConfigStrategy, RuntimeEnvironment,
-};
+use crate::config_strategy::{ConfigContext, ConfigStrategy, RuntimeEnvironment};
 use anyhow::Result;
 use figment::providers::Format;
-use futures::StreamExt;
 use std::path::PathBuf;
-use tokio::sync::broadcast;
 
-/// Server 配置策略 —— 通过 SIGHUP 支持热重载
+/// Server 配置策略
 pub struct ServerConfigStrategy {
     config_path: PathBuf,
-    current_config: std::sync::Arc<tokio::sync::RwLock<OasisConfig>>,
-    change_tx: broadcast::Sender<ConfigChangeEvent>,
     context: ConfigContext,
 }
 
 impl ServerConfigStrategy {
     pub fn new(config_path: impl Into<PathBuf>) -> Result<Self> {
         let config_path = config_path.into();
-        let (change_tx, _) = broadcast::channel(100);
 
         let context = ConfigContext {
             base_dir: config_path
@@ -33,8 +26,6 @@ impl ServerConfigStrategy {
 
         Ok(Self {
             config_path,
-            current_config: std::sync::Arc::new(tokio::sync::RwLock::new(OasisConfig::default())),
-            change_tx,
             context,
         })
     }
@@ -45,22 +36,7 @@ impl ConfigStrategy for ServerConfigStrategy {
     async fn load_initial_config(&self) -> Result<OasisConfig> {
         let config = self.load_config_from_file().await?;
         self.validate_config(&config).await?;
-
-        *self.current_config.write().await = config.clone();
         Ok(config)
-    }
-
-    fn supports_hot_reload(&self) -> bool {
-        true
-    }
-
-    async fn start_hot_reload(&self) -> Result<broadcast::Receiver<ConfigChangeEvent>> {
-        let rx = self.change_tx.subscribe();
-
-        // 基于 SIGHUP 的热重载
-        self.start_signal_reload().await?;
-
-        Ok(rx)
     }
 
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
@@ -79,62 +55,6 @@ impl ServerConfigStrategy {
         let path_str = self.config_path.to_string_lossy().to_string();
         let config = OasisConfig::load_config(Some(&path_str))?;
         Ok(config)
-    }
-
-    async fn start_signal_reload(&self) -> Result<()> {
-        let mut signals = signal_hook_tokio::Signals::new(&[signal_hook::consts::SIGHUP])?;
-        let strategy = self.clone();
-
-        tokio::spawn(async move {
-            tracing::info!("配置热重载已启用（信号：SIGHUP）");
-
-            while let Some(signal) = signals.next().await {
-                match signal {
-                    signal_hook::consts::SIGHUP => {
-                        tracing::info!("收到 SIGHUP 信号，开始重载配置");
-
-                        match strategy.reload_config().await {
-                            Ok(change_event) => {
-                                tracing::info!("配置重载成功：{:?}", change_event.changes);
-
-                                if let Err(e) = strategy.change_tx.send(change_event) {
-                                    tracing::warn!("配置变更通知发送失败：{}", e);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("配置重载失败：{}", e);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    async fn reload_config(&self) -> Result<ConfigChangeEvent> {
-        let old_config = self.current_config.read().await.clone();
-        let new_config = self.load_config_from_file().await?;
-
-        self.validate_config(&new_config).await?;
-
-        *self.current_config.write().await = new_config.clone();
-
-        Ok(ConfigChangeEvent::new(old_config, new_config))
-    }
-}
-
-// 为 ServerConfigStrategy 实现 Clone
-impl Clone for ServerConfigStrategy {
-    fn clone(&self) -> Self {
-        Self {
-            config_path: self.config_path.clone(),
-            current_config: std::sync::Arc::clone(&self.current_config),
-            change_tx: self.change_tx.clone(),
-            context: self.context.clone(),
-        }
     }
 }
 
@@ -169,9 +89,6 @@ impl ConfigStrategy for AgentConfigStrategy {
         Ok(config)
     }
 
-    fn supports_hot_reload(&self) -> bool {
-        false
-    } // Agent 通过重启来“重载”
 
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
@@ -305,9 +222,6 @@ impl ConfigStrategy for CliConfigStrategy {
         Ok(config)
     }
 
-    fn supports_hot_reload(&self) -> bool {
-        false
-    }
 
     fn strategy_name(&self) -> &'static str {
         "cli"

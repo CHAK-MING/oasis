@@ -9,7 +9,7 @@ log_no_ansi = false
 url = "tls://127.0.0.1:4222"
 
 [grpc]
-url = "https://127.0.0.1:50051"
+url = "https://localhost:50051"
 
 [tls]
 certs_dir = "./certs"

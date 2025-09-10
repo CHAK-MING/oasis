@@ -1,4 +1,4 @@
-//! 简化后的TaskService - 专注基础CRUD操作
+//! TaskService - 专注基础CRUD操作
 
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
 use anyhow;
@@ -11,7 +11,7 @@ use prost::Message;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// 简化后的任务服务
+/// 任务服务
 pub struct TaskService {
     /// JetStream 上下文
     jetstream: Arc<Context>,

@@ -3,12 +3,10 @@ pub const JS_STREAM_TASKS: &str = "OASIS-TASKS"; // subjects: tasks.exec.>
 pub const JS_STREAM_RESULTS: &str = "OASIS-RESULTS"; // subjects: results.>
 pub const JS_STREAM_FILES: &str = "OASIS-FILES"; // subjects: files.>
 
-// KV 存储结构重构 - 分离不同生命周期的数据
-// 新架构：三个独立的 KV buckets，支持独立的 TTL 和版本管理
+// KV 存储结构
 pub const JS_KV_AGENT_INFOS: &str = "OASIS-AGENT-INFOS"; // facts (版本化，非TTL)
 pub const JS_KV_AGENT_HEARTBEAT: &str = "OASIS-AGENT-HB"; // heartbeat (TTL=2x心跳)
 pub const JS_KV_AGENT_LABELS: &str = "OASIS-AGENT-LABELS"; // labels (Server/CLI可变更)
-
 
 // Object Store（文件分发）
 // 使用下划线命名以避免某些部署对连字符的限制
@@ -35,7 +33,6 @@ pub const TASKS_PUBLISH_SUBJECT: &str = "tasks.exec.default"; // Server 无目�
 pub const RESULTS_SUBJECT_PREFIX: &str = "results";
 
 pub const FILES_SUBJECT_PREFIX: &str = "files";
-
 
 // 统一管理的消费者命名常量
 pub const DEFAULT_CONSUMER_NAME: &str = "oasis-workers-default-new";

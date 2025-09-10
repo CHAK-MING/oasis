@@ -88,75 +88,104 @@ impl TaskMonitor {
         info!("Starting TaskMonitor");
         let subject = "results.>";
 
-        match self
-            .jetstream
-            .get_stream(&constants::JS_STREAM_RESULTS)
-            .await
-        {
-            Ok(stream) => {
-                let consumer_config = async_nats::jetstream::consumer::pull::Config {
-                    filter_subject: subject.to_string(),
-                    deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
-                    durable_name: Some("oasis-server-result-listener".to_string()),
-                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                    ack_wait: std::time::Duration::from_secs(10),
-                    max_deliver: 3,
-                    ..Default::default()
-                };
+        let mut backoff_ms: u64 = 500;
+        loop {
+            if self.shutdown_token.is_cancelled() { 
+                info!("TaskMonitor shutdown requested");
+                return Ok(());
+            }
 
-                match stream.create_consumer(consumer_config).await {
-                    Ok(consumer) => {
-                        info!("Task result listener started successfully");
+            // 1) 获取结果流
+            let stream = match self.jetstream.get_stream(&constants::JS_STREAM_RESULTS).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Failed to get results stream: {}", e);
+                    tokio::select! {
+                        _ = self.shutdown_token.cancelled() => { info!("TaskMonitor stopped by shutdown signal"); return Ok(()); }
+                        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                    }
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+                    continue;
+                }
+            };
 
-                        match consumer.messages().await {
-                            Ok(mut messages) => loop {
-                                tokio::select! {
-                                    _ = self.shutdown_token.cancelled() => {
-                                        info!("TaskMonitor stopped by shutdown signal");
-                                        break;
-                                    }
-                                    message = messages.next() => {
-                                        match message {
-                                            Some(Ok(msg)) => {
-                                                if let Ok(execution) = Self::parse_execution_message(&msg.payload) {
-                                                    let task_id = &execution.task_id;
-                                                    debug!("Received execution result for task: {}", task_id);
-                                                    self.execution_cache
-                                                        .entry(task_id.clone())
-                                                        .or_insert_with(Vec::new)
-                                                        .push(CachedExecution {
-                                                            execution: Arc::new(execution.clone()),
-                                                            cached_at: chrono::Utc::now().timestamp(),
-                                                        });
+            // 2) 创建/确保消费者
+            let consumer_config = async_nats::jetstream::consumer::pull::Config {
+                filter_subject: subject.to_string(),
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
+                durable_name: Some("oasis-server-result-listener".to_string()),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ack_wait: std::time::Duration::from_secs(10),
+                max_deliver: 3,
+                ..Default::default()
+            };
 
-                                                    if execution.state.is_terminal() {
-                                                        if let Some(mut cached_task) = self.task_cache.get_mut(task_id) {
-                                                            let task = Arc::make_mut(&mut cached_task);
-                                                            if !task.state.is_terminal() {
-                                                                let _ = task.transition_to(execution.state);
-                                                                info!("Updated task {} status to {:?}", task_id, execution.state);
-                                                            }
-                                                        }
-                                                    }
+            let consumer = match stream.create_consumer(consumer_config).await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to create result monitoring consumer: {}", e);
+                    tokio::select! {
+                        _ = self.shutdown_token.cancelled() => { info!("TaskMonitor stopped by shutdown signal"); return Ok(()); }
+                        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                    }
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+                    continue;
+                }
+            };
+
+            info!("Task result listener established");
+            backoff_ms = 500; 
+
+            // 3) 建立消息流并消费；如果流结束或报错，跳出并重建
+            match consumer.messages().await {
+                Ok(mut messages) => loop {
+                    tokio::select! {
+                        _ = self.shutdown_token.cancelled() => {
+                            info!("TaskMonitor stopped by shutdown signal");
+                            return Ok(());
+                        }
+                        message = messages.next() => {
+                            match message {
+                                Some(Ok(msg)) => {
+                                    if let Ok(execution) = Self::parse_execution_message(&msg.payload) {
+                                        let task_id = &execution.task_id;
+                                        debug!("Received execution result for task: {}", task_id);
+                                        self.execution_cache
+                                            .entry(task_id.clone())
+                                            .or_insert_with(Vec::new)
+                                            .push(CachedExecution {
+                                                execution: Arc::new(execution.clone()),
+                                                cached_at: chrono::Utc::now().timestamp(),
+                                            });
+
+                                        if execution.state.is_terminal() {
+                                            if let Some(mut cached_task) = self.task_cache.get_mut(task_id) {
+                                                let task = Arc::make_mut(&mut cached_task);
+                                                if !task.state.is_terminal() {
+                                                    let _ = task.transition_to(execution.state);
+                                                    info!("Updated task {} status to {:?}", task_id, execution.state);
                                                 }
-                                                let _ = msg.ack().await;
                                             }
-                                            Some(Err(e)) => warn!("Error receiving execution result: {}", e),
-                                            None => { warn!("Result stream ended unexpectedly"); break; }
                                         }
                                     }
+                                    let _ = msg.ack().await;
                                 }
-                            },
-                            Err(e) => error!("Failed to get messages from result consumer: {}", e),
+                                Some(Err(e)) => warn!("Error receiving execution result: {}", e),
+                                None => { warn!("Result stream ended; will recreate consumer after backoff"); break; }
+                            }
                         }
                     }
-                    Err(e) => error!("Failed to create result monitoring consumer: {}", e),
-                }
+                },
+                Err(e) => error!("Failed to get messages from result consumer: {}", e),
             }
-            Err(e) => error!("Failed to get results stream: {}", e),
-        }
 
-        Ok(())
+            // 4) 退避并重试
+            tokio::select! {
+                _ = self.shutdown_token.cancelled() => { info!("TaskMonitor stopped by shutdown signal"); return Ok(()); }
+                _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+            }
+            backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+        }
     }
 
     fn parse_execution_message(payload: &[u8]) -> Result<TaskExecution> {

@@ -1,182 +1,217 @@
-# Oasis 文档
+# Oasis
 
-在 OpenCloudOS Stream 23/OpenCloudOS 9 上的大规模集群节点管理工具
+[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 
-## 快速开始
+Oasis 是一个大规模集群节点管理工具，支持 OpenCloudOS Stream 23/OpenCloudOS 9。提供统一的命令行界面来管理大规模 Linux 节点。支持任务执行、文件分发、灰度发布等核心功能。
 
-1. 构建项目
+## ✨ 特性
+
+- 🚀 **统一管理**: 通过单一 CLI 工具管理整个集群
+- 🎯 **智能选择器**: 基于标签、系统信息和分组的灵活节点选择
+- 📦 **文件分发**: 支持版本化文件管理和部署，支持回滚
+- 🔄 **灰度发布**: 支持百分比、计数策略的渐进式发布
+- ⚡ **实时监控**: 任务执行状态实时反馈和超时控制
+- 🔒 **安全可靠**: 基于 mTLS 的安全通信和证书管理
+- 🐳 **容器化**: 支持 Docker Compose 快速部署
+
+## 🚀 快速开始
+
+### 1. 构建项目
+
 ```bash
-git clone <gitee_url> 
+git clone <repository-url>
 cd oasis
 cargo build --release
 ```
 
-2. 初始化（生成证书、配置与 docker-compose.yml）
+### 2. 初始化系统
 
 ```bash
+# 生成证书、配置文件和 docker-compose.yml
 ./target/release/oasis-cli system init
 ```
 
-3. 启动 NATS
+### 3. 启动 NATS
 
 ```bash
+# 启动 NATS 消息队列
 docker compose up -d
 ```
 
-4. 安装服务器
+### 4. 安装并启动服务器
 
 ```bash
+# 安装为 systemd 服务
 sudo ./target/release/oasis-cli system install
-```
 
-5. 启动服务器
-
-```bash
+# 启动服务器
 sudo ./target/release/oasis-cli system start
-```
-
-6. 部署 Agent
-
-```bash
-./oasis-cli agent deploy \
-  --agent-id agent123456
-  --ssh-target user@remote-host \
-  --nats-url tls://YOUR_SERVER_IP:4222 \
-  --output-dir ~/agent-deploy \
-  --labels "env=test" \
-  --labels "role=worker" \
-  --groups "test-group" \
-  --agent-binary ./oasis-agent
-
-# 安装
-cd ~/agent-deploy/*/
-sudo ./install.sh
 
 # 查看状态
+sudo ./target/release/oasis-cli system status
+```
+
+### 5. 部署 Agent
+
+```bash
+# 部署 Agent 到远程主机
+./target/release/oasis-cli agent deploy \
+  --ssh-target user@remote-host \
+  --agent-id agent123456 \
+  --nats-url tls://YOUR_SERVER_IP:4222 \
+  --output-dir ~/agent-deploy \
+  --labels "env=prod" \
+  --labels "role=web" \
+  --groups "web" \
+  --agent-binary ./target/release/oasis-agent
+
+# 在远程主机上安装
+cd ~/agent-deploy/agent123456/
+sudo ./install.sh
+
+# 查看 Agent 状态
 sudo systemctl status oasis-agent
 ```
 
-7. 查看部署的所有 Agent 状态
+### 6. 验证部署
 
 ```bash
+# 查看所有 Agent
 ./target/release/oasis-cli agent list -t 'all'
-```
 
-8. 发布任务
-```bash
-# 下发任务
-./target/release/oasis-cli exec run -t 'all' -- /bin/echo hello
+# 执行测试命令
+./target/release/oasis-cli exec run -t 'all' -- /bin/echo "Hello Oasis"
 
-# 获取任务结果
+# 查看任务结果
 ./target/release/oasis-cli exec get <batch_id>
-
-# 列出最近任务
-./target/release/oasis-cli exec list --limit 20
-
-# 取消任务
-./target/release/oasis-cli exec cancel <batch_id>
 ```
 
-9. 查看系统状态与停止
+## 📖 使用指南
+
+### 系统管理 (`system`)
 
 ```bash
-sudo ./target/release/oasis-cli system status
-sudo ./target/release/oasis-cli system stop
-```
-
-10. 移除 Agent
-
-```bash
-./target/release/oasis-cli agent remove \
-  --ssh-target root@localhost \
-  --agent-id agent123456
-```
-
-## CLI 用法
-
-### system：系统管理
-
-```bash
-# 初始化系统
+# 初始化系统（生成证书和配置）
 oasis-cli system init --force
 
-# 安装服务器
+# 安装服务器为 systemd 服务
 oasis-cli system install
 
-# 启动服务器
+# 启动/停止/重启服务器
 oasis-cli system start
-
-# 查看状态
-oasis-cli system status
-
-# 重启服务器
+oasis-cli system stop
 oasis-cli system restart
 
-# 停止服务器
-oasis-cli system stop
+# 查看服务器状态
+oasis-cli system status
 
-# 查看日志
-oasis-cli system logs --lines 150
+# 查看服务器日志
+oasis-cli system logs --lines 150 --follow
+
+# 卸载服务器
+oasis-cli system uninstall
 ```
 
-### exec：执行命令
+### 任务执行 (`exec`)
 
 ```bash
-# 下发任务
-oasis-cli exec run -t 'labels["role"] == "worker"' -- /usr/bin/uptime
+# 提交任务到指定节点
+oasis-cli exec run -t 'labels["role"] == "web"' -- /usr/bin/uptime
 
-# 下发任务（支持系统参数）
-oasis-cli exec run -t 'system["hostname"] == "server-name"' -- /usr/bin/uptime
+# 使用系统信息选择节点
+oasis-cli exec run -t 'system["hostname"] == "server01"' -- /usr/bin/ps aux
 
-# 下发任务（支持下发全部在线的 Agent）
-oasis-cli exec run -t 'all' -- /usr/bin/uptime
+# 选择所有在线节点
+oasis-cli exec run -t 'all' -- /bin/echo "Hello World"
 
-# 获取某任务结果
+# 设置超时时间（秒）
+oasis-cli exec run -t 'all' --timeout 30 -- sleep 60
+
+# 查看任务结果
 oasis-cli exec get <batch_id>
 
-# 列出最近任务
+# 列出最近的任务
 oasis-cli exec list --limit 20
+
+# 取消任务
+oasis-cli exec cancel <batch_id>
 ```
 
-### file：分发文件
+### 文件分发 (`file`)
 
 ```bash
-# 向 Web 服务器分发 nginx 配置
-oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
+# 分发配置文件
+oasis-cli file apply \
+  --src ./nginx.conf \
+  --dest /etc/nginx/nginx.conf \
+  --target 'labels["role"] == "web"'
 
-# 设置权限/属主
-oasis-cli file apply --src ./app.conf --dest /etc/myapp/config.conf --target 'labels["environment"] == "prod"' --owner root:root --mode 0644
+# 设置文件权限和所有者
+oasis-cli file apply \
+  --src ./app.conf \
+  --dest /etc/myapp/config.conf \
+  --target 'labels["environment"] == "prod"' \
+  --owner root:root \
+  --mode 0644
 
-# 指定多个 agent ID
-oasis-cli file apply --src ./config.conf --dest /etc/config.conf --target 'agent-1,agent-2,agent-3'
+# 指定多个 Agent ID
+oasis-cli file apply \
+  --src ./config.conf \
+  --dest /etc/config.conf \
+  --target 'agent-1,agent-2,agent-3'
 
-# 查看文件的历史版本
+# 查看文件历史版本
 oasis-cli file history --source-path ./nginx.conf
 
-# 回滚文件到指定版本
-oasis-cli file rollback --source-path ./nginx.conf --revision 1 --dest /etc/nginx/nginx.conf --target 'labels["role"] == "web"'
+# 回滚到指定版本
+oasis-cli file rollback \
+  --source-path ./nginx.conf \
+  --revision 1 \
+  --dest /etc/nginx/nginx.conf \
+  --target 'labels["role"] == "web"'
 
-# 清空文件仓库（对象存储）——危险操作，会提示确认
-oasis-cli file clear"
+# 清空文件仓库，清空完后所有文件的历史记录将不存在（危险操作）
+oasis-cli file clear
 ```
 
-### agent：Agent 管理
+### Agent 管理 (`agent`)
 
 ```bash
-# 部署 Agent
-oasis-cli agent deploy --agent-id <agent_id> --ssh-target user@host --output-dir ./deploy
+# 部署 Agent 到远程主机
+oasis-cli agent deploy \
+  --ssh-target user@host \
+  --agent-id agent-1234567890 \
+  --nats-url tls://127.0.0.1:4222 \
+  --output-dir ./agent-deploy \
+  --labels "env=test" \
+  --labels "role=worker" \
+  --groups "test-group" \
+  --agent-binary ./oasis-agent \
+  --auto-install
 
-# 列出 Agent（简洁模式）
+# 列出所有 Agent
 oasis-cli agent list
 
-# 列出 Agent（详细模式，包含系统信息）
+# 列出详细信息和系统信息
 oasis-cli agent list --verbose
 
+# 按条件筛选 Agent
+oasis-cli agent list -t 'labels["environment"] == "prod"' --verbose
+
 # 移除 Agent
-oasis-cli agent remove --agent-id <agent_id> --ssh-target user@host
+oasis-cli agent remove \
+  --ssh-target user@host \
+  --agent-id agent-1234567890
+
+# 设置 Agent 标签和分组
+oasis-cli agent set \
+  --agent-id agent-1234567890 \
+  --labels "env=prod" \
+  --labels "version=v2.0" \
+  --groups "production"
 ```
 
-### rollout：灰度发布
+### 灰度发布 (`rollout`)
 
 ```bash
 # 创建命令灰度发布
@@ -184,7 +219,7 @@ oasis-cli rollout create \
   --name "系统更新" \
   --target 'labels["role"] == "web"' \
   --strategy percentage:10,30,60,100 \
-  --command "dnf update && dnf upgrade -y" \
+  --command "apt update && apt upgrade -y" \
   --timeout 300
 
 # 创建文件灰度发布
@@ -196,69 +231,209 @@ oasis-cli rollout create \
   --file-dest /etc/nginx/nginx.conf \
   --file-mode 0644
 
+# 自动推进的灰度发布
+oasis-cli rollout create \
+  --name "自动发布" \
+  --target 'labels["role"] == "api"' \
+  --strategy percentage:25,50,100 \
+  --command "systemctl restart myapp" \
+  --auto-advance \
+  --advance-interval 300
+
 # 查看发布状态
 oasis-cli rollout status rollout-12345678
 
-# 推进到下一阶段
+# 手动推进到下一阶段
 oasis-cli rollout advance rollout-12345678
+
+# 列出所有发布
+oasis-cli rollout list --limit 10
 
 # 回滚发布
 oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
 ```
 
-## 语法器用法说明
+## 🎯 选择器语法
 
-### 基础语法
+Oasis 使用强大的选择器语法来精确选择目标节点：
+
+### 基础选择器
+
 ```bash
-# all 或 true表示所有Agent
-all | true
-# 指定AgentId
+# 选择所有节点
+all
+true
+
+# 选择指定 Agent ID
 agent-1,agent-2,agent-3
-# 指定标签
+
+# 基于标签选择
+labels["environment"] == "production"
+labels["role"] == "web"
 labels["version"] == "1.0"
-# 指定系统参数
+
+# 基于系统信息选择
 system["hostname"] == "server01"
-# 指定分组
+system["os_name"] == "linux"
+system["cpu_cores"] == "8"
+system["memory_total_gb"] == "16"
+
+# 基于分组选择
 "production" in groups
+"web-servers" in groups
 ```
 
+### 逻辑运算
 
-### 基础逻辑运算
 ```bash
 # 与运算
 labels["env"] == "prod" and system["os_name"] == "linux"
 
-# 或运算  
+# 或运算
 labels["team"] == "backend" or labels["team"] == "frontend"
 
 # 非运算
 not labels["maintenance"] == "true"
 
-# 运算符优先级是not > and > or 符合常见的运算规则
-```
-
-### 复杂表达式
-```bash
-# 括号分组
+# 复杂表达式
 (labels["env"] == "prod" or labels["env"] == "staging") and system["cpu_cores"] == "8"
-
-# 多重嵌套
 not (labels["deprecated"] == "true" or system["os_name"] == "windows")
-
-# 混合条件
-"web-servers" in groups and labels["env"] == "prod" and not system["memory_total_gb"] == "1"
 ```
 
-## 系统标签（用于选择器查找）
+### 灰度策略
 
-| 系统信息名 | 标签名          |
-| ---------- | --------------- |
-| 主机名     | hostname        |
-| 主 IP      | primary_ip      |
-| 架构       | cpu_arch        |
-| CPU 核数   | cpu_cores       |
-| 内存       | memory_total_gb |
-| OS         | os_name         |
-| OS 版本    | os_version      |
-| 内核       | kernel_version  |
+```bash
+# 百分比策略：10% -> 30% -> 60% -> 100%
+percentage:10,30,60,100
 
+# 计数策略：2台 -> 5台 -> 10台 -> 全部
+count:2,5,10,0
+
+# 分组策略：先金丝雀 -> 再生产
+groups:canary,production
+```
+
+## 📊 系统信息标签
+
+Agent 自动收集以下系统信息，可用于选择器：
+
+| 系统信息 | 标签名            | 示例值            |
+| -------- | ----------------- | ----------------- |
+| 主机名   | `hostname`        | `web-server-01`   |
+| 主 IP    | `primary_ip`      | `192.168.1.100`   |
+| CPU 架构 | `cpu_arch`        | `x86_64`          |
+| CPU 核数 | `cpu_cores`       | `8`               |
+| 内存大小 | `memory_total_gb` | `16`              |
+| 操作系统 | `os_name`         | `linux`           |
+| OS 版本  | `os_version`      | `OpenCloudOS 9`   |
+| 内核版本 | `kernel_version`  | `5.14.0-284.11.1` |
+
+## 🏗️ 架构
+
+```mermaid
+graph TD
+    %% 定义不同组件的样式
+    classDef server fill:#D5E8D4,stroke:#82B366,stroke-width:2px;
+    classDef agent fill:#D5E8D4,stroke:#82B366,stroke-width:2px;
+    classDef infra fill:#DAE8FC,stroke:#6C8EBF,stroke-width:2px;
+    classDef responsibility fill:#FFF2CC,stroke:#D6B656,stroke-width:2px;
+    classDef admin fill:#F8CECC,stroke:#B85450,stroke-width:2px;
+
+    subgraph "集群节点管理工具"
+        direction LR
+        subgraph "应用层"
+            Admin["管理员 / CLI"]:::admin
+            Server["服务端 (Rust)"]:::server
+            Agent["客户端 (Rust)"]:::agent
+        end
+
+        subgraph "核心基础设施 (单一依赖)"
+            JetStream[("NATS JetStream 集群")]:::infra
+        end
+
+        Admin -- "gRPC 管理接口" --> Server
+        Server -- "状态读写 / 任务发布 / 选主" --> JetStream
+        Agent -- "拉取(持久化)任务 / 状态上报" --> JetStream
+    end
+
+    subgraph "基础设施核心职责"
+        direction TB
+        TaskQueue["<b>任务队列</b><br/>(可靠消息流)"]:::responsibility
+        StateStore["<b>状态存储</b><br/>(持久化KV存储)"]:::responsibility
+        FileStore["<b>文件分发</b><br/>(对象存储)"]:::responsibility
+    end
+
+    JetStream --> TaskQueue
+    JetStream --> StateStore
+    JetStream --> FileStore
+```
+
+## 🔧 配置
+
+### 服务器配置 (`oasis.toml`)
+
+```toml
+[server]
+# 服务器监听地址
+listen_addr = "0.0.0.0:50051"
+# TTL 心跳，用来维持与 Agent 的连接
+heartbeat_ttl_sec = 60
+
+[grpc]
+# CLI与服务器的grpc连接
+url = "https://localhost:50051"
+
+[nats]
+# nats 地址
+url = "tls://127.0.0.1:4222"
+
+[tls]
+# TLS证书目录
+certs_dir = "./certs"
+
+[telemetry]
+# 遥测日志配置
+log_level = "info"
+log_format = "json"
+log_no_ansi = false
+```
+
+### Agent 环境变量
+
+```bash
+# Agent 连接配置
+OASIS__NATS__URL=tls://127.0.0.1:4222
+OASIS__TLS__CERTS_DIR=/opt/oasis/certs
+
+# Agent 标识
+OASIS__AGENT_ID=agent123456
+OASIS__AGENT_LABELS=env=prod,role=web
+OASIS__AGENT_GROUPS=production,web-servers
+
+# 心跳配置
+OASIS__AGENT__HEARTBEAT_INTERVAL_SEC=30
+OASIS__AGENT__FACT_COLLECTION_INTERVAL_SEC=300
+```
+
+## 🚀 部署
+
+### Docker Compose 部署
+
+```yaml
+version: "3.8"
+services:
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command:
+      - "--tls"
+      - "--tlscert=/certs/nats-server.pem"
+      - "--tlskey=/certs/nats-server-key.pem"
+      - "--tlsca=/certs/nats-ca.pem"
+      - "--jetstream"
+    volumes:
+      - ./certs:/certs
+      - ./data/nats:/data
+```

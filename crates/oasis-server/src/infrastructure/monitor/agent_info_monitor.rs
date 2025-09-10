@@ -118,15 +118,7 @@ impl AgentInfoMonitor {
     }
 
     async fn start_watcher(&self) -> Result<()> {
-        let store = self
-            .jetstream
-            .get_key_value(JS_KV_AGENT_INFOS)
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to get agent infos store: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
-
+        let jetstream = self.jetstream.clone();
         let shutdown = self.shutdown_token.clone();
         let info_cache = self.info_cache.clone();
         let index_labels = self.index_labels.clone();
@@ -136,58 +128,93 @@ impl AgentInfoMonitor {
         let dirty_agents = self.dirty_agents.clone();
 
         tokio::spawn(async move {
-            match store.watch_all().await {
-                Ok(mut watcher) => loop {
-                    tokio::select! {
-                        msg = watcher.next() => {
-                            match msg {
-                                Some(Ok(entry)) => {
-                                    let key = entry.key;
-                                    let agent_id = AgentId::from(key.clone());
-                                    match entry.operation {
-                                        async_nats::jetstream::kv::Operation::Put => {
+            let mut backoff_ms: u64 = 500;
+            loop {
+                // 每次循环尝试重新获取 KV 并建立 watcher
+                let store = match jetstream.get_key_value(JS_KV_AGENT_INFOS).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Failed to get agent infos store: {}", e);
+                        tokio::select! {
+                            _ = shutdown.cancelled() => { info!("AgentInfoMonitor watcher shutdown requested"); return; }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+                        }
+                        backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+                        continue;
+                    }
+                };
 
-                                            match proto::AgentInfoMsg::decode(entry.value.as_ref()) {
-                                                Ok(proto_info) => {
-                                                    let info = AgentInfo::from(proto_info);
-                                                    Self::insert_info_static(
+                match store.watch_all().await {
+                    Ok(mut watcher) => {
+                        info!("AgentInfo watcher established");
+                        backoff_ms = 500; // 成功后重置退避
+
+                        loop {
+                            tokio::select! {
+                                msg = watcher.next() => {
+                                    match msg {
+                                        Some(Ok(entry)) => {
+                                            let key = entry.key;
+                                            let agent_id = AgentId::from(key.clone());
+                                            match entry.operation {
+                                                async_nats::jetstream::kv::Operation::Put => {
+                                                    match proto::AgentInfoMsg::decode(entry.value.as_ref()) {
+                                                        Ok(proto_info) => {
+                                                            let info = AgentInfo::from(proto_info);
+                                                            Self::insert_info_static(
+                                                                &info_cache,
+                                                                &index_labels,
+                                                                &index_system,
+                                                                &index_groups,
+                                                                &id32_to_agent_id,
+                                                                &dirty_agents,
+                                                                agent_id,
+                                                                info,
+                                                            ).await;
+                                                        }
+                                                        Err(e) => {
+                                                            warn!("Failed to decode AgentInfoMsg for {}: {}", agent_id, e);
+                                                        }
+                                                    }
+                                                }
+                                                async_nats::jetstream::kv::Operation::Delete => {
+                                                    Self::remove_info_static(
                                                         &info_cache,
-                                                        &index_labels,
-                                                        &index_system,
-                                                        &index_groups,
                                                         &id32_to_agent_id,
                                                         &dirty_agents,
-                                                        agent_id,
-                                                        info,
+                                                        &agent_id,
                                                     ).await;
                                                 }
-                                                Err(e) => {
-                                                    warn!("Failed to decode AgentInfoMsg for {}: {}", agent_id, e);
-                                                }
+                                                _ => {}
                                             }
                                         }
-                                        async_nats::jetstream::kv::Operation::Delete => {
-                                            Self::remove_info_static(
-                                                &info_cache,
-                                                &id32_to_agent_id,
-                                                &dirty_agents,
-                                                &agent_id,
-                                            ).await;
+                                        Some(Err(e)) => {
+                                            warn!("AgentInfo watcher error: {}", e);
                                         }
-                                        _ => {} // Ignore other operations
+                                        None => {
+                                            warn!("AgentInfo watcher stream ended; will restart after backoff");
+                                            break; // 结束内层循环，触发外层重连
+                                        }
                                     }
                                 }
-                                Some(Err(e)) => error!("AgentInfo watcher error: {}", e),
-                                None => break,
+                                _ = shutdown.cancelled() => {
+                                    info!("AgentInfoMonitor watcher stopped");
+                                    return;
+                                }
                             }
                         }
-                        _ = shutdown.cancelled() => {
-                            info!("AgentInfoMonitor watcher stopped");
-                            break;
-                        }
                     }
-                },
-                Err(e) => error!("Failed to start agent infos watcher: {}", e),
+                    Err(e) => {
+                        error!("Failed to start agent infos watcher: {}", e);
+                    }
+                }
+
+                // 退避后重试建立 watcher
+                tokio::select! {
+                    _ = shutdown.cancelled() => { info!("AgentInfoMonitor watcher shutdown requested"); return; }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+                }
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
             }
         });
 

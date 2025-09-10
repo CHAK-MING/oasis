@@ -7,9 +7,11 @@ use crate::commands::system::{SystemArgs, run_system};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use oasis_core::backoff::{execute_with_backoff_selective, network_connect_backoff};
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
+use tonic::{Code, Status};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,7 +33,7 @@ use tonic::transport::{Channel, Endpoint};
   oasis-cli agent list --target 'labels["environment"] == "prod"' --verbose
   oasis-cli agent list --target 'labels["role"] == "db"' --verbose
 
-For detailed options:
+更多用法：
   oasis-cli exec --help
   oasis-cli file --help
   oasis-cli agent --help"#
@@ -63,7 +65,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
         _ => {
             let client = create_grpc_client(config)
                 .await
-                .context("Failed to create gRPC client")?;
+                .context("创建 gRPC 客户端失败")?;
 
             match cli.command {
                 Commands::Exec(args) => run_exec(client, args).await?,
@@ -86,15 +88,30 @@ async fn create_grpc_client(
 
     println!("› 正在连接 Oasis 服务器: {}", style(&server_url).cyan());
 
-    // 解析 endpoint
-    let mut endpoint = Endpoint::from_shared(server_url.to_string()).context("无效的服务器地址")?;
+    // 解析 host 与连接/校验策略
+    let original_host = extract_host(&server_url).unwrap_or_default();
+    // 如果是 IP，则优先使用本地开发证书常见的 DNS 名称作为 SNI（例如 localhost）
+    // 如果是 localhost，则强制走 IPv4 以避免 ::1 未监听导致的超时
+    let sni_host = if original_host.parse::<std::net::IpAddr>().is_ok() {
+        "localhost".to_string()
+    } else {
+        original_host.clone()
+    };
+    let connect_url = if original_host == "localhost" {
+        // 将连接地址中的 localhost 替换为 127.0.0.1，确保使用 IPv4 连接
+        server_url.replacen("localhost", "127.0.0.1", 1)
+    } else {
+        server_url.to_string()
+    };
+    // 构建 endpoint（连接地址可能与校验域名不同）
+    let mut endpoint = Endpoint::from_shared(connect_url).context("无效的服务器地址")?;
 
     // 只支持 HTTPS
     let mut tls = tonic::transport::ClientTlsConfig::new();
 
-    // 设定 SNI 域名（若 URL 含域名）
-    if let Some(host) = extract_host(&server_url) {
-        tls = tls.domain_name(host.to_string());
+    // 设定 SNI 域名（优先使用 DNS 名称）
+    if !sni_host.is_empty() {
+        tls = tls.domain_name(sni_host);
     }
 
     // CA
@@ -151,21 +168,13 @@ async fn create_grpc_client(
 
     // 保持连接 & 超时
     endpoint = endpoint
-        .connect_timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Some(Duration::from_secs(60)))
-        .timeout(Duration::from_secs(30))
         .http2_keep_alive_interval(Duration::from_secs(30))
-        .keep_alive_timeout(Duration::from_secs(5))
+        .keep_alive_timeout(Duration::from_secs(60))
         .keep_alive_while_idle(true);
 
-    // 使用退避重试连接（更长的窗口）来覆盖服务器重启
-    let backoff = oasis_core::backoff::network_connect_backoff();
-    let channel = oasis_core::backoff::execute_with_backoff(
-        || async { endpoint.connect().await.map_err(|e| anyhow::anyhow!(e)) },
-        backoff,
-    )
-    .await
-    .with_context(|| format!("无法连接到服务器 {}", server_url))?;
+    let channel = endpoint.connect().await.context("连接到服务器失败")?;
 
     Ok(OasisServiceClient::new(channel))
 }
@@ -180,4 +189,93 @@ fn extract_host(url: &str) -> Option<String> {
     let host = caps.get(1)?.as_str();
     // 去掉 IPv6 方括号
     Some(host.trim_matches(&['[', ']'][..]).to_string())
+}
+
+/// 判断 gRPC 错误是否为“瞬态错误”，适合进行自动重试
+fn is_transient_status(status: &Status) -> bool {
+    match status.code() {
+        Code::Unavailable | Code::DeadlineExceeded => true,
+        Code::Unknown => {
+            // 对部分常见传输类错误进行放行（尽量保守）
+            let msg = status.message().to_ascii_lowercase();
+            msg.contains("connect")
+                || msg.contains("connection")
+                || msg.contains("transport")
+                || msg.contains("protocol error")
+                || msg.contains("goaway")
+        }
+        _ => false,
+    }
+}
+
+// 统一 gRPC 错误格式
+pub(crate) fn format_grpc_error(e: &tonic::Status) -> String {
+    use tonic::Code;
+    let code = e.code();
+    let raw = e.message();
+    let lower = raw.to_ascii_lowercase();
+
+    let hint = match code {
+        Code::Ok => "成功",
+        Code::Unavailable => "服务器不可用或网络中断",
+        Code::DeadlineExceeded => "请求超时",
+        Code::Unauthenticated => "认证失败（证书或凭据无效）",
+        Code::PermissionDenied => "权限不足",
+        Code::InvalidArgument => "请求参数无效",
+        Code::NotFound => "资源未找到",
+        Code::AlreadyExists => "资源已存在",
+        Code::ResourceExhausted => "资源耗尽（可能被限流/配额不足）",
+        Code::FailedPrecondition => "前置条件不满足",
+        Code::Aborted => "操作被中止（可能存在并发冲突）",
+        Code::OutOfRange => "超出允许范围",
+        Code::Unimplemented => "功能未实现",
+        Code::Internal => "服务器内部错误",
+        Code::DataLoss => "数据丢失",
+        Code::Cancelled => "请求已取消",
+        Code::Unknown => {
+            if lower.contains("tls") || lower.contains("handshake") || lower.contains("certificate")
+            {
+                "TLS 握手失败（请检查证书与域名/SNI）"
+            } else if lower.contains("dns") || lower.contains("name resolution") {
+                "DNS 解析失败（请检查服务器地址）"
+            } else if lower.contains("connect") || lower.contains("connection") {
+                "无法连接服务器（请检查网络或服务器监听端口）"
+            } else if lower.contains("protocol")
+                || lower.contains("goaway")
+                || lower.contains("http2")
+            {
+                "HTTP/2 传输错误（网络抖动或服务器重启）"
+            } else {
+                "未知错误"
+            }
+        }
+    };
+
+    format!("{}: [{}] {}", hint, code, raw)
+}
+
+pub async fn call_with_retry<F, Fut, T>(mut op: F) -> Result<T, Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Status>>,
+{
+    let classifier = std::sync::Arc::new(|e: &Status| is_transient_status(e));
+
+    // 使用重试机制处理瞬态错误
+    execute_with_backoff_selective(|| op(), network_connect_backoff(), classifier).await
+}
+
+#[macro_export]
+macro_rules! grpc_retry {
+    ($client:expr, $method:ident($req:expr)) => {{
+        // 显式限定路径，避免 #[macro_export] 导致的路径变化
+        crate::client::call_with_retry(|| {
+            let req = $req;
+            let client = $client.clone();
+            async move {
+                let mut client = client;
+                client.$method(req).await
+            }
+        })
+    }};
 }
