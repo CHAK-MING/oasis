@@ -1,12 +1,7 @@
 use async_nats::jetstream::Context;
 use dashmap::DashMap;
 use futures::StreamExt;
-use oasis_core::{
-    agent_types::AgentStatus,
-    constants::*,
-    core_types::AgentId,
-    error::{Result},
-};
+use oasis_core::{agent_types::AgentStatus, constants::*, core_types::AgentId, error::Result};
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

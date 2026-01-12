@@ -182,6 +182,33 @@ impl TaskService {
         Ok(task_executions)
     }
 
+    /// 获取单个任务的完整输出（stdout/stderr）
+    pub async fn get_task_output(&self, task_id: &TaskId) -> Result<TaskExecution> {
+        if let Some(execution) = self.task_monitor.latest_execution_from_cache(task_id) {
+            return Ok(execution);
+        }
+
+        if let Some(task) = self.task_monitor.task_cache.get(task_id) {
+            return Ok(TaskExecution {
+                task_id: task_id.clone(),
+                agent_id: task.agent_id.clone(),
+                state: task.state,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                started_at: task.created_at,
+                finished_at: None,
+                duration_ms: None,
+            });
+        }
+
+        Err(CoreError::NotFound {
+            entity_type: "task".to_string(),
+            entity_id: task_id.to_string(),
+            severity: oasis_core::error::ErrorSeverity::Error,
+        })
+    }
+
     /// 列出批次
     pub async fn list_batches(
         &self,

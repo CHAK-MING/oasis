@@ -89,7 +89,6 @@ impl ConfigStrategy for AgentConfigStrategy {
         Ok(config)
     }
 
-
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
@@ -221,7 +220,6 @@ impl ConfigStrategy for CliConfigStrategy {
         let config = OasisConfig::load_config(path_str.as_deref())?;
         Ok(config)
     }
-
 
     fn strategy_name(&self) -> &'static str {
         "cli"

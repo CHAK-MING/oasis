@@ -1,8 +1,7 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
 use crate::ui::{
-    log_operation, print_header, print_info, print_next_step, print_progress, print_status,
-    print_warning,
+    log_operation, print_header, print_info, print_next_step, print_status, print_warning,
 };
 use anyhow::Result;
 use clap::{Parser, Subcommand, arg, command};
@@ -252,7 +251,18 @@ async fn run_agent_list(
         verbose: args.verbose,
         is_online: args.is_online,
     };
-    let response = grpc_retry!(client, list_agents(base_req.clone())).await?;
+
+    let pb = crate::ui::create_spinner("正在获取 Agent 列表...");
+    let response = match grpc_retry!(client, list_agents(base_req.clone())).await {
+        Ok(resp) => {
+            pb.finish_and_clear();
+            resp
+        }
+        Err(e) => {
+            pb.finish_with_message("获取失败");
+            return Err(e.into());
+        }
+    };
 
     let agents = response.into_inner().agents;
 
@@ -501,6 +511,7 @@ echo "Oasis Agent 已成功移除!"
         key_arg, args.ssh_target, script_name, script_name
     );
 
+    let pb = crate::ui::create_spinner("正在从服务器注销 Agent...");
     match grpc_retry!(
         client,
         remove_agent(RemoveAgentRequest {
@@ -515,12 +526,14 @@ echo "Oasis Agent 已成功移除!"
         Ok(response) => {
             let resp = response.into_inner();
             if resp.success {
-                print_status("Agent 已从服务器注销", true);
+                pb.finish_with_message("Agent 已从服务器注销");
             } else {
-                print_warning(&format!("注销结果: {}", resp.message));
+                pb.finish_with_message(format!("注销结果: {}", resp.message));
+                // print_warning(&format!("注销结果: {}", resp.message));
             }
         }
         Err(e) => {
+            pb.finish_with_message("Agent 注销失败");
             print_warning(&format!("从服务器注销 Agent 失败: {}", e));
             print_warning("将继续进行远程卸载，但 Agent 信息可能仍存在于服务器");
         }
@@ -564,6 +577,7 @@ async fn run_agent_set(
     }
 
     // 调用 agent_service 的 set_info_agent 方法
+    let pb = crate::ui::create_spinner("正在设置 Agent 属性...");
     match grpc_retry!(
         client,
         set_info_agent(SetInfoAgentRequest {
@@ -577,10 +591,11 @@ async fn run_agent_set(
     .map_err(|e| anyhow::anyhow!("设置失败: {}", format_grpc_error(&e)))
     {
         Ok(_) => {
-            print_status("设置 Agent 标签或者分组成功", true);
+            pb.finish_with_message("设置 Agent 标签或者分组成功");
         }
         Err(e) => {
-            print_warning(&format!("设置 Agent 标签或者分组失败: {}", e));
+            pb.finish_with_message("设置失败");
+            crate::ui::print_error(&format!("设置 Agent 标签或者分组失败: {}", e));
         }
     }
 
@@ -604,7 +619,7 @@ async fn run_agent_auto_deploy(
     };
 
     // 1. 创建远程临时目录
-    print_progress(1, 5, "创建远程目录");
+    let pb = crate::ui::create_spinner("正在创建远程目录...");
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(&ssh_key_args)
         .arg(target)
@@ -612,14 +627,16 @@ async fn run_agent_auto_deploy(
 
     let output = cmd.output().await?;
     if !output.status.success() {
+        pb.finish_with_message("创建远程目录失败");
         anyhow::bail!(
             "创建远程目录失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    pb.finish_with_message("远程目录已创建");
 
     // 2. 使用 rsync 或 scp 复制文件
-    print_progress(2, 5, "上传部署文件");
+    let pb = crate::ui::create_spinner("正在上传部署文件...");
 
     // 尝试使用 rsync（更快更可靠）
     let mut rsync_cmd = tokio::process::Command::new("rsync");
@@ -641,8 +658,8 @@ async fn run_agent_auto_deploy(
             .status
             .success()
     {
+        pb.set_message("rsync 失败，回退到 scp...");
         // 如果 rsync 失败，回退到 scp
-        print_info("使用 scp 上传文件...");
         let mut scp_cmd = tokio::process::Command::new("scp");
         scp_cmd
             .args(&ssh_key_args)
@@ -652,12 +669,14 @@ async fn run_agent_auto_deploy(
 
         let output = scp_cmd.output().await?;
         if !output.status.success() {
+            pb.finish_with_message("上传失败");
             anyhow::bail!("上传文件失败: {}", String::from_utf8_lossy(&output.stderr));
         }
     }
+    pb.finish_with_message("部署文件已上传");
 
     // 3. 执行安装脚本
-    print_progress(3, 5, "执行安装脚本");
+    let pb = crate::ui::create_spinner("正在执行安装脚本...");
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(&ssh_key_args).arg(target).arg(format!(
         "cd /tmp/oasis-deploy-{} && sudo bash install.sh",
@@ -666,14 +685,16 @@ async fn run_agent_auto_deploy(
 
     let output = cmd.output().await?;
     if !output.status.success() {
+        pb.finish_with_message("安装失败");
         anyhow::bail!(
             "执行安装脚本失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    pb.finish_with_message("安装脚本执行完成");
 
     // 4. 启动服务
-    print_progress(4, 5, "启动 Agent 服务");
+    let pb = crate::ui::create_spinner("正在启动 Agent 服务...");
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(&ssh_key_args)
         .arg(target)
@@ -681,17 +702,20 @@ async fn run_agent_auto_deploy(
 
     let output = cmd.output().await?;
     if !output.status.success() {
+        pb.finish_with_message("启动失败");
         anyhow::bail!("启动服务失败: {}", String::from_utf8_lossy(&output.stderr));
     }
+    pb.finish_with_message("Agent 服务已启动");
 
     // 5. 清理临时文件
-    print_progress(5, 5, "清理临时文件");
+    let pb = crate::ui::create_spinner("正在清理临时文件...");
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(&ssh_key_args)
         .arg(target)
         .arg(format!("rm -rf /tmp/oasis-deploy-{}", agent_id));
 
     let _ = cmd.output().await; // 忽略清理错误
+    pb.finish_with_message("清理完成");
 
     Ok(())
 }

@@ -206,8 +206,6 @@ pub async fn wait_for_tasks_with_timeout(
     handles: Vec<tokio::task::JoinHandle<()>>,
     timeout_secs: u64,
 ) {
-    use tokio::task::JoinSet;
-
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
     info!(
         "Waiting for {} tasks to complete (timeout: {}s)",
@@ -215,30 +213,22 @@ pub async fn wait_for_tasks_with_timeout(
         timeout_secs
     );
 
-    let mut set = JoinSet::new();
-    for handle in handles {
-        set.spawn(async move {
-            let _ = handle.await; // 忽略内部结果；外部 JoinSet 捕获异常
-        });
-    }
+    let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
 
-    let deadline = tokio::time::Instant::now() + timeout;
-    while let Some(join_result) = set.join_next().await {
-        if let Err(e) = join_result {
-            warn!("Task failed during shutdown: {}", e);
+    let result = tokio::time::timeout(timeout, async {
+        for handle in handles {
+            let _ = handle.await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            warn!(
-                remaining = set.len(),
-                "Timeout waiting for tasks to complete, aborting remaining"
-            );
-            // 中止集合中的剩余任务
-            while let Some(handle) = set.join_next().await {
-                if let Err(e) = handle {
-                    warn!("Task aborted or failed during shutdown: {}", e);
-                }
-            }
-            break;
+    })
+    .await;
+
+    if result.is_err() {
+        warn!(
+            remaining = abort_handles.len(),
+            "Timeout waiting for tasks to complete, aborting remaining"
+        );
+        for h in abort_handles {
+            h.abort();
         }
     }
 }

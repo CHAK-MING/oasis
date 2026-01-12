@@ -1,5 +1,8 @@
 target/
 tests/
 docs/
+certs/
 
-Cargo.lock
+docker-compose.yml
+Cargo.lockagent-deploy/
+.cargo/

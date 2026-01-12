@@ -457,14 +457,14 @@ impl AgentInfoMonitor {
 
     pub fn get_all_agents_bitmap(&self) -> roaring::RoaringBitmap {
         let mut bitmap = roaring::RoaringBitmap::new();
-        
+
         // 遍历所有在缓存中的 agent
         for entry in self.info_cache.iter() {
             let agent_id = entry.key();
             let id32 = Self::to_bitmap_key(agent_id);
             bitmap.insert(id32);
         }
-        
+
         bitmap
     }
 }

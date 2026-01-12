@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use async_nats::ConnectOptions;
-use std::time::Duration;
 use async_nats::{Client, jetstream};
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// NATS 客户端工厂

@@ -113,6 +113,14 @@ message GetBatchDetailsResponse {
   repeated TaskExecutionMsg tasks = 1;
 }
 
+message GetTaskOutputRequest {
+  TaskId task_id = 1;
+}
+
+message GetTaskOutputResponse {
+  TaskExecutionMsg execution = 1;
+}
+
 // 列出任务请求
 message ListBatchesRequest {
   uint32 limit = 1;
@@ -424,6 +432,7 @@ service OasisService {
   // 任务管理
   rpc SubmitBatch(SubmitBatchRequest) returns (SubmitBatchResponse);
   rpc GetBatchDetails(GetBatchDetailsRequest) returns (GetBatchDetailsResponse);
+  rpc GetTaskOutput(GetTaskOutputRequest) returns (GetTaskOutputResponse);
   rpc ListBatches(ListBatchesRequest) returns (ListBatchesResponse);
   rpc CancelBatch(CancelBatchRequest) returns (CancelBatchResponse);
   

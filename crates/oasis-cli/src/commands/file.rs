@@ -1,6 +1,6 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{confirm_action, print_header, print_info, print_progress_bar, print_status};
+use crate::ui::{confirm_action, print_header, print_info};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use console::style;
@@ -157,7 +157,7 @@ async fn run_file_apply(
     // 显示文件信息
     print_info(&format!("文件大小: {}", human_readable_size(file_size)));
 
-    print_header("开始上传文件到对象存储");
+    let pb_start = crate::ui::create_spinner("开始上传文件到对象存储...");
 
     let begin = client
         .begin_file_upload(FileSpecMsg {
@@ -171,6 +171,7 @@ async fn run_file_apply(
         .map_err(|e| anyhow::anyhow!("开始上传失败: {}", format_grpc_error(&e)))?
         .into_inner();
     let upload_id = begin.upload_id;
+    pb_start.finish_with_message("初始化上传成功");
 
     // 打开文件并准备上传
     let mut file = tokio::fs::File::open(&args.src).await?;
@@ -187,8 +188,8 @@ async fn run_file_apply(
     // 分片上传：遵循服务端建议的分片大小
     let chunk_size = (begin.chunk_size as usize).clamp(64 * 1024, 4 * 1024 * 1024);
     let mut buf = vec![0u8; chunk_size];
-    let mut chunk_count = 0;
-    let start_time = std::time::Instant::now();
+
+    let pb = crate::ui::create_progress_bar(file_size, "上传中...");
 
     loop {
         let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await?;
@@ -213,34 +214,11 @@ async fn run_file_apply(
             .into_inner();
 
         offset = chunk_resp.received_bytes;
-        chunk_count += 1;
-
-        // 计算上传速度和剩余时间
-        let elapsed = start_time.elapsed();
-        let speed = if elapsed.as_secs() > 0 {
-            offset / elapsed.as_secs()
-        } else {
-            0
-        };
-
-        let remaining_bytes = file_size.saturating_sub(offset);
-        let eta = if speed > 0 {
-            remaining_bytes / speed
-        } else {
-            0
-        };
-
-        // 显示上传进度（每10个分片或最后显示一次）
-        if chunk_count % 10 == 0 || offset >= file_size {
-            print_progress_bar(
-                offset as usize,
-                file_size as usize,
-                &format!("上传中 ({} MB/s, 剩余 {}s)", speed / (1024 * 1024), eta),
-            );
-        }
+        pb.set_position(offset);
     }
+    pb.finish_with_message("上传完成");
 
-    print_info("提交文件上传...");
+    let pb_commit = crate::ui::create_spinner("提交文件上传...");
     let commit_result = client
         .commit_file_upload(CommitFileMsg {
             upload_id,
@@ -251,8 +229,9 @@ async fn run_file_apply(
         .into_inner();
 
     if commit_result.success {
-        print_status("上传完成", true);
+        pb_commit.finish_with_message("文件提交成功");
     } else {
+        pb_commit.finish_with_message("文件提交失败");
         return Err(anyhow::anyhow!("文件上传失败: {}", commit_result.message));
     }
 
@@ -270,15 +249,18 @@ async fn run_file_apply(
             target: Some(SelectorExpression::new(args.target).into()),
         }),
     };
+
+    let pb_apply = crate::ui::create_spinner("正在分发任务...");
     let apply_result = grpc_retry!(client, apply_file(base_req.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("分发文件失败: {}", format_grpc_error(&e)))?
         .into_inner();
 
     if apply_result.success {
-        print_status("文件分发成功", true);
+        pb_apply.finish_with_message("文件分发指令已下发");
+        crate::ui::print_success("文件分发成功");
     } else {
-        print_status("文件分发失败", false);
+        pb_apply.finish_with_message("文件分发失败");
         return Err(anyhow::anyhow!("文件分发失败: {}", apply_result.message));
     }
 
@@ -293,14 +275,17 @@ async fn run_file_clear(client: &mut OasisServiceClient<tonic::transport::Channe
         return Ok(());
     }
 
+    let pb = crate::ui::create_spinner("正在清空文件仓库...");
     let base_req = EmptyMsg {};
     let clear_result = grpc_retry!(client, clear_files(base_req.clone()))
         .await?
         .into_inner();
 
     if clear_result.success {
-        print_status(clear_result.message.as_str(), true);
+        pb.finish_with_message(clear_result.message);
+        crate::ui::print_success("清空成功");
     } else {
+        pb.finish_with_message("清空失败");
         return Err(anyhow::anyhow!("清空失败: {}", clear_result.message));
     }
 
@@ -416,6 +401,7 @@ async fn run_file_rollback(
         }),
     };
 
+    let pb = crate::ui::create_spinner("正在回滚文件...");
     let base_req = request.clone();
     let response = grpc_retry!(client, rollback_file(base_req.clone()))
         .await
@@ -423,10 +409,11 @@ async fn run_file_rollback(
         .into_inner();
 
     if response.success {
-        print_status("文件回滚成功", true);
+        pb.finish_with_message("文件回滚成功");
+        crate::ui::print_success("文件回滚成功");
         print_info(&response.message);
     } else {
-        print_status("文件回滚失败", false);
+        pb.finish_with_message("文件回滚失败");
         return Err(anyhow::anyhow!("文件回滚失败: {}", response.message));
     }
 

@@ -29,7 +29,6 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // 单实例文件锁，防止重复启动
     let lock_path = std::path::Path::new(&args.lock_file);
     let lock_dir = lock_path
         .parent()

@@ -1,7 +1,8 @@
 use crate::certificate::CertificateGenerator;
-use crate::ui::{print_header, print_status};
+use crate::ui::{print_header, print_info, print_next_step, print_status, print_warning};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, command};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -72,6 +73,12 @@ pub struct InstallArgs {
     cfg_dir: Option<PathBuf>,
     #[arg(long)]
     server_bin: Option<PathBuf>,
+    #[arg(long, default_value = "/usr/local/bin")]
+    install_bin_dir: PathBuf,
+    #[arg(long = "no-copy-bin", action = clap::ArgAction::SetFalse, default_value_t = true)]
+    copy_bin: bool,
+    #[arg(long)]
+    force: bool,
     #[arg(long, default_value = "root")]
     user: String,
     #[arg(long, default_value = "root")]
@@ -100,8 +107,51 @@ pub async fn run_system(args: SystemArgs) -> Result<()> {
     }
 }
 
+fn find_oasis_server_bin(explicit: &Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(b) = explicit {
+        return Ok(b.clone());
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("oasis-server");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+
+    let cwd = std::env::current_dir().context("无法获取当前工作目录")?;
+    let candidates = [
+        cwd.join("target/release/oasis-server"),
+        cwd.join("target/debug/oasis-server"),
+    ];
+    for p in &candidates {
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+    }
+
+    if let Ok(p) = which::which("oasis-server") {
+        return Ok(p);
+    }
+
+    anyhow::bail!(
+        "未找到 oasis-server 可执行文件。\n\
+请通过 --server-bin 指定，或将 oasis-server 加入 PATH。\n\
+已尝试：\n\
+  - PATH: oasis-server\n\
+  - 与当前 oasis-cli 同目录: oasis-server\n\
+  - {}\n\
+  - {}\n\
+建议：在仓库根目录执行 cargo build -p oasis-server --release，然后使用 --server-bin ./target/release/oasis-server",
+        candidates[0].display(),
+        candidates[1].display(),
+    );
+}
+
 async fn run_system_init(args: &InitArgs) -> Result<()> {
-    println!("=== 开始初始化 Oasis 系统 ===");
+    print_header("初始化 Oasis 系统");
 
     // 生成证书
     println!("步骤 1: 生成证书...");
@@ -128,68 +178,140 @@ async fn run_system_init(args: &InitArgs) -> Result<()> {
     println!("✓ docker-compose.yml 创建完成");
 
     println!();
-    println!("🎉 初始化完成！接下来需要执行的操作:");
-    println!("  1. 在项目根目录执行: docker compose up -d");
-    println!("  2. 启动服务: oasis-cli system start -d");
+    print_status("初始化完成", true);
+    print_warning("如果 oasis-nats 已在运行，生成的新证书需要重启容器后才能生效");
+    print_next_step("在项目根目录执行: docker compose up -d");
+    print_next_step("重启 NATS: docker compose down && docker compose up -d");
+    print_next_step("安装服务: oasis-cli system install");
+    print_next_step("启动服务: oasis-cli system start");
     Ok(())
 }
 
 async fn run_system_install(args: &InstallArgs) -> Result<()> {
     print_header("安装 Oasis Server 为 systemd 服务");
-    let cfg_dir = if let Some(d) = &args.cfg_dir {
-        d.clone()
-    } else {
-        std::env::current_dir()?
-    };
-    let server_bin = if let Some(b) = &args.server_bin {
-        b.clone()
-    } else if let Ok(p) = which::which("oasis-server") {
-        p
-    } else {
-        anyhow::bail!("未找到 oasis-server 可执行文件，请通过 --server-bin 指定或加入 PATH")
-    };
 
-    // 规范化为绝对路径，避免 systemd 的 bad-setting（ExecStart 必须为绝对路径）
-    let cfg_dir_abs = cfg_dir
-        .canonicalize()
-        .with_context(|| format!("无法解析 cfg_dir 路径: {}", cfg_dir.display()))?;
+    // 确保具备 root 权限（写入 /etc/systemd/system 需要）
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+
+    if uid != 0 {
+        anyhow::bail!("需要 root 权限，请使用 sudo 执行该命令");
+    }
+
+    let cfg_dir = args.cfg_dir.clone().unwrap_or(std::env::current_dir()?);
+    let server_bin = find_oasis_server_bin(&args.server_bin)?;
+    print_info(&format!("配置目录: {}", cfg_dir.display()));
+    print_info(&format!("发现二进制: {}", server_bin.display()));
+
+    // 解析为绝对路径，避免 systemd 的 bad-setting（ExecStart 必须为绝对路径）
+    let cfg_dir_abs = cfg_dir.canonicalize().context("无法解析配置目录路径")?;
     let server_bin_abs = server_bin
         .canonicalize()
-        .with_context(|| format!("无法解析 server_bin 路径: {}", server_bin.display()))?;
+        .context("无法解析 oasis-server 可执行文件路径")?;
 
+    let install_bin = args.install_bin_dir.join("oasis-server");
+    let exec_bin = if args.copy_bin {
+        std::fs::create_dir_all(&args.install_bin_dir)
+            .with_context(|| format!("无法创建目录 {}", args.install_bin_dir.display()))?;
+
+        if install_bin.exists() && !args.force {
+            anyhow::bail!("{} 已存在。若需覆盖，请使用 --force", install_bin.display());
+        }
+
+        if server_bin_abs == install_bin {
+            anyhow::bail!(
+                "发现二进制路径与安装路径相同：{}。\n\
+这会导致将文件复制到自己（可能产生 0 字节文件）。\n\
+请使用 --server-bin 指定构建产物（例如 ./target/release/oasis-server），或使用 --no-copy-bin。",
+                install_bin.display()
+            );
+        }
+
+        std::fs::copy(&server_bin_abs, &install_bin).with_context(|| {
+            format!(
+                "无法复制 {} 到 {}",
+                server_bin_abs.display(),
+                install_bin.display()
+            )
+        })?;
+        let mut perms = std::fs::metadata(&install_bin)
+            .with_context(|| format!("无法读取 {} 元数据", install_bin.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&install_bin, perms)
+            .with_context(|| format!("无法设置 {} 权限", install_bin.display()))?;
+        print_info(&format!("已安装二进制: {}", install_bin.display()));
+        install_bin
+    } else {
+        print_warning(
+            "未安装到固定目录（使用原始路径作为 ExecStart）。若后续执行 cargo clean，服务可能失效",
+        );
+        server_bin_abs
+    };
+
+    // 生成 systemd unit
     let unit = format!(
         r#"[Unit]
 Description=Oasis Server
+Documentation=https://github.com/oasis-org/oasis
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory={wd}
-ExecStartPre=/usr/bin/mkdir -p /run/oasis
-ExecStart={bin} --config oasis.toml --lock-file /run/oasis/oasis-server.lock
-RuntimeDirectory=oasis
-RuntimeDirectoryMode=0755
 User={user}
 Group={group}
-Restart=always
-RestartSec=3
+
+# 环境与目录
+WorkingDirectory={wd}
+RuntimeDirectory=oasis
+RuntimeDirectoryMode=0755
+LogsDirectory=oasis
+StateDirectory=oasis
+
+# 执行命令
+ExecStart={bin} --config oasis.toml --lock-file /run/oasis/oasis-server.lock
+
+# 资源限制与重启策略
 LimitNOFILE=1048576
+Restart=always
+RestartSec=3s
+StartLimitInterval=0
+
+# 日志
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 "#,
         wd = cfg_dir_abs.display(),
-        bin = server_bin_abs.display(),
+        bin = exec_bin.display(),
         user = args.user,
         group = args.group,
     );
 
     let unit_path = PathBuf::from("/etc/systemd/system/oasis-server.service");
-    std::fs::write(&unit_path, unit)
-        .with_context(|| format!("无法写入 {}", unit_path.display()))?;
+    std::fs::write(&unit_path, unit).context("写入 systemd unit 文件失败")?;
+
+    // 重新加载并启用
     run_sysctl(["daemon-reload"]).await?;
-    print_status("systemd 单元已安装 (daemon-reload)", true);
+    run_sysctl(["enable", "oasis-server"]).await?;
+
+    print_status("systemd 服务已安装并启用", true);
+    if args.copy_bin {
+        print_next_step("后续如需升级二进制，可重新执行: oasis-cli system install --force");
+    }
+    print_next_step("启动服务: oasis-cli system start");
+    print_next_step("查看日志: oasis-cli system logs -f");
     Ok(())
 }
 
@@ -214,8 +336,17 @@ async fn run_system_start() -> Result<()> {
         let out = String::from_utf8_lossy(&status.stdout).trim().to_string();
 
         if ok && out == "active" {
-            print_status("Oasis 服务器启动成功", true);
-            break;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let status2 = std::process::Command::new("systemctl")
+                .args(["is-active", "oasis-server"])
+                .output()
+                .context("无法执行 systemctl is-active")?;
+            let ok2 = status2.status.success();
+            let out2 = String::from_utf8_lossy(&status2.stdout).trim().to_string();
+            if ok2 && out2 == "active" {
+                print_status("Oasis 服务器启动成功", true);
+                break;
+            }
         }
 
         if waited >= max_wait_secs {
@@ -228,7 +359,7 @@ async fn run_system_start() -> Result<()> {
         }
 
         // 等待 1 秒后重试
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         waited += 1;
     }
 
@@ -279,19 +410,22 @@ async fn run_system_logs(args: &LogsArgs) -> Result<()> {
 }
 
 async fn run_system_uninstall() -> Result<()> {
+    print_header("卸载 Oasis Server");
+
+    // 1. 停止并禁用服务
+    let _ = run_system_stop().await;
+    let _ = run_sysctl(["disable", "oasis-server"]).await;
+
+    // 2. 删除 systemd unit
     let unit_path = PathBuf::from("/etc/systemd/system/oasis-server.service");
-    let _ = std::process::Command::new("systemctl")
-        .args(["disable", "oasis-server"])
-        .status();
-    let _ = std::process::Command::new("systemctl")
-        .args(["stop", "oasis-server"])
-        .status();
     if unit_path.exists() {
-        std::fs::remove_file(&unit_path)
-            .with_context(|| format!("无法删除 {}", unit_path.display()))?;
+        std::fs::remove_file(&unit_path)?;
+        run_sysctl(["daemon-reload"]).await?;
+    } else {
+        print_warning("未找到 systemd unit 文件，跳过删除");
     }
-    run_sysctl(["daemon-reload"]).await?;
-    print_status("服务已卸载", true);
+
+    print_status("systemd 服务已卸载", true);
     Ok(())
 }
 
@@ -304,9 +438,18 @@ where
     for a in args {
         cmd.arg(a.as_ref());
     }
-    let status = cmd.status().context("无法执行 systemctl")?;
-    if !status.success() {
-        anyhow::bail!("systemctl 返回非零状态码");
+    let output = cmd.output().context("无法执行 systemctl")?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stdout.is_empty() && stderr.is_empty() {
+            anyhow::bail!("systemctl 返回非零状态码");
+        }
+        anyhow::bail!(
+            "systemctl 返回非零状态码\nstdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
     }
     Ok(())
 }

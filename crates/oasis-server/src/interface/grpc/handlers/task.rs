@@ -4,8 +4,10 @@ use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
 
 use oasis_core::core_types::BatchId;
+use oasis_core::core_types::TaskId;
 use oasis_core::proto;
 use oasis_core::task_types::{BatchRequest, TaskState};
+use oasis_core::utils::truncate_output_preview;
 
 use crate::interface::grpc::errors::map_core_error;
 use crate::interface::grpc::server::OasisServer;
@@ -75,6 +77,40 @@ impl TaskHandlers {
         }
     }
 
+    /// 获取单个任务的完整输出（stdout/stderr）
+    #[instrument(skip_all)]
+    pub async fn get_task_output(
+        srv: &OasisServer,
+        request: Request<proto::GetTaskOutputRequest>,
+    ) -> Result<Response<proto::GetTaskOutputResponse>, Status> {
+        let proto_request = request.into_inner();
+
+        let task_id = match proto_request.task_id {
+            Some(id) => {
+                if let Err(e) = id.validate() {
+                    return Err(Status::invalid_argument(format!("Invalid task_id: {}", e)));
+                }
+                TaskId::from(id)
+            }
+            None => {
+                return Err(Status::invalid_argument("task_id is required"));
+            }
+        };
+
+        match srv.context().task_service.get_task_output(&task_id).await {
+            Ok(execution) => {
+                let response = proto::GetTaskOutputResponse {
+                    execution: Some(proto::TaskExecutionMsg::from(execution)),
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                warn!("Failed to get task output {}: {}", task_id, e);
+                Err(map_core_error(e))
+            }
+        }
+    }
+
     #[instrument(skip_all)]
     pub async fn get_batch_details(
         srv: &OasisServer,
@@ -111,7 +147,12 @@ impl TaskHandlers {
                 let response = proto::GetBatchDetailsResponse {
                     tasks: tasks
                         .into_iter()
-                        .map(|t| proto::TaskExecutionMsg::from(t))
+                        .map(|t| {
+                            let mut msg = proto::TaskExecutionMsg::from(t);
+                            msg.stdout = truncate_output_preview(&msg.stdout);
+                            msg.stderr = truncate_output_preview(&msg.stderr);
+                            msg
+                        })
                         .collect(),
                 };
                 Ok(Response::new(response))

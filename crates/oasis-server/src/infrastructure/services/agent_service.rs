@@ -74,7 +74,6 @@ impl AgentService {
         // 移除缓存
         self.engine.remove_agent(agent_id);
 
-
         if let Ok(store) = self
             .jetstream
             .get_key_value(oasis_core::constants::JS_KV_AGENT_INFOS)

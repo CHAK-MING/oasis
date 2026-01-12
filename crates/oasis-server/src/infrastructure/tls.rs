@@ -6,7 +6,7 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
-use tracing::{info};
+use tracing::info;
 
 /// TLS 服务
 pub struct TlsService {
@@ -26,12 +26,9 @@ impl TlsService {
     }
 
     /// 创建一个新的 TLS 服务
-    pub async fn new_with_paths(
-        cert_path: std::path::PathBuf,
-    ) -> Result<Self> {
+    pub async fn new_with_paths(cert_path: std::path::PathBuf) -> Result<Self> {
         let config = TlsConfig {
-            certs_dir: cert_path
-                .to_path_buf(),
+            certs_dir: cert_path.to_path_buf(),
         };
 
         let (reload_tx, _) = broadcast::channel(1);
@@ -87,7 +84,6 @@ impl TlsService {
         info!("TLS certificates loaded successfully");
         Ok(())
     }
-
 
     /// 获取当前 ServerTlsConfig 克隆如果可用
     pub async fn get_server_tls_config(&self) -> Option<ServerTlsConfig> {

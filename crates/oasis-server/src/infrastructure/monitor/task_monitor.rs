@@ -90,13 +90,17 @@ impl TaskMonitor {
 
         let mut backoff_ms: u64 = 500;
         loop {
-            if self.shutdown_token.is_cancelled() { 
+            if self.shutdown_token.is_cancelled() {
                 info!("TaskMonitor shutdown requested");
                 return Ok(());
             }
 
             // 1) 获取结果流
-            let stream = match self.jetstream.get_stream(&constants::JS_STREAM_RESULTS).await {
+            let stream = match self
+                .jetstream
+                .get_stream(&constants::JS_STREAM_RESULTS)
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     error!("Failed to get results stream: {}", e);
@@ -134,7 +138,7 @@ impl TaskMonitor {
             };
 
             info!("Task result listener established");
-            backoff_ms = 500; 
+            backoff_ms = 500;
 
             // 3) 建立消息流并消费；如果流结束或报错，跳出并重建
             match consumer.messages().await {

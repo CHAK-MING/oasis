@@ -179,7 +179,6 @@ pub async fn run_rollout(
     }
 }
 
-/// 创建灰度发布
 async fn run_rollout_create(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: CreateArgs,
@@ -243,17 +242,19 @@ async fn run_rollout_create(
     };
 
     // 发送请求
+    let pb = crate::ui::create_spinner("正在创建灰度发布任务...");
     match grpc_retry!(client, create_rollout(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             if resp.success {
+                pb.finish_with_message("灰度发布创建成功");
                 let rollout_id_str = resp
                     .rollout_id
                     .as_ref()
                     .map(|id| id.value.clone())
                     .unwrap_or_else(|| "unknown".to_string());
                 print_info(&format!(
-                    "灰度发布创建成功: {}",
+                    "发布ID: {}",
                     style(rollout_id_str.clone()).green()
                 ));
                 print_next_step(
@@ -264,15 +265,18 @@ async fn run_rollout_create(
                     .as_str(),
                 );
             } else {
-                print_warning(&format!("创建失败: {}", resp.message));
+                pb.finish_with_message("创建请求被拒绝");
+                print_warning(&format!("失败原因: {}", resp.message));
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("创建灰度发布失败: {}", format_grpc_error(&e))),
+        Err(e) => {
+            pb.finish_with_message("创建失败");
+            Err(anyhow!("创建灰度发布失败: {}", format_grpc_error(&e)))
+        }
     }
 }
 
-/// 查看发布状态
 async fn run_rollout_status(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: StatusArgs,
@@ -283,8 +287,10 @@ async fn run_rollout_status(
         }),
     };
 
+    let pb = crate::ui::create_spinner("正在获取发布状态...");
     match grpc_retry!(client, get_rollout_status(request.clone())).await {
         Ok(response) => {
+            pb.finish_and_clear();
             let resp = response.into_inner();
             if let Some(status) = resp.status {
                 display_rollout_status(&status);
@@ -293,11 +299,13 @@ async fn run_rollout_status(
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("获取发布状态失败: {}", format_grpc_error(&e))),
+        Err(e) => {
+            pb.finish_with_message("获取失败");
+            Err(anyhow!("获取发布状态失败: {}", format_grpc_error(&e)))
+        }
     }
 }
 
-/// 列出发布
 async fn run_rollout_list(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: ListArgs,
@@ -315,17 +323,21 @@ async fn run_rollout_list(
         states: states.unwrap_or_default(),
     };
 
+    let pb = crate::ui::create_spinner("正在获取发布列表...");
     match grpc_retry!(client, list_rollouts(request.clone())).await {
         Ok(response) => {
+            pb.finish_and_clear();
             let resp = response.into_inner();
             display_rollouts_table(&resp.rollouts);
             Ok(())
         }
-        Err(e) => Err(anyhow!("获取发布列表失败: {}", format_grpc_error(&e))),
+        Err(e) => {
+            pb.finish_with_message("获取失败");
+            Err(anyhow!("获取发布列表失败: {}", format_grpc_error(&e)))
+        }
     }
 }
 
-/// 推进发布
 async fn run_rollout_advance(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: AdvanceArgs,
@@ -336,21 +348,26 @@ async fn run_rollout_advance(
         }),
     };
 
+    let pb = crate::ui::create_spinner("正在推进发布阶段...");
     match grpc_retry!(client, advance_rollout(request.clone())).await {
         Ok(response) => {
             let resp = response.into_inner();
             if resp.success {
+                pb.finish_with_message("推进指令已下发");
                 print_info(&format!("{}", resp.message));
             } else {
-                print_warning(&format!("推进失败: {}", resp.message));
+                pb.finish_with_message("推进失败");
+                print_warning(&format!("失败原因: {}", resp.message));
             }
             Ok(())
         }
-        Err(e) => Err(anyhow!("推进发布失败: {}", format_grpc_error(&e))),
+        Err(e) => {
+            pb.finish_with_message("请求失败");
+            Err(anyhow!("推进发布失败: {}", format_grpc_error(&e)))
+        }
     }
 }
 
-/// 回滚发布
 async fn run_rollout_rollback(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: RollbackArgs,
@@ -359,7 +376,6 @@ async fn run_rollout_rollback(
 
     print_header(&format!("回滚灰度发布: {}", style(&args.rollout_id).cyan()));
 
-    // 确认是否继续回滚
     if !confirm_action(&format!("确定要回滚发布 {} 吗?", args.rollout_id), true) {
         print_info("操作已取消");
         return Ok(());
@@ -372,15 +388,17 @@ async fn run_rollout_rollback(
         rollback_command: args.rollback_cmd.clone(),
     };
 
-    print_info("正在提交回滚...");
+    let pb = crate::ui::create_spinner("正在提交回滚请求...");
     let resp = grpc_retry!(client, rollback_rollout(request.clone()))
         .await
         .map_err(|e| anyhow!("回滚发布失败: {}", format_grpc_error(&e)))?
         .into_inner();
 
     if resp.success {
+        pb.finish_with_message("回滚请求已提交");
         print_info(&resp.message);
     } else {
+        pb.finish_with_message("回滚失败");
         print_warning(&format!("回滚失败: {}", resp.message));
     }
 
@@ -478,23 +496,23 @@ fn create_file_task_type(
     })
 }
 
-/// 上传文件用于发布：使用文件服务的分片上传接口，返回在对象存储中的文件键
 async fn upload_file_for_rollout(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     file_path: &PathBuf,
 ) -> Result<(String, u64)> {
     use oasis_core::proto::*;
 
-    // 绝对路径（与 file 命令一致，用于在服务端计算 path_hash）
     let abs_path = std::fs::canonicalize(file_path)?;
     let abs_path_str = abs_path.to_string_lossy().to_string();
 
     let meta = std::fs::metadata(&abs_path)?;
     let size = meta.len();
 
+    let pb = crate::ui::create_progress_bar(size, "正在上传发布文件...");
+
     // 1) 开始上传会话
     let spec = FileSpecMsg {
-        source_path: abs_path_str.clone(), // 传绝对路径，服务端据此计算 path_hash
+        source_path: abs_path_str.clone(),
         size,
         checksum: String::new(),
         content_type: String::new(),
@@ -538,7 +556,9 @@ async fn upload_file_for_rollout(
             .into_inner();
 
         offset += resp.received_bytes;
+        pb.set_position(offset);
     }
+    pb.set_message("正在提交文件...");
 
     // 3) 提交上传
     let commit = CommitFileMsg {
@@ -553,10 +573,12 @@ async fn upload_file_for_rollout(
         .into_inner();
 
     if !result.success {
+        pb.finish_with_message("文件上传失败");
         anyhow::bail!("文件提交失败: {}", result.message);
     }
 
-    // 返回用于构造对象键的原始绝对路径（服务端按此路径计算 path_hash）与 revision
+    pb.finish_with_message("文件上传成功");
+
     Ok((abs_path_str, result.revision))
 }
 

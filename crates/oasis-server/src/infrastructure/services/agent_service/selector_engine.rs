@@ -565,3 +565,245 @@ impl SelectorEngine {
 fn unquote(s: &str) -> String {
     s.trim_matches('"').trim_matches('\'').to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod unquote_tests {
+        use super::*;
+
+        #[test]
+        fn test_double_quoted() {
+            assert_eq!(unquote("\"hello\""), "hello");
+        }
+
+        #[test]
+        fn test_single_quoted() {
+            assert_eq!(unquote("'hello'"), "hello");
+        }
+
+        #[test]
+        fn test_no_quotes() {
+            assert_eq!(unquote("hello"), "hello");
+        }
+
+        #[test]
+        fn test_empty_quoted() {
+            assert_eq!(unquote("\"\""), "");
+            assert_eq!(unquote("''"), "");
+        }
+
+        #[test]
+        fn test_inner_quotes_preserved() {
+            assert_eq!(unquote("\"hello world\""), "hello world");
+        }
+    }
+
+    mod query_cache_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = QueryCacheConfig::default();
+            assert_eq!(config.max_entries, 1000);
+            assert_eq!(config.ttl_seconds, 300);
+            assert!(config.enable_cache);
+            assert_eq!(config.cleanup_interval_seconds, 60);
+        }
+    }
+
+    mod selector_parser_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_all() {
+            let result = SelectorParser::parse(Rule::selector, "all");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_true() {
+            let result = SelectorParser::parse(Rule::selector, "true");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_single_id() {
+            let result = SelectorParser::parse(Rule::selector, "agent-001");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_id_list() {
+            let result = SelectorParser::parse(Rule::selector, "agent-001, agent-002, agent-003");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_label_eq() {
+            let result = SelectorParser::parse(Rule::selector, "labels[\"env\"]==\"production\"");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_label_eq_single_quotes() {
+            let result = SelectorParser::parse(Rule::selector, "labels['region']=='us-east-1'");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_system_eq() {
+            let result = SelectorParser::parse(Rule::selector, "system[\"os\"]==\"linux\"");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_in_groups() {
+            let result = SelectorParser::parse(Rule::selector, "\"web-servers\" in groups");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_and_expression() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "labels[\"env\"]==\"prod\" and labels[\"tier\"]==\"web\"",
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_or_expression() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "labels[\"env\"]==\"prod\" or labels[\"env\"]==\"staging\"",
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_not_expression() {
+            let result = SelectorParser::parse(Rule::selector, "not labels[\"env\"]==\"prod\"");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_complex_expression() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "(labels[\"env\"]==\"prod\" and labels[\"tier\"]==\"web\") or labels[\"critical\"]==\"true\"",
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_parentheses() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "(labels[\"a\"]==\"1\" or labels[\"b\"]==\"2\") and labels[\"c\"]==\"3\"",
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_invalid_syntax_fails() {
+            let result = SelectorParser::parse(Rule::selector, "labels[env]=");
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_empty_fails() {
+            let result = SelectorParser::parse(Rule::selector, "");
+            assert!(result.is_err());
+        }
+    }
+
+    mod selector_ast_tests {
+        use super::*;
+
+        #[test]
+        fn test_ast_all_true() {
+            let ast = SelectorAst::AllTrue;
+            assert!(matches!(ast, SelectorAst::AllTrue));
+        }
+
+        #[test]
+        fn test_ast_id_list() {
+            let ast = SelectorAst::IdList(vec!["agent-1".to_string(), "agent-2".to_string()]);
+            if let SelectorAst::IdList(ids) = ast {
+                assert_eq!(ids.len(), 2);
+                assert_eq!(ids[0], "agent-1");
+            } else {
+                panic!("Expected IdList");
+            }
+        }
+
+        #[test]
+        fn test_ast_label_eq() {
+            let ast = SelectorAst::LabelEq("env".to_string(), "prod".to_string());
+            if let SelectorAst::LabelEq(key, value) = ast {
+                assert_eq!(key, "env");
+                assert_eq!(value, "prod");
+            } else {
+                panic!("Expected LabelEq");
+            }
+        }
+
+        #[test]
+        fn test_ast_system_eq() {
+            let ast = SelectorAst::SystemEq("os".to_string(), "linux".to_string());
+            if let SelectorAst::SystemEq(key, value) = ast {
+                assert_eq!(key, "os");
+                assert_eq!(value, "linux");
+            } else {
+                panic!("Expected SystemEq");
+            }
+        }
+
+        #[test]
+        fn test_ast_in_groups() {
+            let ast = SelectorAst::InGroups("web-servers".to_string());
+            if let SelectorAst::InGroups(group) = ast {
+                assert_eq!(group, "web-servers");
+            } else {
+                panic!("Expected InGroups");
+            }
+        }
+
+        #[test]
+        fn test_ast_and() {
+            let left = SelectorAst::AllTrue;
+            let right = SelectorAst::LabelEq("env".to_string(), "prod".to_string());
+            let ast = SelectorAst::And(Box::new(left), Box::new(right));
+            assert!(matches!(ast, SelectorAst::And(_, _)));
+        }
+
+        #[test]
+        fn test_ast_or() {
+            let left = SelectorAst::AllTrue;
+            let right = SelectorAst::AllTrue;
+            let ast = SelectorAst::Or(Box::new(left), Box::new(right));
+            assert!(matches!(ast, SelectorAst::Or(_, _)));
+        }
+
+        #[test]
+        fn test_ast_not() {
+            let inner = SelectorAst::AllTrue;
+            let ast = SelectorAst::Not(Box::new(inner));
+            assert!(matches!(ast, SelectorAst::Not(_)));
+        }
+
+        #[test]
+        fn test_ast_clone() {
+            let ast = SelectorAst::LabelEq("env".to_string(), "prod".to_string());
+            let cloned = ast.clone();
+            if let SelectorAst::LabelEq(key, value) = cloned {
+                assert_eq!(key, "env");
+                assert_eq!(value, "prod");
+            } else {
+                panic!("Clone failed");
+            }
+        }
+    }
+}

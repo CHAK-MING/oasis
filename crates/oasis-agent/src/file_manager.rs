@@ -2,11 +2,7 @@ use crate::nats_client::NatsClient;
 use anyhow::{Context, Result};
 use async_nats::jetstream;
 use futures::StreamExt;
-use oasis_core::{
-    constants::*,
-    core_types::AgentId,
-    file_types::FileConfig,
-};
+use oasis_core::{constants::*, core_types::AgentId, file_types::FileConfig};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};

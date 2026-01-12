@@ -58,8 +58,6 @@ impl OasisConfig {
         Ok(cfg)
     }
 
-  
-
     pub fn build_grpc_url(&self) -> Result<String, anyhow::Error> {
         let url = self.grpc.url.trim().to_string();
         // 这里是TLS 连接，必须是输入 https，否则返回错误
@@ -71,7 +69,7 @@ impl OasisConfig {
 }
 
 /// 遥测配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     #[serde(default = "default_log_level")]
@@ -80,6 +78,16 @@ pub struct TelemetryConfig {
     pub log_format: String,
     #[serde(default = "default_log_no_ansi")]
     pub log_no_ansi: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            log_level: default_log_level(),
+            log_format: default_log_format(),
+            log_no_ansi: default_log_no_ansi(),
+        }
+    }
 }
 
 /// NATS 配置
@@ -175,13 +183,22 @@ impl TlsConfig {
 }
 
 /// 服务器特定配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
     #[serde(default = "default_heartbeat_ttl")]
     pub heartbeat_ttl_sec: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_listen_addr(),
+            heartbeat_ttl_sec: default_heartbeat_ttl(),
+        }
+    }
 }
 
 fn default_listen_addr() -> String {
@@ -218,7 +235,6 @@ fn default_grpc_url() -> String {
 
 impl OasisConfig {
     pub fn resolve_relative_paths(&mut self, base_dir: &std::path::Path) {
-        // 辅助函数，如果路径是相对的，则将其转换为绝对路径
         fn make_absolute(path: &mut PathBuf, base: &std::path::Path) {
             if path.is_relative() {
                 *path = base.join(&*path);
@@ -226,5 +242,180 @@ impl OasisConfig {
         }
 
         make_absolute(&mut self.tls.certs_dir, base_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    mod telemetry_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = TelemetryConfig::default();
+            assert_eq!(config.log_level, "info");
+            assert_eq!(config.log_format, "text");
+            assert!(!config.log_no_ansi);
+        }
+    }
+
+    mod nats_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = NatsConfig::default();
+            assert_eq!(config.url, "tls://127.0.0.1:4222");
+        }
+    }
+
+    mod grpc_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = GrpcConfig::default();
+            assert_eq!(config.url, "https://127.0.0.1:50051");
+        }
+    }
+
+    mod tls_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = TlsConfig::default();
+            assert_eq!(config.certs_dir, PathBuf::from("certs"));
+        }
+
+        #[test]
+        fn test_nats_paths() {
+            let config = TlsConfig {
+                certs_dir: PathBuf::from("/etc/oasis/certs"),
+            };
+            assert_eq!(
+                config.nats_ca_path(),
+                Path::new("/etc/oasis/certs/nats-ca.pem")
+            );
+            assert_eq!(
+                config.nats_client_cert_path(),
+                Path::new("/etc/oasis/certs/nats-client.pem")
+            );
+            assert_eq!(
+                config.nats_client_key_path(),
+                Path::new("/etc/oasis/certs/nats-client-key.pem")
+            );
+        }
+
+        #[test]
+        fn test_grpc_server_paths() {
+            let config = TlsConfig {
+                certs_dir: PathBuf::from("/certs"),
+            };
+            assert_eq!(config.grpc_ca_path(), Path::new("/certs/grpc-ca.pem"));
+            assert_eq!(
+                config.grpc_server_cert_path(),
+                Path::new("/certs/grpc-server.pem")
+            );
+            assert_eq!(
+                config.grpc_server_key_path(),
+                Path::new("/certs/grpc-server-key.pem")
+            );
+        }
+
+        #[test]
+        fn test_grpc_client_paths() {
+            let config = TlsConfig {
+                certs_dir: PathBuf::from("/certs"),
+            };
+            assert_eq!(
+                config.grpc_client_cert_path(),
+                Path::new("/certs/grpc-client.pem")
+            );
+            assert_eq!(
+                config.grpc_client_key_path(),
+                Path::new("/certs/grpc-client-key.pem")
+            );
+        }
+    }
+
+    mod server_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = ServerConfig::default();
+            assert_eq!(config.listen_addr, "127.0.0.1:50051");
+            assert_eq!(config.heartbeat_ttl_sec, 60);
+        }
+    }
+
+    mod oasis_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let config = OasisConfig::default();
+            assert_eq!(config.nats.url, "tls://127.0.0.1:4222");
+            assert_eq!(config.grpc.url, "https://127.0.0.1:50051");
+        }
+
+        #[test]
+        fn test_build_grpc_url_valid_https() {
+            let config = OasisConfig::default();
+            let url = config.build_grpc_url().unwrap();
+            assert_eq!(url, "https://127.0.0.1:50051");
+        }
+
+        #[test]
+        fn test_build_grpc_url_rejects_http() {
+            let mut config = OasisConfig::default();
+            config.grpc.url = "http://127.0.0.1:50051".to_string();
+            assert!(config.build_grpc_url().is_err());
+        }
+
+        #[test]
+        fn test_build_grpc_url_trims_whitespace() {
+            let mut config = OasisConfig::default();
+            config.grpc.url = "  https://example.com:50051  ".to_string();
+            let url = config.build_grpc_url().unwrap();
+            assert_eq!(url, "https://example.com:50051");
+        }
+
+        #[test]
+        fn test_resolve_relative_paths() {
+            let mut config = OasisConfig::default();
+            config.tls.certs_dir = PathBuf::from("certs");
+
+            let base = Path::new("/opt/oasis");
+            config.resolve_relative_paths(base);
+
+            assert_eq!(config.tls.certs_dir, Path::new("/opt/oasis/certs"));
+        }
+
+        #[test]
+        fn test_resolve_absolute_paths_unchanged() {
+            let mut config = OasisConfig::default();
+            config.tls.certs_dir = PathBuf::from("/etc/oasis/certs");
+
+            let base = Path::new("/opt/oasis");
+            config.resolve_relative_paths(base);
+
+            assert_eq!(config.tls.certs_dir, Path::new("/etc/oasis/certs"));
+        }
+
+        #[test]
+        fn test_serde_roundtrip() {
+            let config = OasisConfig::default();
+            let toml = toml::to_string(&config).unwrap();
+            let deserialized: OasisConfig = toml::from_str(&toml).unwrap();
+
+            assert_eq!(config.nats, deserialized.nats);
+            assert_eq!(config.grpc, deserialized.grpc);
+            assert_eq!(config.telemetry, deserialized.telemetry);
+        }
     }
 }

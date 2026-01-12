@@ -1,148 +1,106 @@
-use console::style;
+use console::{Emoji, Term, style};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
+use std::time::Duration;
 
-/// Docker 风格符号
 pub struct Symbols;
 impl Symbols {
-    pub const SUCCESS: &'static str = "[+]";
-    pub const ERROR: &'static str = "[!]";
-    pub const WARNING: &'static str = "[*]";
-    pub const INFO: &'static str = "[i]";
-    pub const ARROW: &'static str = "=>";
+    pub const SUCCESS: Emoji<'static, 'static> = Emoji("✔", "+");
+    pub const ERROR: Emoji<'static, 'static> = Emoji("✖", "x");
+    pub const WARNING: Emoji<'static, 'static> = Emoji("⚠", "!");
+    pub const INFO: Emoji<'static, 'static> = Emoji("ℹ", "i");
+    pub const ARROW: Emoji<'static, 'static> = Emoji("➜", ">");
+    pub const STEP: Emoji<'static, 'static> = Emoji("⚡", "*");
 }
 
-/// Docker 风格颜色主题
-pub struct Theme {
-    pub success: console::Style,
-    pub error: console::Style,
-    pub warning: console::Style,
-    pub info: console::Style,
-    pub dim: console::Style,
+pub fn print_header(title: &str) {
+    println!();
+    println!("{} {}", Symbols::STEP, style(title).bold().underlined());
+    println!();
 }
 
-pub fn get_theme() -> Theme {
-    Theme {
-        success: console::Style::new().green(),
-        error: console::Style::new().red(),
-        warning: console::Style::new().yellow(),
-        info: console::Style::new().blue(),
-        dim: console::Style::new().dim(),
+pub fn print_status(message: &str, success: bool) {
+    if success {
+        println!("  {} {}", style(Symbols::SUCCESS).green(), message);
+    } else {
+        println!("  {} {}", style(Symbols::ERROR).red(), message);
     }
 }
 
-/// 成功/失败状态输出
-pub fn print_status(message: &str, success: bool) {
-    let (symbol, color) = if success {
-        (Symbols::SUCCESS, get_theme().success)
-    } else {
-        (Symbols::ERROR, get_theme().error)
-    };
-    println!(" {} {}", color.apply_to(symbol), message);
+pub fn print_success(message: &str) {
+    println!("  {} {}", style(Symbols::SUCCESS).green(), message);
 }
 
-/// 信息提示
-pub fn print_info(message: &str) {
-    println!(" {} {}", get_theme().info.apply_to(Symbols::INFO), message);
-}
-
-/// 警告信息
-pub fn print_warning(message: &str) {
-    println!(
-        " {} {}",
-        get_theme().warning.apply_to(Symbols::WARNING),
-        message
-    );
-}
-
-/// 错误信息
-#[allow(dead_code)]
 pub fn print_error(message: &str) {
-    println!(
-        " {} {}",
-        get_theme().error.apply_to(Symbols::ERROR),
-        message
-    );
+    println!("  {} {}", style(Symbols::ERROR).red(), message);
 }
 
-/// 重要信息或下一步提示
+pub fn print_warning(message: &str) {
+    println!("  {} {}", style(Symbols::WARNING).yellow(), message);
+}
+
+pub fn print_info(message: &str) {
+    println!("  {} {}", style(Symbols::INFO).blue(), message);
+}
+
 pub fn print_next_step(message: &str) {
-    println!(" {} {}", get_theme().info.apply_to(Symbols::ARROW), message);
+    println!("  {} {}", style(Symbols::ARROW).cyan(), message);
 }
 
-/// 操作标题
-pub fn print_header(title: &str) {
-    println!("{}", style(title).bold());
-}
-
-/// 进度条显示
-pub fn print_progress_bar(current: usize, total: usize, description: &str) {
-    let percentage = (current as f64 / total as f64 * 100.0) as usize;
-    let width = 25;
-    let filled = (percentage as f64 / 100.0 * width as f64) as usize;
-    let empty = width - filled;
-
-    println!(
-        " {} [{}{}] {}/{} ({}%) {}",
-        get_theme().info.apply_to(Symbols::ARROW),
-        style("█".repeat(filled)).green(),
-        "░".repeat(empty),
-        current,
-        total,
-        percentage,
-        style(description).dim()
-    );
-}
-
-/// 简单进度提示
-pub fn print_progress(current: usize, total: usize, description: &str) {
-    println!(
-        " {} {}/{} - {}",
-        get_theme().info.apply_to(Symbols::ARROW),
-        current,
-        total,
-        style(description).dim()
-    );
-}
-
-/// 确认操作
-pub fn confirm_action(message: &str, danger: bool) -> bool {
-    let (symbol, color) = if danger {
-        (Symbols::WARNING, get_theme().warning)
-    } else {
-        (Symbols::INFO, get_theme().info)
-    };
-
-    println!(" {} {}", color.apply_to(symbol), message);
-    print!(
-        " {} 是否继续? [y/N]: ",
-        get_theme().dim.apply_to(Symbols::ARROW)
-    );
-    std::io::stdout().flush().expect("刷新标准输出失败");
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap_or_else(|e| {
-        eprintln!("读取用户输入失败: {}", e);
-        0
-    });
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes" | "是")
-}
-
-/// 带详细信息的日志
 pub fn log_detail(key: &str, value: &str) {
-    println!("   {}: {}", style(key).dim(), value);
+    println!("    {}: {}", style(key).dim(), value);
 }
 
-/// 操作日志（带缩进层次）
 pub fn log_operation(operation: &str, details: Option<&[(&str, &str)]>) {
-    println!(
-        " {} {}",
-        get_theme().info.apply_to(Symbols::ARROW),
-        operation
-    );
-
+    println!("  {} {}", style(Symbols::ARROW).cyan(), operation);
     if let Some(details) = details {
-        for (key, value) in details {
-            log_detail(key, value);
+        for (k, v) in details {
+            println!("    {}: {}", style(k).dim(), v);
         }
     }
+}
+
+pub fn confirm_action(message: &str, danger: bool) -> bool {
+    println!();
+    if danger {
+        println!(
+            "  {} {}",
+            style(Symbols::WARNING).yellow(),
+            style(message).red().bold()
+        );
+    } else {
+        println!("  {} {}", style("?").blue(), message);
+    }
+
+    let term = Term::stdout();
+    print!("  {} (y/N): ", style(Symbols::ARROW).cyan());
+    let _ = std::io::stdout().flush();
+
+    let input = term.read_line().unwrap_or_default();
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes" | "true")
+}
+
+pub fn create_spinner(message: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+            .template("{spinner:.blue} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(message.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
+pub fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta}) {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message(message.to_string());
+    pb
 }

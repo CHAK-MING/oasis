@@ -187,8 +187,7 @@ impl CoreError {
             | CoreError::Config { severity, .. }
             | CoreError::PermissionDenied { severity, .. }
             | CoreError::Internal { severity, .. }
-            | CoreError::ServiceUnavailable { severity, .. }
-            => *severity,
+            | CoreError::ServiceUnavailable { severity, .. } => *severity,
         }
     }
 

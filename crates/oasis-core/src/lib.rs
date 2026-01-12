@@ -1,8 +1,8 @@
 pub mod agent_types;
 pub mod core_types;
 pub mod file_types;
-pub mod task_types;
 pub mod rollout_types;
+pub mod task_types;
 
 pub mod proto_bridge;
 
@@ -17,6 +17,8 @@ pub mod nats;
 pub mod rate_limit;
 pub mod shutdown;
 pub mod telemetry;
+
+pub mod utils;
 
 pub use constants::*;
 

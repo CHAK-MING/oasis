@@ -399,3 +399,237 @@ impl TaskManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod encode_output_tests {
+        use super::*;
+        use base64::Engine;
+
+        #[test]
+        fn test_encode_empty_output() {
+            let result = TaskManager::encode_output(&[]);
+            assert_eq!(result, "base64:");
+        }
+
+        #[test]
+        fn test_encode_simple_text() {
+            let result = TaskManager::encode_output(b"hello world");
+            assert!(result.starts_with("base64:"));
+
+            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded_part)
+                .unwrap();
+            assert_eq!(decoded, b"hello world");
+        }
+
+        #[test]
+        fn test_encode_binary_data() {
+            let binary_data: Vec<u8> = (0u8..=255).collect();
+            let result = TaskManager::encode_output(&binary_data);
+            assert!(result.starts_with("base64:"));
+
+            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded_part)
+                .unwrap();
+            assert_eq!(decoded, binary_data);
+        }
+
+        #[test]
+        fn test_encode_utf8_text() {
+            let utf8_text = "你好世界 🌍";
+            let result = TaskManager::encode_output(utf8_text.as_bytes());
+
+            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded_part)
+                .unwrap();
+            assert_eq!(String::from_utf8(decoded).unwrap(), utf8_text);
+        }
+
+        #[test]
+        fn test_encode_newlines() {
+            let text_with_newlines = "line1\nline2\nline3";
+            let result = TaskManager::encode_output(text_with_newlines.as_bytes());
+
+            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded_part)
+                .unwrap();
+            assert_eq!(String::from_utf8(decoded).unwrap(), text_with_newlines);
+        }
+    }
+
+    mod task_execution_phase_tests {
+        use super::*;
+
+        #[test]
+        fn test_running_state_phase_name() {
+            let phase = match TaskState::Running {
+                TaskState::Created => "created",
+                TaskState::Pending => "pending",
+                TaskState::Running => "running",
+                TaskState::Success => "success",
+                TaskState::Failed => "failed",
+                TaskState::Timeout => "timeout",
+                TaskState::Cancelled => "cancelled",
+            };
+            assert_eq!(phase, "running");
+        }
+
+        #[test]
+        fn test_all_states_have_phase_names() {
+            let states = [
+                TaskState::Created,
+                TaskState::Pending,
+                TaskState::Running,
+                TaskState::Success,
+                TaskState::Failed,
+                TaskState::Timeout,
+                TaskState::Cancelled,
+            ];
+
+            for state in states {
+                let phase = match state {
+                    TaskState::Created => "created",
+                    TaskState::Pending => "pending",
+                    TaskState::Running => "running",
+                    TaskState::Success => "success",
+                    TaskState::Failed => "failed",
+                    TaskState::Timeout => "timeout",
+                    TaskState::Cancelled => "cancelled",
+                };
+                assert!(!phase.is_empty());
+            }
+        }
+    }
+
+    mod command_building_tests {
+        #[test]
+        fn test_full_command_with_args() {
+            let command = "ls";
+            let args = vec!["-la".to_string(), "/tmp".to_string()];
+
+            let full_command = if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{} {}", command, args.join(" "))
+            };
+
+            assert_eq!(full_command, "ls -la /tmp");
+        }
+
+        #[test]
+        fn test_full_command_without_args() {
+            let command = "pwd";
+            let args: Vec<String> = vec![];
+
+            let full_command = if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{} {}", command, args.join(" "))
+            };
+
+            assert_eq!(full_command, "pwd");
+        }
+
+        #[test]
+        fn test_full_command_single_arg() {
+            let command = "echo";
+            let args = vec!["hello".to_string()];
+
+            let full_command = if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{} {}", command, args.join(" "))
+            };
+
+            assert_eq!(full_command, "echo hello");
+        }
+    }
+
+    mod labels_parsing_tests {
+        use std::collections::HashMap;
+
+        #[test]
+        fn test_parse_single_label() {
+            let args = vec!["env=production".to_string()];
+            let mut labels = HashMap::new();
+
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    labels.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            assert_eq!(labels.get("env"), Some(&"production".to_string()));
+        }
+
+        #[test]
+        fn test_parse_multiple_labels() {
+            let args = vec![
+                "env=production".to_string(),
+                "region=us-east-1".to_string(),
+                "tier=web".to_string(),
+            ];
+            let mut labels = HashMap::new();
+
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    labels.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            assert_eq!(labels.len(), 3);
+            assert_eq!(labels.get("env"), Some(&"production".to_string()));
+            assert_eq!(labels.get("region"), Some(&"us-east-1".to_string()));
+            assert_eq!(labels.get("tier"), Some(&"web".to_string()));
+        }
+
+        #[test]
+        fn test_parse_label_with_equals_in_value() {
+            let args = vec!["config=key=value".to_string()];
+            let mut labels = HashMap::new();
+
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    labels.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            assert_eq!(labels.get("config"), Some(&"key=value".to_string()));
+        }
+
+        #[test]
+        fn test_parse_invalid_label_format() {
+            let args = vec!["no-equals-sign".to_string()];
+            let mut labels = HashMap::new();
+
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    labels.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            assert!(labels.is_empty());
+        }
+
+        #[test]
+        fn test_parse_empty_value() {
+            let args = vec!["key=".to_string()];
+            let mut labels = HashMap::new();
+
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    labels.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            assert_eq!(labels.get("key"), Some(&"".to_string()));
+        }
+    }
+}

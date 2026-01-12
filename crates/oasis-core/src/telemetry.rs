@@ -1,9 +1,10 @@
+use once_cell::sync::OnceCell;
 use time::UtcOffset;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
-use once_cell::sync::OnceCell;
 
 // 全局可重载的日志过滤器句柄
-static LOG_FILTER_HANDLE: OnceCell<reload::Handle<EnvFilter, tracing_subscriber::Registry>> = OnceCell::new();
+static LOG_FILTER_HANDLE: OnceCell<reload::Handle<EnvFilter, tracing_subscriber::Registry>> =
+    OnceCell::new();
 
 #[derive(Clone, Debug)]
 pub struct LogConfig {
@@ -54,14 +55,12 @@ fn build_filter(level: &str) -> EnvFilter {
         _ => "info",
     };
 
-    EnvFilter::new(base).add_directive(
-        "async_nats=warn".parse().unwrap_or_else(|_| {
-            tracing::warn!("Failed to parse async_nats directive, using default");
-            "async_nats=warn"
-                .parse()
-                .expect("async_nats=warn is a valid log level")
-        }),
-    )
+    EnvFilter::new(base).add_directive("async_nats=warn".parse().unwrap_or_else(|_| {
+        tracing::warn!("Failed to parse async_nats directive, using default");
+        "async_nats=warn"
+            .parse()
+            .expect("async_nats=warn is a valid log level")
+    }))
 }
 
 /// 使用提供的配置初始化 tracing（支持运行时动态调整日志级别）

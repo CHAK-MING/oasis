@@ -260,3 +260,290 @@ impl Batch {
         self.batch_id.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod task_state_tests {
+        use super::*;
+
+        #[test]
+        fn test_is_terminal_success() {
+            assert!(TaskState::Success.is_terminal());
+        }
+
+        #[test]
+        fn test_is_terminal_failed() {
+            assert!(TaskState::Failed.is_terminal());
+        }
+
+        #[test]
+        fn test_is_terminal_timeout() {
+            assert!(TaskState::Timeout.is_terminal());
+        }
+
+        #[test]
+        fn test_is_terminal_cancelled() {
+            assert!(TaskState::Cancelled.is_terminal());
+        }
+
+        #[test]
+        fn test_is_not_terminal_created() {
+            assert!(!TaskState::Created.is_terminal());
+        }
+
+        #[test]
+        fn test_is_not_terminal_pending() {
+            assert!(!TaskState::Pending.is_terminal());
+        }
+
+        #[test]
+        fn test_is_not_terminal_running() {
+            assert!(!TaskState::Running.is_terminal());
+        }
+
+        #[test]
+        fn test_is_cancellable_created() {
+            assert!(TaskState::Created.is_cancellable());
+        }
+
+        #[test]
+        fn test_is_cancellable_pending() {
+            assert!(TaskState::Pending.is_cancellable());
+        }
+
+        #[test]
+        fn test_is_cancellable_running() {
+            assert!(TaskState::Running.is_cancellable());
+        }
+
+        #[test]
+        fn test_is_not_cancellable_terminal_states() {
+            assert!(!TaskState::Success.is_cancellable());
+            assert!(!TaskState::Failed.is_cancellable());
+            assert!(!TaskState::Timeout.is_cancellable());
+            assert!(!TaskState::Cancelled.is_cancellable());
+        }
+
+        #[test]
+        fn test_default() {
+            assert_eq!(TaskState::default(), TaskState::Created);
+        }
+    }
+
+    mod task_tests {
+        use super::*;
+
+        fn create_test_task() -> Task {
+            Task::new("echo".to_string(), vec!["hello".to_string()], 30)
+        }
+
+        #[test]
+        fn test_new_task_has_generated_id() {
+            let task = create_test_task();
+            assert!(!task.task_id.as_str().is_empty());
+        }
+
+        #[test]
+        fn test_new_task_initial_state() {
+            let task = create_test_task();
+            assert_eq!(task.state, TaskState::Created);
+        }
+
+        #[test]
+        fn test_new_task_command_and_args() {
+            let task = Task::new(
+                "systemctl".to_string(),
+                vec!["status".to_string(), "nginx".to_string()],
+                60,
+            );
+            assert_eq!(task.command, "systemctl");
+            assert_eq!(task.args, vec!["status", "nginx"]);
+            assert_eq!(task.timeout_seconds, 60);
+        }
+
+        #[test]
+        fn test_with_batch_id() {
+            let batch_id = BatchId::new("batch-123");
+            let task = create_test_task().with_batch_id(batch_id.clone());
+            assert_eq!(task.batch_id, batch_id);
+        }
+
+        #[test]
+        fn test_with_agent_id() {
+            let agent_id = AgentId::new("agent-456");
+            let task = create_test_task().with_agent_id(agent_id.clone());
+            assert_eq!(task.agent_id, agent_id);
+        }
+
+        #[test]
+        fn test_valid_transition_created_to_pending() {
+            let mut task = create_test_task();
+            assert!(task.transition_to(TaskState::Pending).is_ok());
+            assert_eq!(task.state, TaskState::Pending);
+        }
+
+        #[test]
+        fn test_valid_transition_pending_to_running() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            assert!(task.transition_to(TaskState::Running).is_ok());
+            assert_eq!(task.state, TaskState::Running);
+        }
+
+        #[test]
+        fn test_valid_transition_running_to_success() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            task.transition_to(TaskState::Running).unwrap();
+            assert!(task.transition_to(TaskState::Success).is_ok());
+            assert_eq!(task.state, TaskState::Success);
+        }
+
+        #[test]
+        fn test_valid_transition_running_to_failed() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            task.transition_to(TaskState::Running).unwrap();
+            assert!(task.transition_to(TaskState::Failed).is_ok());
+        }
+
+        #[test]
+        fn test_valid_transition_running_to_timeout() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            task.transition_to(TaskState::Running).unwrap();
+            assert!(task.transition_to(TaskState::Timeout).is_ok());
+        }
+
+        #[test]
+        fn test_any_state_can_be_cancelled() {
+            for initial in [TaskState::Created, TaskState::Pending, TaskState::Running] {
+                let mut task = create_test_task();
+                if initial != TaskState::Created {
+                    task.state = initial;
+                }
+                assert!(task.transition_to(TaskState::Cancelled).is_ok());
+            }
+        }
+
+        #[test]
+        fn test_invalid_transition_created_to_running() {
+            let mut task = create_test_task();
+            assert!(task.transition_to(TaskState::Running).is_err());
+        }
+
+        #[test]
+        fn test_invalid_transition_created_to_success() {
+            let mut task = create_test_task();
+            assert!(task.transition_to(TaskState::Success).is_err());
+        }
+
+        #[test]
+        fn test_invalid_transition_pending_to_success() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            assert!(task.transition_to(TaskState::Success).is_err());
+        }
+
+        #[test]
+        fn test_get_task_id() {
+            let task = create_test_task();
+            let id = task.get_task_id();
+            assert_eq!(id, task.task_id);
+        }
+
+        #[test]
+        fn test_updated_at_changes_on_transition() {
+            let mut task = create_test_task();
+            let original_updated = task.updated_at;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            task.transition_to(TaskState::Pending).unwrap();
+            assert!(task.updated_at >= original_updated);
+        }
+    }
+
+    mod task_execution_tests {
+        use super::*;
+
+        #[test]
+        fn test_running_execution() {
+            let exec = TaskExecution::running(TaskId::new("task-1"), AgentId::new("agent-1"));
+            assert_eq!(exec.state, TaskState::Running);
+            assert!(exec.exit_code.is_none());
+            assert!(exec.finished_at.is_none());
+        }
+
+        #[test]
+        fn test_success_execution() {
+            let exec = TaskExecution::success(
+                TaskId::new("task-1"),
+                AgentId::new("agent-1"),
+                0,
+                "output".to_string(),
+                "".to_string(),
+                100.0,
+            );
+            assert_eq!(exec.state, TaskState::Success);
+            assert_eq!(exec.exit_code, Some(0));
+            assert_eq!(exec.stdout, "output");
+            assert!(exec.stderr.is_empty());
+            assert_eq!(exec.duration_ms, Some(100.0));
+            assert!(exec.finished_at.is_some());
+        }
+
+        #[test]
+        fn test_failure_execution() {
+            let exec = TaskExecution::failure(
+                TaskId::new("task-1"),
+                AgentId::new("agent-1"),
+                "command not found".to_string(),
+                50.0,
+            );
+            assert_eq!(exec.state, TaskState::Failed);
+            assert_eq!(exec.exit_code, Some(-1));
+            assert!(exec.stdout.is_empty());
+            assert_eq!(exec.stderr, "command not found");
+        }
+    }
+
+    mod batch_request_tests {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let req = BatchRequest::default();
+            assert!(req.command.is_empty());
+            assert!(req.args.is_empty());
+            assert_eq!(req.timeout_seconds, 300);
+        }
+    }
+
+    mod batch_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_batch() {
+            let batch = Batch::new("ls".to_string(), vec!["-la".to_string()], 60);
+            assert_eq!(batch.command, "ls");
+            assert_eq!(batch.args, vec!["-la"]);
+            assert_eq!(batch.timeout_seconds, 60);
+            assert!(!batch.batch_id.as_str().is_empty());
+        }
+
+        #[test]
+        fn test_with_batch_id() {
+            let custom_id = BatchId::new("custom-batch");
+            let batch = Batch::new("cmd".to_string(), vec![], 30).with_batch_id(custom_id.clone());
+            assert_eq!(batch.batch_id, custom_id);
+        }
+
+        #[test]
+        fn test_get_batch_id() {
+            let batch = Batch::new("cmd".to_string(), vec![], 30);
+            let id = batch.get_batch_id();
+            assert_eq!(id, batch.batch_id);
+        }
+    }
+}

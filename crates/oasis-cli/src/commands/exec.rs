@@ -1,18 +1,18 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{print_header, print_info, print_next_step, print_status, print_warning};
+use crate::ui::{print_header, print_info, print_next_step, print_warning};
 use anyhow::{Result, anyhow};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use comfy_table::{
     Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL,
 };
 use console::style;
 use oasis_core::proto::{
-    BatchMsg, BatchRequestMsg, CancelBatchRequest, GetBatchDetailsRequest, ListBatchesRequest,
-    SelectorExpression, SubmitBatchRequest, TaskExecutionMsg, TaskStateEnum,
-    oasis_service_client::OasisServiceClient,
+    BatchMsg, BatchRequestMsg, CancelBatchRequest, GetBatchDetailsRequest, GetTaskOutputRequest,
+    ListBatchesRequest, SelectorExpression, SubmitBatchRequest, TaskExecutionMsg, TaskId,
+    TaskStateEnum, oasis_service_client::OasisServiceClient,
 };
-use std::fmt::Write as FmtWrite;
 
 /// exec 子命令集合
 #[derive(Parser, Debug)]
@@ -48,6 +48,8 @@ pub enum ExecCmd {
     List(ExecListArgs),
     /// 取消指定任务
     Cancel(ExecCancelArgs),
+    /// 查看单个任务的完整输出（stdout/stderr）
+    Output(ExecOutputArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -98,6 +100,12 @@ pub struct ExecCancelArgs {
     pub batch_id: String,
 }
 
+#[derive(Parser, Debug)]
+pub struct ExecOutputArgs {
+    /// 任务 ID
+    pub task_id: String,
+}
+
 /// 主入口函数 - 根据子命令分发执行
 pub async fn run_exec(
     mut client: OasisServiceClient<tonic::transport::Channel>,
@@ -108,7 +116,90 @@ pub async fn run_exec(
         ExecCmd::Get(get) => run_exec_get(&mut client, get).await,
         ExecCmd::List(list) => run_exec_list(&mut client, list).await,
         ExecCmd::Cancel(cancel) => run_exec_cancel(&mut client, cancel).await,
+        ExecCmd::Output(output) => run_exec_output(&mut client, output).await,
     }
+}
+
+fn decode_base64_prefixed(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("base64:") {
+        base64::engine::general_purpose::STANDARD
+            .decode(rest)
+            .map(|b: Vec<u8>| String::from_utf8_lossy(&b).to_string())
+            .unwrap_or_else(|_| s.to_string())
+    } else {
+        s.to_string()
+    }
+}
+
+async fn run_exec_output(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: ExecOutputArgs,
+) -> Result<()> {
+    print_header(&format!("任务输出: {}", style(&args.task_id).cyan()));
+
+    let pb = crate::ui::create_spinner("正在获取任务输出...");
+
+    let request = GetTaskOutputRequest {
+        task_id: Some(TaskId {
+            value: args.task_id.clone(),
+        }),
+    };
+
+    let response = match grpc_retry!(client, get_task_output(request.clone())).await {
+        Ok(resp) => {
+            pb.finish_and_clear();
+            resp.into_inner()
+        }
+        Err(e) => {
+            pb.finish_with_message("获取失败");
+            return Err(anyhow!("获取任务输出失败: {}", format_grpc_error(&e)));
+        }
+    };
+
+    let Some(execution) = response.execution else {
+        return Err(anyhow!("服务返回为空：未包含 execution"));
+    };
+
+    let agent_id = execution
+        .agent_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("unknown");
+
+    crate::ui::print_success("任务输出获取成功");
+    print_info(&format!("Task ID: {}", style(&args.task_id).bold()));
+    print_info(&format!("Agent: {}", style(agent_id).bold()));
+
+    if let Some(exit_code) = execution.exit_code {
+        print_info(&format!("退出码: {}", style(exit_code).bold()));
+    }
+
+    println!();
+    print_header("stdout");
+    let out = decode_base64_prefixed(&execution.stdout);
+    if out.is_empty() {
+        println!("-");
+    } else {
+        print!("{}", out);
+        if !out.ends_with('\n') {
+            println!();
+        }
+    }
+
+    println!();
+    print_header("stderr");
+    let err = decode_base64_prefixed(&execution.stderr);
+    if err.is_empty() {
+        println!("-");
+    } else {
+        let ends_with_newline = err.ends_with('\n');
+        print!("{}", style(&err).red());
+        if !ends_with_newline {
+            println!();
+        }
+    }
+
+    Ok(())
 }
 
 /// 执行任务提交命令
@@ -140,19 +231,25 @@ async fn run_exec_run(
     };
 
     // 提交任务
-    print_status("正在提交任务...", true);
-    let base_req = request.clone();
-    let response = grpc_retry!(client, submit_batch(base_req.clone()))
-        .await
-        .map_err(|e| anyhow!("提交任务失败: {}", format_grpc_error(&e)))?;
-    let response = response.into_inner();
+    let pb = crate::ui::create_spinner("正在提交任务...");
+    let response = match grpc_retry!(client, submit_batch(request.clone())).await {
+        Ok(resp) => {
+            pb.finish_and_clear();
+            resp.into_inner()
+        }
+        Err(e) => {
+            pb.finish_with_message("提交失败");
+            crate::ui::print_error(&format!("提交任务失败: {}", format_grpc_error(&e)));
+            return Err(anyhow!("提交任务失败"));
+        }
+    };
 
     let batch_id = response
         .batch_id
         .ok_or_else(|| anyhow!("服务器没有返回批次ID"))?
         .value;
 
-    print_info(&format!("批量任务已提交成功"));
+    crate::ui::print_success("批量任务已提交成功");
     print_info(&format!("批次ID: {}", style(&batch_id).green().bold()));
     print_info(&format!("已经创建 {} 个任务", response.agent_nums));
 
@@ -180,18 +277,21 @@ async fn run_exec_get(
         .transpose()?;
 
     // 获取批次详情
-    let details_request = GetBatchDetailsRequest {
+    let request = GetBatchDetailsRequest {
         batch_id: Some(oasis_core::proto::BatchId {
             value: args.batch_id.clone(),
         }),
         states: state_filters.unwrap_or_default(),
     };
 
-    let base_req = details_request.clone();
-    let batch_details = match grpc_retry!(client, get_batch_details(base_req.clone())).await {
-        Ok(response) => response.into_inner(),
+    let pb = crate::ui::create_spinner("正在获取批次信息...");
+    let batch_details = match grpc_retry!(client, get_batch_details(request.clone())).await {
+        Ok(response) => {
+            pb.finish_and_clear();
+            response.into_inner()
+        }
         Err(e) => {
-            print_status("获取批次信息失败", false);
+            pb.finish_with_message("获取失败");
             return Err(anyhow!("查询失败: {}", format_grpc_error(&e)));
         }
     };
@@ -210,7 +310,6 @@ async fn run_exec_get(
     Ok(())
 }
 
-/// 列出任务
 async fn run_exec_list(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: ExecListArgs,
@@ -233,11 +332,17 @@ async fn run_exec_list(
         states: state_filters.unwrap_or_default(),
     };
 
-    let base_req = request.clone();
-    let response = grpc_retry!(client, list_batches(base_req.clone()))
-        .await
-        .map_err(|e| anyhow!("获取批量任务列表失败: {}", format_grpc_error(&e)))?;
-    let response = response.into_inner();
+    let pb = crate::ui::create_spinner("正在获取批量任务列表...");
+    let response = match grpc_retry!(client, list_batches(request.clone())).await {
+        Ok(response) => {
+            pb.finish_and_clear();
+            response.into_inner()
+        }
+        Err(e) => {
+            pb.finish_with_message("获取失败");
+            return Err(anyhow!("获取批量任务列表失败: {}", format_grpc_error(&e)));
+        }
+    };
 
     if response.batches.is_empty() {
         print_info("未找到批次");
@@ -273,47 +378,28 @@ async fn run_exec_cancel(
         }),
     };
 
-    let base_req = request.clone();
-    let response = grpc_retry!(client, cancel_batch(base_req.clone()))
-        .await
-        .map_err(|e| anyhow!("取消批次任务失败: {}", format_grpc_error(&e)))?;
-    let response = response.into_inner();
+    let pb = crate::ui::create_spinner("正在取消批次任务...");
+    let response = match grpc_retry!(client, cancel_batch(request.clone())).await {
+        Ok(response) => {
+            let resp = response.into_inner();
+            if resp.success {
+                pb.finish_with_message("批次任务已取消");
+            } else {
+                pb.finish_with_message("取消失败");
+            }
+            resp
+        }
+        Err(e) => {
+            pb.finish_with_message("请求失败");
+            return Err(anyhow!("取消批次任务失败: {}", format_grpc_error(&e)));
+        }
+    };
 
-    if response.success {
-        print_info("批次任务已取消");
-    } else {
-        print_warning("批次任务取消失败");
+    if !response.success {
+        print_warning("批次任务取消失败，请检查批次ID或状态");
     }
 
     Ok(())
-}
-
-fn format_output(s: &str, color: Option<Color>) -> Cell {
-    if s.is_empty() {
-        return Cell::new("-").set_alignment(CellAlignment::Left);
-    }
-    let lines: Vec<&str> = s.lines().collect();
-    let max_lines = 3;
-    let max_len = 40;
-    let mut formatted = String::new();
-    for (i, line) in lines.iter().take(max_lines).enumerate() {
-        let mut l = line.chars().take(max_len).collect::<String>();
-        if line.chars().count() > max_len {
-            l.push_str("...");
-        }
-        if i > 0 {
-            formatted.push('\n');
-        }
-        write!(formatted, "{}", l).unwrap();
-    }
-    if lines.len() > max_lines {
-        formatted.push_str("\n...");
-    }
-    let mut cell = Cell::new(formatted).set_alignment(CellAlignment::Left);
-    if let Some(c) = color {
-        cell = cell.fg(c);
-    }
-    cell
 }
 
 // 你的 display_task_executions 函数
@@ -323,7 +409,7 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_width(120);
 
-    table.set_header(vec![
+    let mut header = vec![
         Cell::new("任务ID")
             .add_attribute(Attribute::Bold)
             .set_alignment(CellAlignment::Center),
@@ -336,25 +422,24 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
         Cell::new("退出码")
             .add_attribute(Attribute::Bold)
             .set_alignment(CellAlignment::Center),
-        Cell::new("输出")
-            .add_attribute(Attribute::Bold)
-            .set_alignment(CellAlignment::Center),
-        Cell::new("错误")
-            .add_attribute(Attribute::Bold)
-            .set_alignment(CellAlignment::Center),
+    ];
+    header.push(
         Cell::new("耗时")
             .add_attribute(Attribute::Bold)
             .set_alignment(CellAlignment::Center),
+    );
+    header.push(
         Cell::new("创建时间")
             .add_attribute(Attribute::Bold)
             .set_alignment(CellAlignment::Center),
-    ]);
+    );
+    table.set_header(header);
 
     for execution in executions {
         let task_id = execution
             .task_id
             .as_ref()
-            .map(|id| &id.value[..8])
+            .map(|id| id.value.as_str())
             .unwrap_or("unknown");
         let agent_id = execution
             .agent_id
@@ -387,19 +472,15 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
             TaskStateEnum::TaskCancelled => state_cell.fg(Color::DarkGrey),
         };
 
-        let stdout_cell = format_output(&execution.stdout, Some(Color::Yellow));
-        let stderr_cell = format_output(&execution.stderr, Some(Color::Red));
-
-        table.add_row(vec![
+        let mut row = vec![
             Cell::new(task_id).set_alignment(CellAlignment::Center),
             Cell::new(agent_id).set_alignment(CellAlignment::Center),
             state_cell,
             Cell::new(exit_code).set_alignment(CellAlignment::Center),
-            stdout_cell,
-            stderr_cell,
-            Cell::new(duration).set_alignment(CellAlignment::Center),
-            Cell::new(created_at).set_alignment(CellAlignment::Center),
-        ]);
+        ];
+        row.push(Cell::new(duration).set_alignment(CellAlignment::Center));
+        row.push(Cell::new(created_at).set_alignment(CellAlignment::Center));
+        table.add_row(row);
     }
 
     println!("{}", table);

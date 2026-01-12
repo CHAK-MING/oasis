@@ -81,7 +81,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
     Ok(())
 }
 
-async fn create_grpc_client(
+pub(crate) async fn create_grpc_client(
     config: &oasis_core::config::OasisConfig,
 ) -> Result<OasisServiceClient<Channel>> {
     let server_url = config.build_grpc_url()?;

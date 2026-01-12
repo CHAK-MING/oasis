@@ -26,7 +26,10 @@ impl RolloutState {
 
     /// 检查是否可以推进
     pub fn can_advance(&self) -> bool {
-        matches!(self, RolloutState::Created | RolloutState::Running | RolloutState::RolledBack)
+        matches!(
+            self,
+            RolloutState::Created | RolloutState::Running | RolloutState::RolledBack
+        )
     }
 
     /// 检查是否可以回滚

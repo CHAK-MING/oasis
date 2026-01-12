@@ -1,4 +1,4 @@
-use crate::infrastructure::services::{AgentService, FileService, TaskService, RolloutService};
+use crate::infrastructure::services::{AgentService, FileService, RolloutService, TaskService};
 use std::sync::Arc;
 
 /// 应用程序上下文 - 管理所有依赖

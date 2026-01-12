@@ -10,11 +10,11 @@ use oasis_core::proto::{
     CommitFileMsg, CreateRolloutRequest, CreateRolloutResponse, EmptyMsg, FileApplyRequestMsg,
     FileChunkMsg, FileChunkResponse, FileOperationResult, FileSpecMsg, FileUploadSession,
     GetBatchDetailsRequest, GetBatchDetailsResponse, GetFileHistoryRequest, GetFileHistoryResponse,
-    GetRolloutStatusRequest, GetRolloutStatusResponse, ListAgentsRequest, ListAgentsResponse,
-    ListBatchesRequest, ListBatchesResponse, ListRolloutsRequest, ListRolloutsResponse,
-    RemoveAgentRequest, RemoveAgentResponse, RollbackFileRequest, RollbackRolloutRequest,
-    RollbackRolloutResponse, SetInfoAgentRequest, SetInfoAgentResponse, SubmitBatchRequest,
-    SubmitBatchResponse, oasis_service_server,
+    GetRolloutStatusRequest, GetRolloutStatusResponse, GetTaskOutputRequest, GetTaskOutputResponse,
+    ListAgentsRequest, ListAgentsResponse, ListBatchesRequest, ListBatchesResponse,
+    ListRolloutsRequest, ListRolloutsResponse, RemoveAgentRequest, RemoveAgentResponse,
+    RollbackFileRequest, RollbackRolloutRequest, RollbackRolloutResponse, SetInfoAgentRequest,
+    SetInfoAgentResponse, SubmitBatchRequest, SubmitBatchResponse, oasis_service_server,
 };
 
 /// Oasis gRPC 服务器实现
@@ -50,6 +50,14 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<GetBatchDetailsRequest>,
     ) -> std::result::Result<Response<GetBatchDetailsResponse>, Status> {
         crate::interface::grpc::handlers::TaskHandlers::get_batch_details(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_task_output(
+        &self,
+        request: Request<GetTaskOutputRequest>,
+    ) -> std::result::Result<Response<GetTaskOutputResponse>, Status> {
+        crate::interface::grpc::handlers::TaskHandlers::get_task_output(self, request).await
     }
 
     #[instrument(skip_all)]
