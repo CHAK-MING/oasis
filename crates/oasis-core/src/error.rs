@@ -5,20 +5,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// 错误严重程度分类
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ErrorSeverity {
     /// 警告 - 不影响功能
     Warning,
     /// 错误 - 影响当前操作
+    #[default]
     Error,
     /// 严重 - 影响系统稳定性
     Critical,
-}
-
-impl Default for ErrorSeverity {
-    fn default() -> Self {
-        ErrorSeverity::Error
-    }
 }
 
 /// 核心错误类型 - 统一的错误处理

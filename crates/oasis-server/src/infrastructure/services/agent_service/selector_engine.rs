@@ -13,6 +13,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+fn parse_error(msg: &str) -> CoreError {
+    CoreError::InvalidTask {
+        reason: format!("Selector parse error: {}", msg),
+        severity: ErrorSeverity::Error,
+    }
+}
+
 #[derive(pest_derive::Parser)]
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
@@ -222,15 +229,15 @@ impl SelectorEngine {
         cache_key: &str,
         expression: &str,
     ) -> CoreResult<RoaringBitmap> {
-        if self.cache_config.enable_cache {
-            if let Some(cached_bitmap) = self.get_cached_result(cache_key).await? {
-                debug!(
-                    "Cache hit for key: {} (len={})",
-                    cache_key,
-                    cached_bitmap.len()
-                );
-                return Ok(cached_bitmap);
-            }
+        if self.cache_config.enable_cache
+            && let Some(cached_bitmap) = self.get_cached_result(cache_key).await?
+        {
+            debug!(
+                "Cache hit for key: {} (len={})",
+                cache_key,
+                cached_bitmap.len()
+            );
+            return Ok(cached_bitmap);
         }
 
         let t0 = std::time::Instant::now();
@@ -296,13 +303,16 @@ impl SelectorEngine {
         self.parse_logical_or(logical_or_pair)
     }
 
-    // 解析逻辑或表达式
     fn parse_logical_or(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
-        let first = self.parse_logical_and(inner.next().unwrap())?;
+        let first = self.parse_logical_and(
+            inner
+                .next()
+                .ok_or_else(|| parse_error("missing logical_and"))?,
+        )?;
 
         let mut result = first;
-        while let Some(and_pair) = inner.next() {
+        for and_pair in inner {
             let right = self.parse_logical_and(and_pair)?;
             result = SelectorAst::Or(Box::new(result), Box::new(right));
         }
@@ -310,13 +320,16 @@ impl SelectorEngine {
         Ok(result)
     }
 
-    // 解析逻辑与表达式
     fn parse_logical_and(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
-        let first = self.parse_logical_not(inner.next().unwrap())?;
+        let first = self.parse_logical_not(
+            inner
+                .next()
+                .ok_or_else(|| parse_error("missing logical_not"))?,
+        )?;
 
         let mut result = first;
-        while let Some(not_pair) = inner.next() {
+        for not_pair in inner {
             let right = self.parse_logical_not(not_pair)?;
             result = SelectorAst::And(Box::new(result), Box::new(right));
         }
@@ -324,35 +337,29 @@ impl SelectorEngine {
         Ok(result)
     }
 
-    // 解析逻辑非表达式
     fn parse_logical_not(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let pair_str = pair.as_str().trim();
 
-        // 检查是否以 "not" 开头
         if pair_str.starts_with("not ") {
-            // 这是一个 NOT 表达式，需要提取内部的 primary
             let mut inner = pair.into_inner();
-            let primary_pair = inner.next().unwrap(); // 这应该是 primary
+            let primary_pair = inner
+                .next()
+                .ok_or_else(|| parse_error("missing primary after 'not'"))?;
             let inner_ast = self.parse_primary(primary_pair)?;
             Ok(SelectorAst::Not(Box::new(inner_ast)))
         } else {
-            // 这是一个普通的 primary 表达式
             let mut inner = pair.into_inner();
-            let primary_pair = inner.next().unwrap();
+            let primary_pair = inner.next().ok_or_else(|| parse_error("missing primary"))?;
             self.parse_primary(primary_pair)
         }
     }
 
-    // 解析基础表达式
     fn parse_primary(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
-        let first_pair = inner.next().unwrap();
+        let first_pair = inner.next().ok_or_else(|| parse_error("empty primary"))?;
 
         match first_pair.as_rule() {
-            Rule::logical_or => {
-                // 这是括号内的表达式
-                self.parse_logical_or(first_pair)
-            }
+            Rule::logical_or => self.parse_logical_or(first_pair),
             Rule::all_true => Ok(SelectorAst::AllTrue),
             Rule::id_list => {
                 let mut ids = Vec::new();
@@ -365,19 +372,39 @@ impl SelectorEngine {
             }
             Rule::sys_eq => {
                 let mut it = first_pair.into_inner();
-                let sk = unquote(it.next().unwrap().as_str());
-                let sv = unquote(it.next().unwrap().as_str());
+                let sk = unquote(
+                    it.next()
+                        .ok_or_else(|| parse_error("sys_eq missing key"))?
+                        .as_str(),
+                );
+                let sv = unquote(
+                    it.next()
+                        .ok_or_else(|| parse_error("sys_eq missing value"))?
+                        .as_str(),
+                );
                 Ok(SelectorAst::SystemEq(sk, sv))
             }
             Rule::label_eq => {
                 let mut it = first_pair.into_inner();
-                let lk = unquote(it.next().unwrap().as_str());
-                let lv = unquote(it.next().unwrap().as_str());
+                let lk = unquote(
+                    it.next()
+                        .ok_or_else(|| parse_error("label_eq missing key"))?
+                        .as_str(),
+                );
+                let lv = unquote(
+                    it.next()
+                        .ok_or_else(|| parse_error("label_eq missing value"))?
+                        .as_str(),
+                );
                 Ok(SelectorAst::LabelEq(lk, lv))
             }
             Rule::in_groups => {
                 let mut it = first_pair.into_inner();
-                let group_name = unquote(it.next().unwrap().as_str());
+                let group_name = unquote(
+                    it.next()
+                        .ok_or_else(|| parse_error("in_groups missing name"))?
+                        .as_str(),
+                );
                 Ok(SelectorAst::InGroups(group_name))
             }
             _ => Err(CoreError::InvalidTask {
@@ -415,13 +442,12 @@ impl SelectorEngine {
 
     fn union_all_agents(&self) -> RoaringBitmap {
         // 检查缓存（60秒过期）
-        if let Ok(cache) = self.all_agents_cache.try_read() {
-            if let Some((cached_bitmap, cached_time)) = cache.as_ref() {
-                if cached_time.elapsed() < Duration::from_secs(60) {
-                    debug!("All agents cache hit, size={}", cached_bitmap.len());
-                    return cached_bitmap.clone();
-                }
-            }
+        if let Ok(cache) = self.all_agents_cache.try_read()
+            && let Some((cached_bitmap, cached_time)) = cache.as_ref()
+            && cached_time.elapsed() < Duration::from_secs(60)
+        {
+            debug!("All agents cache hit, size={}", cached_bitmap.len());
+            return cached_bitmap.clone();
         }
 
         // 使用 AgentInfoMonitor 的新方法获取所有 agent
@@ -552,10 +578,10 @@ impl SelectorEngine {
         }
 
         // 2) 更新 "all" 的缓存位图：移除该 id32
-        if let Ok(mut cache) = self.all_agents_cache.try_write() {
-            if let Some((ref mut bm, _ts)) = *cache {
-                bm.remove(id32);
-            }
+        if let Ok(mut cache) = self.all_agents_cache.try_write()
+            && let Some((ref mut bm, _ts)) = *cache
+        {
+            bm.remove(id32);
         }
 
         tracing::debug!(agent_id = %agent_id, affected_cache_entries = affected, "SelectorEngine: removed agent from cached bitmaps");

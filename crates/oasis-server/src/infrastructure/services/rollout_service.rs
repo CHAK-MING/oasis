@@ -52,24 +52,20 @@ impl RolloutService {
             Ok(mut keys) => {
                 let mut loaded_count = 0;
                 while let Some(key) = keys.next().await {
-                    if let Ok(key_str) = key {
-                        if let Ok(entry) = kv_store.get(&key_str).await {
-                            if let Some(bytes) = entry {
-                                match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
-                                    Ok(proto_status) => {
-                                        let status: RolloutStatus = (&proto_status).into();
-                                        let rollout_id = status.config.rollout_id.clone();
-                                        self.rollout_cache.insert(rollout_id.clone(), status);
-                                        loaded_count += 1;
-                                        info!("Loaded rollout {} from JetStream", rollout_id);
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "Failed to decode rollout from key {}: {}",
-                                            key_str, e
-                                        );
-                                    }
-                                }
+                    if let Ok(key_str) = key
+                        && let Ok(entry) = kv_store.get(&key_str).await
+                        && let Some(bytes) = entry
+                    {
+                        match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
+                            Ok(proto_status) => {
+                                let status: RolloutStatus = (&proto_status).into();
+                                let rollout_id = status.config.rollout_id.clone();
+                                self.rollout_cache.insert(rollout_id.clone(), status);
+                                loaded_count += 1;
+                                info!("Loaded rollout {} from JetStream", rollout_id);
+                            }
+                            Err(e) => {
+                                warn!("Failed to decode rollout from key {}: {}", key_str, e);
                             }
                         }
                     }
@@ -295,7 +291,7 @@ impl RolloutService {
             // 应用状态过滤
             if states
                 .as_ref()
-                .map_or(true, |s| s.contains(&updated_status.state))
+                .is_none_or(|s| s.contains(&updated_status.state))
             {
                 rollouts.push(updated_status);
             }
@@ -474,7 +470,7 @@ impl RolloutService {
             let is_rolling_back = status.state == RolloutState::RollingBack;
             if is_rolling_back && status.current_stage_idx > 0 {
                 // 回滚时更新前一个阶段
-                status.current_stage_idx = status.current_stage_idx - 1;
+                status.current_stage_idx -= 1;
             }
 
             // 获取阶段并更新统计信息
@@ -559,7 +555,7 @@ impl RolloutService {
             // 先确定要更新的阶段
             let is_rolling_back = status.state == RolloutState::RollingBack;
             if is_rolling_back && status.current_stage_idx > 0 {
-                status.current_stage_idx = status.current_stage_idx - 1;
+                status.current_stage_idx -= 1;
             }
 
             // 这里默认设置所有文件部署成功

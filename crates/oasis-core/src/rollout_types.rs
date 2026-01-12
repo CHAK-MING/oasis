@@ -7,9 +7,10 @@ use chrono;
 use serde::{Deserialize, Serialize};
 
 /// 灰度发布状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RolloutState {
-    Created,        // 已创建
+    #[default]
+    Created, // 已创建
     Running,        // 执行中
     Completed,      // 已完成
     Failed,         // 失败
@@ -51,12 +52,6 @@ impl RolloutState {
             Self::RollbackFailed => "rollback_failed",
             Self::RolledBack => "rolled_back",
         }
-    }
-}
-
-impl Default for RolloutState {
-    fn default() -> Self {
-        RolloutState::Created
     }
 }
 
@@ -274,7 +269,7 @@ impl RolloutStatus {
             RolloutStrategy::Percentage {
                 stages: percentages,
             } => {
-                let mut remaining_agents: Vec<_> = all_agents.iter().cloned().collect();
+                let mut remaining_agents: Vec<_> = all_agents.to_vec();
 
                 for (i, &percentage) in percentages.iter().enumerate() {
                     let target_count = if percentage == 100 {
@@ -306,7 +301,7 @@ impl RolloutStatus {
                 }
             }
             RolloutStrategy::Count { stages: counts } => {
-                let mut remaining_agents: Vec<_> = all_agents.iter().cloned().collect();
+                let mut remaining_agents: Vec<_> = all_agents.to_vec();
 
                 for (i, &count) in counts.iter().enumerate() {
                     let target_count = if count == 0 {

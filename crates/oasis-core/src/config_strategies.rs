@@ -63,6 +63,12 @@ pub struct AgentConfigStrategy {
     context: ConfigContext,
 }
 
+impl Default for AgentConfigStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentConfigStrategy {
     pub fn new() -> Self {
         Self {

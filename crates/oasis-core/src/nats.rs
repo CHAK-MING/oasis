@@ -102,3 +102,51 @@ pub struct NatsClientWithJetStream {
     pub client: Client,
     pub jetstream: jetstream::Context,
 }
+
+/// JetStream Pull Consumer 配置构建器
+pub struct ConsumerConfigBuilder {
+    durable_name: String,
+    filter_subject: String,
+    max_deliver: i64,
+    ack_wait_secs: u64,
+}
+
+const DEFAULT_MAX_DELIVER: i64 = 3;
+const DEFAULT_ACK_WAIT_SECS: u64 = 120;
+
+impl ConsumerConfigBuilder {
+    /// 创建新的 Consumer 配置构建器
+    pub fn new(durable_name: impl Into<String>, filter_subject: impl Into<String>) -> Self {
+        Self {
+            durable_name: durable_name.into(),
+            filter_subject: filter_subject.into(),
+            max_deliver: DEFAULT_MAX_DELIVER,
+            ack_wait_secs: DEFAULT_ACK_WAIT_SECS,
+        }
+    }
+
+    /// 设置最大重试次数
+    pub fn max_deliver(mut self, max: i64) -> Self {
+        self.max_deliver = max;
+        self
+    }
+
+    /// 设置 ACK 超时时间（秒）
+    pub fn ack_wait_secs(mut self, secs: u64) -> Self {
+        self.ack_wait_secs = secs;
+        self
+    }
+
+    /// 构建 JetStream Consumer 配置
+    pub fn build(self) -> jetstream::consumer::pull::Config {
+        jetstream::consumer::pull::Config {
+            durable_name: Some(self.durable_name),
+            filter_subject: self.filter_subject,
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            max_deliver: self.max_deliver,
+            ack_wait: Duration::from_secs(self.ack_wait_secs),
+            ..Default::default()
+        }
+    }
+}

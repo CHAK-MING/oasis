@@ -131,41 +131,49 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
 
     // 心跳（TTL型）
     {
-        let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_AGENT_HEARTBEAT.to_string();
-        cfg.description = "Agent heartbeat (TTL-based cleanup)".to_string();
-        cfg.history = 1;
-        cfg.max_age = std::time::Duration::from_secs(90);
+        let cfg = async_nats::jetstream::kv::Config {
+            bucket: JS_KV_AGENT_HEARTBEAT.to_string(),
+            description: "Agent heartbeat (TTL-based cleanup)".to_string(),
+            history: 1,
+            max_age: std::time::Duration::from_secs(90),
+            ..Default::default()
+        };
         kv_specs.push((cfg.bucket.clone(), cfg));
     }
 
     // Rollouts（版本化不TTL）
     {
-        let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_ROLLOUTS.to_string();
-        cfg.description = "Rollouts status (versioned, no TTL)".to_string();
-        cfg.history = 50;
-        cfg.max_value_size = 655_360; // 640KB 足够存储 Proto 状态
+        let cfg = async_nats::jetstream::kv::Config {
+            bucket: JS_KV_ROLLOUTS.to_string(),
+            description: "Rollouts status (versioned, no TTL)".to_string(),
+            history: 50,
+            max_value_size: 655_360, // 640KB 足够存储 Proto 状态
+            ..Default::default()
+        };
         kv_specs.push((cfg.bucket.clone(), cfg));
     }
 
     // Facts（版本化不TTL）
     {
-        let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_AGENT_INFOS.to_string();
-        cfg.description = "Agent facts (versioned, no TTL)".to_string();
-        cfg.history = 50;
-        cfg.max_value_size = 65536;
+        let cfg = async_nats::jetstream::kv::Config {
+            bucket: JS_KV_AGENT_INFOS.to_string(),
+            description: "Agent facts (versioned, no TTL)".to_string(),
+            history: 50,
+            max_value_size: 65536,
+            ..Default::default()
+        };
         kv_specs.push((cfg.bucket.clone(), cfg));
     }
 
     // Labels（版本化不TTL）
     {
-        let mut cfg = async_nats::jetstream::kv::Config::default();
-        cfg.bucket = JS_KV_AGENT_LABELS.to_string();
-        cfg.description = "Agent labels (versioned, no TTL)".to_string();
-        cfg.history = 50;
-        cfg.max_value_size = 65536;
+        let cfg = async_nats::jetstream::kv::Config {
+            bucket: JS_KV_AGENT_LABELS.to_string(),
+            description: "Agent labels (versioned, no TTL)".to_string(),
+            history: 50,
+            max_value_size: 65536,
+            ..Default::default()
+        };
         kv_specs.push((cfg.bucket.clone(), cfg));
     }
 

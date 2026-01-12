@@ -132,20 +132,18 @@ pub async fn execute_process_with_cancellation(
         }
         _ = cancel_token.cancelled() => {
             // 取消：杀死子进程
-            if let Some(pid) = child_id {
-                if let Err(e) = kill_process_safely(pid) {
+            if let Some(pid) = child_id
+                && let Err(e) = kill_process_safely(pid) {
                     warn!("Failed to kill process {} during cancellation: {}", pid, e);
                 }
-            }
             Err(ExecutionError::Cancelled)
         }
         _ = tokio::time::sleep(timeout) => {
             // 超时：杀死子进程
-            if let Some(pid) = child_id {
-                if let Err(e) = kill_process_safely(pid) {
+            if let Some(pid) = child_id
+                && let Err(e) = kill_process_safely(pid) {
                     warn!("Failed to kill process {} during timeout: {}", pid, e);
                 }
-            }
             Err(ExecutionError::Timeout(timeout))
         }
     }

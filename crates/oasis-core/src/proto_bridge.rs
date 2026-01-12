@@ -716,7 +716,7 @@ impl From<&RolloutStatus> for proto::RolloutStatusMsg {
         let stages = status
             .stages
             .iter()
-            .map(|stage| proto::RolloutStageStatusMsg::from(stage))
+            .map(proto::RolloutStageStatusMsg::from)
             .collect();
 
         proto::RolloutStatusMsg {
@@ -951,7 +951,7 @@ impl From<&RolloutStageStatus> for proto::RolloutStageStatusMsg {
             failed_executions: stage
                 .failed_executions
                 .iter()
-                .map(|execution| proto::TaskExecutionMsg::from(execution))
+                .map(proto::TaskExecutionMsg::from)
                 .collect(),
         }
     }

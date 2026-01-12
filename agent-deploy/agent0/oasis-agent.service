@@ -1,0 +1,19 @@
+[Unit]
+Description=Oasis Agent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/oasis/agent/oasis-agent
+EnvironmentFile=/opt/oasis/agent/agent.env
+Restart=always
+TimeoutStartSec=10
+RestartSec=1
+User=root
+WorkingDirectory=/opt/oasis/agent
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

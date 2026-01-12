@@ -77,15 +77,15 @@ impl FileManager {
         let filter_subject = format!("{}.{}", FILES_SUBJECT_PREFIX, self.agent_id);
 
         let consumer = stream
-            .create_consumer(jetstream::consumer::pull::Config {
-                durable_name: Some(consumer_name.clone()),
-                filter_subject: filter_subject.clone(),
-                deliver_policy: jetstream::consumer::DeliverPolicy::All,
-                ack_policy: jetstream::consumer::AckPolicy::Explicit,
-                max_deliver: 1, // 文件任务只尝试一次，失败就失败
-                ack_wait: std::time::Duration::from_secs(300), // 5分钟超时
-                ..Default::default()
-            })
+            .create_consumer(
+                oasis_core::nats::ConsumerConfigBuilder::new(
+                    consumer_name.clone(),
+                    filter_subject.clone(),
+                )
+                .max_deliver(1)
+                .ack_wait_secs(300)
+                .build(),
+            )
             .await
             .context("Failed to create file consumer")?;
 
@@ -182,7 +182,7 @@ impl FileManager {
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(&config.source_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("Invalid source path: no filename"))?
             .to_string_lossy();
         let object_key = format!("{}/{}.v{}", path_hash, filename, config.revision);
 

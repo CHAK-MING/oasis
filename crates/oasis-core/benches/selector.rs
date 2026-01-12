@@ -84,7 +84,7 @@ fn parse_logical_or(pair: pest::iterators::Pair<Rule>) -> SelectorAst {
     let mut inner = pair.into_inner();
     let first = parse_logical_and(inner.next().unwrap());
     let mut result = first;
-    while let Some(and_pair) = inner.next() {
+    for and_pair in inner {
         let right = parse_logical_and(and_pair);
         result = SelectorAst::Or(Box::new(result), Box::new(right));
     }
@@ -95,7 +95,7 @@ fn parse_logical_and(pair: pest::iterators::Pair<Rule>) -> SelectorAst {
     let mut inner = pair.into_inner();
     let first = parse_logical_not(inner.next().unwrap());
     let mut result = first;
-    while let Some(not_pair) = inner.next() {
+    for not_pair in inner {
         let right = parse_logical_not(not_pair);
         result = SelectorAst::And(Box::new(result), Box::new(right));
     }

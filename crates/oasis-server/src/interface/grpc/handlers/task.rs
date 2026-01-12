@@ -197,10 +197,8 @@ impl TaskHandlers {
             .await
         {
             Ok((batches, total_count)) => {
-                let proto_batches: Vec<proto::BatchMsg> = batches
-                    .into_iter()
-                    .map(|t| proto::BatchMsg::from(t))
-                    .collect();
+                let proto_batches: Vec<proto::BatchMsg> =
+                    batches.into_iter().map(proto::BatchMsg::from).collect();
                 let has_more = proto_batches.len() < total_count as usize;
 
                 let response = proto::ListBatchesResponse {

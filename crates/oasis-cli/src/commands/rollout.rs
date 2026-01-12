@@ -1,10 +1,7 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{
-    confirm_action, log_detail, print_header, print_info, print_next_step, print_warning,
-};
+use crate::ui::{confirm_action, print_header, print_info, print_next_step, print_warning};
 use anyhow::{Result, anyhow};
-use base64::Engine;
 use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
@@ -354,7 +351,7 @@ async fn run_rollout_advance(
             let resp = response.into_inner();
             if resp.success {
                 pb.finish_with_message("推进指令已下发");
-                print_info(&format!("{}", resp.message));
+                print_info(&resp.message.to_string());
             } else {
                 pb.finish_with_message("推进失败");
                 print_warning(&format!("失败原因: {}", resp.message));
@@ -479,9 +476,9 @@ fn create_file_task_type(
     use oasis_core::proto::*;
 
     let config = FileConfigMsg {
-        source_path: source_path,
+        source_path,
         destination_path: dest_path,
-        revision: revision,
+        revision,
         owner: owner.unwrap_or_default(),
         mode: mode.unwrap_or("0644".to_string()),
         target: Some(SelectorExpression { expression: target }),
@@ -546,7 +543,7 @@ async fn upload_file_for_rollout(
         let chunk = FileChunkMsg {
             upload_id: upload_id.clone(),
             offset,
-            data: buf.into(),
+            data: buf,
         };
 
         let resp = client
@@ -607,10 +604,10 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
         ));
 
         // 显示错误信息（如果有）
-        if let Some(err) = &status.error_message {
-            if !err.is_empty() {
-                print_warning(&format!("错误信息: {}", err));
-            }
+        if let Some(err) = &status.error_message
+            && !err.is_empty()
+        {
+            print_warning(&format!("错误信息: {}", err));
         }
 
         // 显示配置详情
@@ -632,15 +629,13 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
             Cell::new("完成/失败").add_attribute(Attribute::Bold),
         ]);
 
-        let mut stage_index = 0;
-        for stage in &status.stages {
+        for (stage_index, stage) in status.stages.iter().enumerate() {
             table.add_row(vec![
                 Cell::new((stage_index + 1).to_string()),
                 Cell::new(&stage.stage_name),
                 Cell::new(stage.target_agents.len().to_string()),
                 Cell::new(format!("{}/{}", stage.completed_count, stage.failed_count)),
             ]);
-            stage_index += 1;
         }
 
         println!("{}", table);
@@ -654,8 +649,7 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
 fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]) {
     let mut has_failures = false;
 
-    let mut stage_index = 0;
-    for stage in stages {
+    for (stage_index, stage) in stages.iter().enumerate() {
         if !stage.failed_executions.is_empty() {
             if !has_failures {
                 print_header("失败任务详情");
@@ -667,53 +661,7 @@ fn display_failed_executions(stages: &[oasis_core::proto::RolloutStageStatusMsg]
                 console::style((stage_index + 1).to_string()).bold(),
                 console::style(&stage.stage_name).bold()
             ));
-
-            for execution in &stage.failed_executions {
-                let task_id = execution
-                    .task_id
-                    .as_ref()
-                    .map(|id| &id.value[..8]) // 只显示前8位
-                    .unwrap_or("unknown");
-
-                let agent_id = execution
-                    .agent_id
-                    .as_ref()
-                    .map(|id| id.value.as_str())
-                    .unwrap_or("unknown");
-
-                log_detail("Task", &console::style(task_id).bold().to_string());
-                log_detail("Agent", &console::style(agent_id).bold().to_string());
-
-                if !execution.stdout.is_empty() {
-                    let out = if let Some(rest) = execution.stdout.strip_prefix("base64:") {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(rest)
-                            .map(|b: Vec<u8>| String::from_utf8_lossy(&b).to_string())
-                            .unwrap_or(execution.stdout.clone())
-                    } else {
-                        execution.stdout.clone()
-                    };
-                    log_detail("输出", &out);
-                }
-
-                if !execution.stderr.is_empty() {
-                    let err = if let Some(rest) = execution.stderr.strip_prefix("base64:") {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(rest)
-                            .map(|b: Vec<u8>| String::from_utf8_lossy(&b).to_string())
-                            .unwrap_or(execution.stderr.clone())
-                    } else {
-                        execution.stderr.clone()
-                    };
-                    print_warning(&format!("错误: {}", err));
-                }
-
-                if let Some(exit_code) = execution.exit_code {
-                    log_detail("退出码", &exit_code.to_string());
-                }
-            }
         }
-        stage_index += 1;
     }
 }
 
@@ -832,6 +780,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 /// 格式化时间戳
+#[allow(dead_code)]
 fn format_timestamp(timestamp: i64) -> String {
     crate::time::format_local_ts(timestamp)
 }

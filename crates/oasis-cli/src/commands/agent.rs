@@ -10,7 +10,7 @@ use console::style;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use oasis_core::proto::{RemoveAgentRequest, SetInfoAgentRequest};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -606,7 +606,7 @@ async fn run_agent_set(
 async fn run_agent_auto_deploy(
     target: &str,
     key: &Option<PathBuf>,
-    deploy_dir: &PathBuf,
+    deploy_dir: &Path,
     agent_id: &str,
 ) -> Result<()> {
     let ssh_key_args = if let Some(key_path) = key {
@@ -765,7 +765,7 @@ async fn verify_agent_deployment(target: &str, key: &Option<PathBuf>) -> Result<
 }
 
 /// 生成 Agent 独立证书
-async fn generate_agent_certificates(agent_id: &str, output_dir: &PathBuf) -> Result<()> {
+async fn generate_agent_certificates(agent_id: &str, output_dir: &Path) -> Result<()> {
     use crate::certificate::CertificateGenerator;
 
     // 加载 CA 证书
@@ -899,10 +899,16 @@ fn generate_agent_env_file(
         format!("\nOASIS_AGENT_GROUPS={}", groups.join(","))
     };
 
+    let timestamp = format!(
+        "{} {}",
+        crate::time::now_local_string(),
+        chrono::Local::now().format("%Z")
+    );
+
     let env = format!(
         r#"# Oasis Agent 环境变量
 # Agent ID: {agent_id}
-# 生成时间: {}
+# 生成时间: {timestamp}
 
 # Agent 身份
 OASIS_AGENT_ID={agent_id}
@@ -917,12 +923,7 @@ OASIS__TLS__CERTS_DIR=/opt/oasis/certs
 OASIS__TELEMETRY__LOG_LEVEL=info
 OASIS__TELEMETRY__LOG_FORMAT=text
 OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}
-"#,
-        format!(
-            "{} {}",
-            crate::time::now_local_string(),
-            chrono::Local::now().format("%Z")
-        )
+"#
     );
 
     Ok(env)

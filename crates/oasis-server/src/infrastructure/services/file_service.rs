@@ -68,7 +68,7 @@ impl FileService {
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(source_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
             .to_string_lossy();
         let revision = chrono::Utc::now().timestamp() as u64;
         let object_key = format!("{}/{}.v{}", path_hash, filename, revision);
@@ -133,7 +133,7 @@ impl FileService {
         // 并行向每个 Agent 发送文件应用任务
         let concurrency_limit = 32usize;
         let futs = agent_ids.into_iter().map(|aid| async move {
-            let res = self.send_file_apply_task(&config, &aid).await;
+            let res = self.send_file_apply_task(config, &aid).await;
             (aid, res)
         });
 
@@ -177,13 +177,12 @@ impl FileService {
         let success = failed_agents.is_empty();
 
         // 成功后更新当前版本指针
-        if success {
-            if let Err(e) = self
+        if success
+            && let Err(e) = self
                 .set_active_revision(&config.source_path, config.revision)
                 .await
-            {
-                warn!("Failed to update active revision pointer: {}", e);
-            }
+        {
+            warn!("Failed to update active revision pointer: {}", e);
         }
 
         Ok(FileOperationResult {
@@ -300,7 +299,7 @@ impl FileService {
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(source_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
             .to_string_lossy();
         let pointer_key = format!("{}/{}.current", path_hash, filename);
 
@@ -323,7 +322,7 @@ impl FileService {
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(source_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
             .to_string_lossy();
         let pointer_key = format!("{}/{}.current", path_hash, filename);
 
@@ -377,7 +376,7 @@ impl FileService {
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(source_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
             .to_string_lossy();
 
         let store = self.get_object_store().await?;

@@ -93,7 +93,7 @@ fn bench_dispatch_throughput(c: &mut Criterion) {
             let mut sub = client.subscribe(subject.clone()).await?;
             let cnt = counter.clone();
             tokio::spawn(async move {
-                while let Some(_) = sub.next().await {
+                while sub.next().await.is_some() {
                     cnt.fetch_add(1, Ordering::Relaxed);
                 }
             });
@@ -313,7 +313,7 @@ fn bench_sustained_throughput(c: &mut Criterion) {
         let mut result_sub = client.subscribe(result_subject.clone()).await?;
         let recv_cnt = recv_counter.clone();
         tokio::spawn(async move {
-            while let Some(_) = result_sub.next().await {
+            while result_sub.next().await.is_some() {
                 recv_cnt.fetch_add(1, Ordering::Relaxed);
             }
         });

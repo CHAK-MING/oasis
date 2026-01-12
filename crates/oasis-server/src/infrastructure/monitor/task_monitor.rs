@@ -156,21 +156,20 @@ impl TaskMonitor {
                                         debug!("Received execution result for task: {}", task_id);
                                         self.execution_cache
                                             .entry(task_id.clone())
-                                            .or_insert_with(Vec::new)
+                                            .or_default()
                                             .push(CachedExecution {
                                                 execution: Arc::new(execution.clone()),
                                                 cached_at: chrono::Utc::now().timestamp(),
                                             });
 
-                                        if execution.state.is_terminal() {
-                                            if let Some(mut cached_task) = self.task_cache.get_mut(task_id) {
+                                        if execution.state.is_terminal()
+                                            && let Some(mut cached_task) = self.task_cache.get_mut(task_id) {
                                                 let task = Arc::make_mut(&mut cached_task);
                                                 if !task.state.is_terminal() {
                                                     let _ = task.transition_to(execution.state);
                                                     info!("Updated task {} status to {:?}", task_id, execution.state);
                                                 }
                                             }
-                                        }
                                     }
                                     let _ = msg.ack().await;
                                 }

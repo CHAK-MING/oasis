@@ -84,15 +84,13 @@ impl TaskManager {
         let subject = tasks_unicast_subject(&self.agent_id);
 
         let consumer = stream
-            .create_consumer(jetstream::consumer::pull::Config {
-                durable_name: Some(consumer_name.clone()),
-                filter_subject: subject.clone(),
-                deliver_policy: jetstream::consumer::DeliverPolicy::All,
-                ack_policy: jetstream::consumer::AckPolicy::Explicit,
-                max_deliver: 3,
-                ack_wait: std::time::Duration::from_secs(120),
-                ..Default::default()
-            })
+            .create_consumer(
+                oasis_core::nats::ConsumerConfigBuilder::new(
+                    consumer_name.clone(),
+                    subject.clone(),
+                )
+                .build(),
+            )
             .await?;
 
         info!(
@@ -259,7 +257,7 @@ impl TaskManager {
 
         // 创建子进程
         let child = match tokio::process::Command::new("/bin/sh")
-            .args(&["-c", &full_command])
+            .args(["-c", &full_command])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(std::env::vars())
@@ -512,7 +510,7 @@ mod tests {
         #[test]
         fn test_full_command_with_args() {
             let command = "ls";
-            let args = vec!["-la".to_string(), "/tmp".to_string()];
+            let args = ["-la".to_string(), "/tmp".to_string()];
 
             let full_command = if args.is_empty() {
                 command.to_string()
@@ -540,7 +538,7 @@ mod tests {
         #[test]
         fn test_full_command_single_arg() {
             let command = "echo";
-            let args = vec!["hello".to_string()];
+            let args = ["hello".to_string()];
 
             let full_command = if args.is_empty() {
                 command.to_string()

@@ -267,24 +267,15 @@ impl AgentInfoMonitor {
                 }
             } else if let Some(stripped) = k.strip_prefix("__system_") {
                 let key = (stripped.to_string(), v.clone());
-                index_system
-                    .entry(key)
-                    .or_insert_with(roaring::RoaringBitmap::new)
-                    .insert(id32);
+                index_system.entry(key).or_default().insert(id32);
             } else {
                 let key = (k.clone(), v.clone());
-                index_labels
-                    .entry(key)
-                    .or_insert_with(roaring::RoaringBitmap::new)
-                    .insert(id32);
+                index_labels.entry(key).or_default().insert(id32);
             }
         }
 
         for g in groups {
-            index_groups
-                .entry(g)
-                .or_insert_with(roaring::RoaringBitmap::new)
-                .insert(id32);
+            index_groups.entry(g).or_default().insert(id32);
         }
     }
 

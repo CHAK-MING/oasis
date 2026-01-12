@@ -41,7 +41,7 @@ impl AgentHandlers {
         // 转 proto
         let agents = infos
             .into_iter()
-            .map(|info| oasis_core::proto::AgentInfoMsg::from(info))
+            .map(oasis_core::proto::AgentInfoMsg::from)
             .collect();
 
         Ok(Response::new(ListAgentsResponse { agents }))

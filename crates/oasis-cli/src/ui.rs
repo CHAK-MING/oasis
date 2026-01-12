@@ -47,6 +47,7 @@ pub fn print_next_step(message: &str) {
     println!("  {} {}", style(Symbols::ARROW).cyan(), message);
 }
 
+#[allow(dead_code)]
 pub fn log_detail(key: &str, value: &str) {
     println!("    {}: {}", style(key).dim(), value);
 }

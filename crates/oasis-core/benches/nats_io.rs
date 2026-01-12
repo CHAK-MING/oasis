@@ -200,7 +200,7 @@ fn bench_jetstream_kv_put_get(c: &mut Criterion) {
     });
 
     // best-effort cleanup
-    let _ = rt.block_on(async {
+    rt.block_on(async {
         let _ = js.delete_key_value(&bucket).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
     });

@@ -8,7 +8,7 @@ use oasis_core::{
     shutdown::GracefulShutdown,
     telemetry::init_tracing_with,
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 use tracing::{error, info};
 
 /// 解析环境变量标签
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
             url: cfg.nats.url.clone(),
         },
         &TlsConfig {
-            certs_dir: PathBuf::from(cfg.tls.certs_dir.clone()),
+            certs_dir: cfg.tls.certs_dir.clone(),
         },
     )
     .await?;

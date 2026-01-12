@@ -254,7 +254,7 @@ pub(crate) fn format_grpc_error(e: &tonic::Status) -> String {
     format!("{}: {}", hint, raw)
 }
 
-pub async fn call_with_retry<F, Fut, T>(mut op: F) -> Result<T, Status>
+pub async fn call_with_retry<F, Fut, T>(op: F) -> Result<T, Status>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, Status>>,
@@ -262,14 +262,14 @@ where
     let classifier = std::sync::Arc::new(|e: &Status| is_transient_status(e));
 
     // 使用重试机制处理瞬态错误
-    execute_with_backoff_selective(|| op(), network_connect_backoff(), classifier).await
+    execute_with_backoff_selective(op, network_connect_backoff(), classifier).await
 }
 
 #[macro_export]
 macro_rules! grpc_retry {
     ($client:expr, $method:ident($req:expr)) => {{
         // 显式限定路径，避免 #[macro_export] 导致的路径变化
-        crate::client::call_with_retry(|| {
+        $crate::client::call_with_retry(|| {
             let req = $req;
             let client = $client.clone();
             async move {

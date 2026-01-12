@@ -3,8 +3,9 @@ use chrono;
 use serde::{Deserialize, Serialize};
 
 /// 任务状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TaskState {
+    #[default]
     Created,
     Pending,
     Running,
@@ -29,12 +30,6 @@ impl TaskState {
             self,
             TaskState::Created | TaskState::Pending | TaskState::Running
         )
-    }
-}
-
-impl Default for TaskState {
-    fn default() -> Self {
-        TaskState::Created
     }
 }
 

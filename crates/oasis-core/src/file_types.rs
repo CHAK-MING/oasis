@@ -97,28 +97,26 @@ impl FileConfig {
         }
 
         // 验证权限模式
-        if let Some(ref mode) = self.mode {
-            if !mode.starts_with('0')
+        if let Some(ref mode) = self.mode
+            && (!mode.starts_with('0')
                 || mode.len() != 4
-                || !mode[1..].chars().all(|c| c.is_digit(8))
-            {
-                return Err(CoreError::InvalidTask {
-                    reason: "invalid mode format (expected octal like '0644')".to_string(),
-                    severity: crate::error::ErrorSeverity::Error,
-                });
-            }
+                || !mode[1..].chars().all(|c| c.is_digit(8)))
+        {
+            return Err(CoreError::InvalidTask {
+                reason: "invalid mode format (expected octal like '0644')".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
         }
 
         // 验证所有者格式
-        if let Some(owner) = &self.owner {
-            if let Some((user, group)) = owner.split_once(':') {
-                if user.is_empty() || group.is_empty() {
-                    return Err(CoreError::InvalidTask {
-                        reason: "invalid owner format (expected 'user:group')".to_string(),
-                        severity: crate::error::ErrorSeverity::Error,
-                    });
-                }
-            }
+        if let Some(owner) = &self.owner
+            && let Some((user, group)) = owner.split_once(':')
+            && (user.is_empty() || group.is_empty())
+        {
+            return Err(CoreError::InvalidTask {
+                reason: "invalid owner format (expected 'user:group')".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
         }
 
         Ok(())

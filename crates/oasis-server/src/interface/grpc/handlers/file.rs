@@ -389,16 +389,14 @@ impl FileHandlers {
     ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
         let req = request.into_inner();
 
-        // 验证参数
-        if req.config.as_ref().unwrap().source_path.is_empty() {
-            return Err(Status::invalid_argument("name cannot be empty"));
-        }
-
-        // 解析目标 agents
         let config = req
             .config
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("config is required for file apply"))?;
+
+        if config.source_path.is_empty() {
+            return Err(Status::invalid_argument("name cannot be empty"));
+        }
 
         let selector_expr = config
             .target
@@ -428,7 +426,7 @@ impl FileHandlers {
         // 返回完整的FileOperationResult
         Ok(Response::new(oasis_core::proto::FileOperationResult {
             success: true,
-            message: format!("File apply task created successfully"),
+            message: "File apply task created successfully".to_string(),
             revision: 0,
         }))
     }

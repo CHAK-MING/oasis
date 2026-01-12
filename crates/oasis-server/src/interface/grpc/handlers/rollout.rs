@@ -385,16 +385,8 @@ impl RolloutHandlers {
         let rollout_service = srv.context().rollout_service.clone();
         let task_service = srv.context().task_service.clone();
         let file_service = srv.context().file_service.clone();
-        if let Err(e) = Self::advance_once_with_services(
-            rollout_service,
-            task_service,
-            file_service,
-            &rollout_id,
-        )
-        .await
-        {
-            return Err(e);
-        }
+        Self::advance_once_with_services(rollout_service, task_service, file_service, &rollout_id)
+            .await?;
         let response = proto::AdvanceRolloutResponse {
             success: true,
             message: "已推进到下一阶段".to_string(),
