@@ -1,11 +1,10 @@
 //! TaskService - 专注基础CRUD操作
 
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
-use anyhow;
 use async_nats::jetstream::Context;
 use oasis_core::constants;
 use oasis_core::core_types::{AgentId, BatchId, TaskId};
-use oasis_core::error::{CoreError, Result};
+use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::task_types::*;
 use prost::Message;
 use std::sync::Arc;
@@ -61,9 +60,11 @@ impl TaskService {
                     task = task.with_agent_id(agent_id.clone());
 
                     // 转换状态为 Pending
-                    task.transition_to(TaskState::Pending).map_err(|e| {
-                        CoreError::from_anyhow(anyhow::anyhow!(e), Some(task.task_id.clone()))
-                    })?;
+                    task.transition_to(TaskState::Pending)
+                        .map_err(|e| CoreError::Internal {
+                            message: format!("Failed to transition task state: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })?;
 
                     Ok::<(Task, AgentId), CoreError>((task, agent_id))
                 }
@@ -283,18 +284,14 @@ impl TaskService {
             .jetstream
             .publish(subject, payload.into())
             .await
-            .map_err(|e| {
-                CoreError::from_anyhow(
-                    anyhow::anyhow!("Failed to publish unicast task: {}", e),
-                    Some(task.task_id.clone()),
-                )
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to publish unicast task: {}", e),
+                severity: ErrorSeverity::Error,
             })?;
 
-        ack.await.map_err(|e| {
-            CoreError::from_anyhow(
-                anyhow::anyhow!("Failed to confirm unicast task publish: {}", e),
-                Some(task.task_id.clone()),
-            )
+        ack.await.map_err(|e| CoreError::Nats {
+            message: format!("Failed to confirm unicast task publish: {}", e),
+            severity: ErrorSeverity::Error,
         })?;
 
         Ok(())
@@ -317,18 +314,14 @@ impl TaskService {
             .jetstream
             .publish(subject, payload.into())
             .await
-            .map_err(|e| {
-                CoreError::from_anyhow(
-                    anyhow::anyhow!("Failed to publish cancel: {}", e),
-                    Some(task_id.clone()),
-                )
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to publish cancel: {}", e),
+                severity: ErrorSeverity::Error,
             })?;
 
-        ack.await.map_err(|e| {
-            CoreError::from_anyhow(
-                anyhow::anyhow!("Failed to confirm cancel publish: {}", e),
-                Some(task_id.clone()),
-            )
+        ack.await.map_err(|e| CoreError::Nats {
+            message: format!("Failed to confirm cancel publish: {}", e),
+            severity: ErrorSeverity::Error,
         })?;
 
         Ok(())

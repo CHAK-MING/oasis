@@ -1,10 +1,10 @@
-use anyhow::Result;
 use oasis_agent::{agent_manager::AgentManager, nats_client::NatsClient};
 use oasis_core::{
     config::{NatsConfig, TlsConfig},
     config_strategies::AgentConfigStrategy,
     config_strategy::ConfigStrategy,
     core_types::AgentId,
+    error::Result,
     shutdown::GracefulShutdown,
     telemetry::init_tracing_with,
 };

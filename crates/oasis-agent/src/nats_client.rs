@@ -1,8 +1,8 @@
-use anyhow::Result;
 use async_nats::{Client, jetstream};
 use oasis_core::{
     config::{NatsConfig, TlsConfig},
     constants::*,
+    error::Result,
     nats::NatsClientFactory,
 };
 

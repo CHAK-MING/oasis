@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use oasis_core::{
     constants,
     core_types::{BatchId, TaskId},
-    error::{CoreError, Result},
+    error::{CoreError, ErrorSeverity, Result},
     task_types::{Batch, Task, TaskExecution, TaskState},
 };
 use prost::Message;
@@ -194,7 +194,10 @@ impl TaskMonitor {
     fn parse_execution_message(payload: &[u8]) -> Result<TaskExecution> {
         let proto_execution =
             oasis_core::proto::TaskExecutionMsg::decode(payload).map_err(|e| {
-                CoreError::from_anyhow(anyhow::anyhow!("Failed to parse execution: {}", e), None)
+                CoreError::Serialization {
+                    message: format!("Failed to parse execution: {}", e),
+                    severity: ErrorSeverity::Error,
+                }
             })?;
         Ok(TaskExecution::from(proto_execution))
     }

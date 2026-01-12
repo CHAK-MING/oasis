@@ -1,6 +1,6 @@
 //! 提供通用的 NATS 连接逻辑，支持 TLS 和 JetStream 功能。
 
-use anyhow::{Context, Result};
+use crate::error::{CoreError, ErrorSeverity, Result};
 use async_nats::ConnectOptions;
 use async_nats::{Client, jetstream};
 use std::time::Duration;
@@ -60,7 +60,10 @@ impl NatsClientFactory {
             Ok(c) => c,
             Err(e) => {
                 error!(error = %e, "Failed to connect to NATS");
-                return Err(e).context("Failed to connect to NATS");
+                return Err(CoreError::Nats {
+                    message: format!("Failed to connect to NATS: {}", e),
+                    severity: ErrorSeverity::Critical,
+                });
             }
         };
 
@@ -81,12 +84,18 @@ impl NatsClientFactory {
             || async {
                 Self::connect_with_config(nats_config, tls_config)
                     .await
-                    .map_err(|e| anyhow::anyhow!(e))
+                    .map_err(|e| CoreError::Nats {
+                        message: format!("NATS connection attempt failed: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })
             },
             backoff,
         )
         .await
-        .context("Failed to connect to NATS with retry")?;
+        .map_err(|e| CoreError::Nats {
+            message: format!("Failed to connect to NATS with retry: {}", e),
+            severity: ErrorSeverity::Critical,
+        })?;
 
         let jetstream = jetstream::new(client.clone());
         info!("NATS client and JetStream context created successfully with retry logic");

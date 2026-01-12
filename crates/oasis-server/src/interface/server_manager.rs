@@ -1,4 +1,4 @@
-use anyhow::Result;
+use oasis_core::error::Result;
 use std::time::Duration;
 use tonic::transport::Server;
 use tracing::{error, info, warn};

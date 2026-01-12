@@ -108,7 +108,10 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
                             Ok(_) => info!("Successfully created artifacts object store"),
                             Err(e) => error!("Failed to create artifacts object store: {:?}", e),
                         }
-                        result.map(|_| ()).map_err(|e| anyhow::anyhow!(e))
+                        result.map(|_| ()).map_err(|e| CoreError::Nats {
+                            message: format!("Failed to create artifacts object store: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })
                     }
                 },
                 backoff,

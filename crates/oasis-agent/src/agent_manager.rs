@@ -2,11 +2,11 @@ use crate::{
     file_manager::FileManager, heartbeat_service::HeartbeatService, nats_client::NatsClient,
     task_manager::TaskManager,
 };
-use anyhow::Result;
 use if_addrs::get_if_addrs;
 use oasis_core::{
     agent_types::{AgentInfo, AgentStatus},
     core_types::AgentId,
+    error::Result,
 };
 use std::{collections::HashMap, net::UdpSocket};
 use sysinfo::System;
