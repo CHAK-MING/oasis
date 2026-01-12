@@ -3,7 +3,7 @@ tests/
 docs/
 certs/
 
-agent-deploy/*
+agent-deploy/
 docker-compose.yml
-Cargo.lockagent-deploy/
+Cargo.lock
 .cargo/
