@@ -2,7 +2,7 @@
 
 use crate::config::OasisConfig;
 use crate::config_strategy::{ConfigContext, ConfigStrategy, RuntimeEnvironment};
-use anyhow::Result;
+use crate::error::{CoreError, ErrorSeverity, Result};
 use figment::providers::Format;
 use std::path::PathBuf;
 
@@ -42,7 +42,10 @@ impl ConfigStrategy for ServerConfigStrategy {
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
-            .map_err(|e| anyhow::anyhow!("Server 配置校验失败: {:?}", e))
+            .map_err(|e| CoreError::Config {
+                message: format!("Server 配置校验失败: {:?}", e),
+                severity: ErrorSeverity::Error,
+            })
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -98,7 +101,10 @@ impl ConfigStrategy for AgentConfigStrategy {
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
-            .map_err(|e| anyhow::anyhow!("Agent 配置校验失败: {:?}", e))?;
+            .map_err(|e| CoreError::Config {
+                message: format!("Agent 配置校验失败: {:?}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         // Agent 侧特定校验
         self.validate_agent_specific(config).await
@@ -130,9 +136,10 @@ impl AgentConfigStrategy {
         // 未知字段在 extract 阶段优雅处理
         figment = figment.merge(Env::prefixed("OASIS__").split("__"));
 
-        let config: OasisConfig = figment
-            .extract()
-            .map_err(|e| anyhow::anyhow!("加载基础配置失败: {}", e))?;
+        let config: OasisConfig = figment.extract().map_err(|e| CoreError::Config {
+            message: format!("加载基础配置失败: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
 
         Ok(config)
     }
@@ -165,26 +172,28 @@ impl AgentConfigStrategy {
     }
 
     async fn validate_agent_specific(&self, config: &OasisConfig) -> Result<()> {
-        // 校验证书文件是否存在（Agent 运行环境必须具备相关证书）
         if !config.tls.nats_ca_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到 NATS CA 证书: {}",
-                config.tls.nats_ca_path().display()
-            ));
+            return Err(CoreError::File {
+                path: config.tls.nats_ca_path().display().to_string(),
+                message: "未找到 NATS CA 证书".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
 
         if !config.tls.nats_client_cert_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到 NATS 客户端证书: {}",
-                config.tls.nats_client_cert_path().display()
-            ));
+            return Err(CoreError::File {
+                path: config.tls.nats_client_cert_path().display().to_string(),
+                message: "未找到 NATS 客户端证书".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
 
         if !config.tls.nats_client_key_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到 NATS 客户端私钥: {}",
-                config.tls.nats_client_key_path().display()
-            ));
+            return Err(CoreError::File {
+                path: config.tls.nats_client_key_path().display().to_string(),
+                message: "未找到 NATS 客户端私钥".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
 
         Ok(())
@@ -234,6 +243,9 @@ impl ConfigStrategy for CliConfigStrategy {
     async fn validate_config(&self, config: &OasisConfig) -> Result<()> {
         config
             .validate_with_context(&self.context)
-            .map_err(|e| anyhow::anyhow!("CLI 配置校验失败: {:?}", e))
+            .map_err(|e| CoreError::Config {
+                message: format!("CLI 配置校验失败: {:?}", e),
+                severity: ErrorSeverity::Error,
+            })
     }
 }

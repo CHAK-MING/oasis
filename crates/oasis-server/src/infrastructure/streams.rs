@@ -1,4 +1,4 @@
-use anyhow::Result;
+use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{JS_OBJ_ARTIFACTS, JS_STREAM_FILES, JS_STREAM_RESULTS, JS_STREAM_TASKS};
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -189,7 +189,10 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
                         js.create_key_value(cfg.clone())
                             .await
                             .map(|_| ())
-                            .map_err(|e| anyhow::anyhow!(e))
+                            .map_err(|e| CoreError::Nats {
+                                message: format!("Failed to create KV bucket: {}", e),
+                                severity: ErrorSeverity::Error,
+                            })
                     }
                 },
                 backoff,
@@ -231,7 +234,10 @@ async fn ensure_or_update_stream(
                                 Ok(_) => info!("Successfully updated stream {}", name),
                                 Err(e) => error!("Failed to update stream {}: {:?}", name, e),
                             }
-                            result.map(|_| ()).map_err(|e| anyhow::anyhow!(e))
+                            result.map(|_| ()).map_err(|e| CoreError::Nats {
+                                message: format!("Failed to update stream: {}", e),
+                                severity: ErrorSeverity::Error,
+                            })
                         }
                     },
                     backoff,
@@ -257,7 +263,10 @@ async fn ensure_or_update_stream(
                             Ok(_) => info!("Successfully created stream {}", name),
                             Err(e) => error!("Failed to create stream {}: {:?}", name, e),
                         }
-                        result.map(|_| ()).map_err(|e| anyhow::anyhow!(e))
+                        result.map(|_| ()).map_err(|e| CoreError::Nats {
+                            message: format!("Failed to create stream {}: {}", name, e),
+                            severity: ErrorSeverity::Error,
+                        })
                     }
                 },
                 backoff,

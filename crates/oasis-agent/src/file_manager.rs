@@ -1,8 +1,12 @@
 use crate::nats_client::NatsClient;
-use anyhow::{Context, Result};
 use async_nats::jetstream;
 use futures::StreamExt;
-use oasis_core::{constants::*, core_types::AgentId, file_types::FileConfig};
+use oasis_core::{
+    constants::*,
+    core_types::AgentId,
+    error::{CoreError, ErrorSeverity, Result},
+    file_types::FileConfig,
+};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
@@ -70,7 +74,10 @@ impl FileManager {
             .jetstream
             .get_stream(JS_STREAM_FILES)
             .await
-            .context("Failed to get files stream")?;
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get files stream: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         // 创建持久化消费者，只接收发给此Agent的文件任务
         let consumer_name = format!("agent-files-{}", self.agent_id);
@@ -87,7 +94,10 @@ impl FileManager {
                 .build(),
             )
             .await
-            .context("Failed to create file consumer")?;
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to create file consumer: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         info!(
             "Created file consumer: {} for subject: {}",
@@ -116,7 +126,10 @@ impl FileManager {
                 if let Err(ack_err) = msg.ack().await {
                     warn!("Failed to ack failed file message: {}", ack_err);
                 }
-                return Err(anyhow::anyhow!("Failed to decode file apply config: {}", e));
+                return Err(CoreError::Serialization {
+                    message: format!("Failed to decode file apply config: {}", e),
+                    severity: ErrorSeverity::Error,
+                });
             }
         };
 
@@ -153,9 +166,10 @@ impl FileManager {
     /// 应用文件到本地系统
     async fn apply_file(&self, config: &FileConfig) -> Result<()> {
         // 验证配置
-        config
-            .validate()
-            .map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
+        config.validate().map_err(|e| CoreError::Validation {
+            message: format!("Invalid config: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
 
         // 1. 从 Object Store 下载文件
         let file_data = self.download_from_object_store(config).await?;
@@ -175,30 +189,41 @@ impl FileManager {
             .jetstream
             .get_object_store(JS_OBJ_ARTIFACTS)
             .await
-            .context("Failed to get object store")?;
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get object store: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         let mut path_hasher = Sha256::new();
         path_hasher.update(config.source_path.as_bytes());
         let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
         let filename = std::path::Path::new(&config.source_path)
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Invalid source path: no filename"))?
+            .ok_or_else(|| CoreError::Validation {
+                message: "Invalid source path: no filename".to_string(),
+                severity: ErrorSeverity::Error,
+            })?
             .to_string_lossy();
         let object_key = format!("{}/{}.v{}", path_hash, filename, config.revision);
 
         let mut object = object_store
             .get(object_key)
             .await
-            .context("Failed to get object from store")?;
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get object from store: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         let mut data = Vec::new();
 
-        // 使用 AsyncReadExt 读取所有数据
         use tokio::io::AsyncReadExt;
         object
             .read_to_end(&mut data)
             .await
-            .context("Failed to read object data")?;
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to read object data: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         info!(
             "Downloaded file: {} ({} bytes)",
@@ -243,12 +268,18 @@ impl FileManager {
         if let Some(parent_dir) = dest_path.parent() {
             fs::create_dir_all(parent_dir)
                 .await
-                .context("Failed to create parent directory")?;
+                .map_err(|e| CoreError::Io {
+                    message: format!("Failed to create parent directory: {}", e),
+                    severity: ErrorSeverity::Error,
+                })?;
         }
 
         fs::write(dest_path, data)
             .await
-            .context("Failed to write file")?;
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to write file: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         Ok(())
     }
@@ -262,20 +293,27 @@ impl FileManager {
         // 解析八进制权限
         let mode =
             u32::from_str_radix(mode_str.trim_start_matches("0o").trim_start_matches("0"), 8)
-                .context("Failed to parse file mode")?;
+                .map_err(|e| CoreError::Validation {
+                    message: format!("Failed to parse file mode: {}", e),
+                    severity: ErrorSeverity::Error,
+                })?;
 
         debug!("Setting file mode: {} -> 0o{:o}", path.display(), mode);
 
-        let metadata = fs::metadata(path)
-            .await
-            .context("Failed to get file metadata")?;
+        let metadata = fs::metadata(path).await.map_err(|e| CoreError::Io {
+            message: format!("Failed to get file metadata: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
 
         let mut permissions = metadata.permissions();
         permissions.set_mode(mode);
 
         fs::set_permissions(path, permissions)
             .await
-            .context("Failed to set file permissions")?;
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to set file permissions: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         Ok(())
     }
@@ -294,11 +332,17 @@ impl FileManager {
             .arg(path)
             .output()
             .await
-            .context("Failed to execute chown command")?;
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to execute chown command: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to set file owner: {}", stderr));
+            return Err(CoreError::Io {
+                message: format!("Failed to set file owner: {}", stderr),
+                severity: ErrorSeverity::Error,
+            });
         }
 
         Ok(())

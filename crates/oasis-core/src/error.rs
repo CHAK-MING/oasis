@@ -119,6 +119,21 @@ pub enum CoreError {
         severity: ErrorSeverity,
     },
 
+    #[error("IO error: {message}")]
+    Io {
+        message: String,
+        #[serde(skip)]
+        severity: ErrorSeverity,
+    },
+
+    // === 验证错误 ===
+    #[error("Validation error: {message}")]
+    Validation {
+        message: String,
+        #[serde(skip)]
+        severity: ErrorSeverity,
+    },
+
     // === 配置错误 ===
     #[error("Config error: {message}")]
     Config {
@@ -179,6 +194,8 @@ impl CoreError {
             | CoreError::NotFound { severity, .. }
             | CoreError::VersionConflict { severity, .. }
             | CoreError::File { severity, .. }
+            | CoreError::Io { severity, .. }
+            | CoreError::Validation { severity, .. }
             | CoreError::Config { severity, .. }
             | CoreError::PermissionDenied { severity, .. }
             | CoreError::Internal { severity, .. }
@@ -369,6 +386,17 @@ impl CoreError {
 
 impl From<async_nats::Error> for CoreError {
     fn from(err: async_nats::Error) -> Self {
+        CoreError::Nats {
+            message: err.to_string(),
+            severity: ErrorSeverity::Error,
+        }
+    }
+}
+
+impl<T: Clone + std::fmt::Debug + std::fmt::Display + PartialEq> From<async_nats::error::Error<T>>
+    for CoreError
+{
+    fn from(err: async_nats::error::Error<T>) -> Self {
         CoreError::Nats {
             message: err.to_string(),
             severity: ErrorSeverity::Error,

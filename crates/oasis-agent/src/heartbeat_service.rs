@@ -1,8 +1,8 @@
 use crate::nats_client::NatsClient;
-use anyhow::Result;
 use oasis_core::{
     constants::{JS_KV_AGENT_HEARTBEAT, kv_key_heartbeat},
     core_types::AgentId,
+    error::Result,
 };
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;

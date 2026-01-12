@@ -1,11 +1,11 @@
 use crate::nats_client::NatsClient;
-use anyhow::Result;
 use async_nats::jetstream;
 use base64::Engine;
 use futures::StreamExt;
 use oasis_core::{
     constants::*,
     core_types::AgentId,
+    error::Result,
     task_types::{Task, TaskExecution, TaskState},
 };
 use prost::Message;
@@ -227,7 +227,12 @@ impl TaskManager {
             .await?;
         let key = kv_key_labels(self.agent_id.as_str());
 
-        let data = serde_json::to_vec(&new_labels)?;
+        let data = serde_json::to_vec(&new_labels).map_err(|e| {
+            oasis_core::error::CoreError::Serialization {
+                message: e.to_string(),
+                severity: oasis_core::error::ErrorSeverity::Error,
+            }
+        })?;
 
         kv.put(&key, data.into()).await?;
         info!("Updated agent labels: {:?}", new_labels);

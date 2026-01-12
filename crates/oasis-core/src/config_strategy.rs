@@ -4,7 +4,7 @@
 //! 以满足各自的运行需求。
 
 use crate::config::OasisConfig;
-use anyhow::Result;
+use crate::error::Result;
 use std::path::PathBuf;
 
 /// 不同运行环境的配置策略接口。
@@ -68,26 +68,28 @@ impl OasisConfig {
 
     /// Server 侧校验。
     fn validate_server_context(&self) -> Result<()> {
-        // Server 需要有效的 TLS 证书
         if !self.tls.grpc_server_cert_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到服务端证书: {}",
-                self.tls.grpc_server_cert_path().display()
-            ));
+            return Err(crate::error::CoreError::File {
+                path: self.tls.grpc_server_cert_path().display().to_string(),
+                message: "未找到服务端证书".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
         }
 
         if !self.tls.grpc_server_key_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到服务端私钥: {}",
-                self.tls.grpc_server_key_path().display()
-            ));
+            return Err(crate::error::CoreError::File {
+                path: self.tls.grpc_server_key_path().display().to_string(),
+                message: "未找到服务端私钥".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
         }
 
         if !self.tls.grpc_ca_path().exists() {
-            return Err(anyhow::anyhow!(
-                "未找到 CA 证书: {}",
-                self.tls.grpc_ca_path().display()
-            ));
+            return Err(crate::error::CoreError::File {
+                path: self.tls.grpc_ca_path().display().to_string(),
+                message: "未找到 CA 证书".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
         }
 
         Ok(())

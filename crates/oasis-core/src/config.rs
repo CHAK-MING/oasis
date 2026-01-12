@@ -1,3 +1,4 @@
+use crate::error::{CoreError, ErrorSeverity, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ pub struct OasisConfig {
 
 impl OasisConfig {
     /// 从指定路径或当前目录中的 oasis.toml 加载配置；支持以 OASIS_ 为前缀的环境变量覆盖（Figment）
-    pub fn load_config(path: Option<&str>) -> Result<Self, anyhow::Error> {
+    pub fn load_config(path: Option<&str>) -> Result<Self> {
         use figment::{Figment, providers::Env, providers::Format, providers::Toml};
         use std::path::Path;
 
@@ -48,9 +49,10 @@ impl OasisConfig {
         figment = figment.merge(Env::prefixed("OASIS__").split("__"));
 
         // 提取并解析
-        let mut cfg: OasisConfig = figment
-            .extract()
-            .map_err(|e| anyhow::anyhow!("Failed to load config via Figment: {}", e))?;
+        let mut cfg: OasisConfig = figment.extract().map_err(|e| CoreError::Config {
+            message: format!("Failed to load config via Figment: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
 
         // 解析相对路径
         cfg.resolve_relative_paths(&base_dir);
@@ -58,11 +60,13 @@ impl OasisConfig {
         Ok(cfg)
     }
 
-    pub fn build_grpc_url(&self) -> Result<String, anyhow::Error> {
+    pub fn build_grpc_url(&self) -> Result<String> {
         let url = self.grpc.url.trim().to_string();
-        // 这里是TLS 连接，必须是输入 https，否则返回错误
         if !url.starts_with("https://") {
-            return Err(anyhow::anyhow!("gRPC URL 必须是 https:// 开头的"));
+            return Err(CoreError::Validation {
+                message: "gRPC URL 必须是 https:// 开头的".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
         Ok(url)
     }

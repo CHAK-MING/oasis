@@ -181,5 +181,21 @@ pub fn map_core_error(error: CoreError) -> Status {
             ),
             "请刷新后重试，或在最新版本基础上重新提交",
         )),
+        CoreError::Io {
+            message,
+            severity: _,
+        } => Status::internal(build_msg(
+            "E_IO",
+            format!("IO 错误: {}", message),
+            "检查文件系统权限、磁盘空间与路径是否正确",
+        )),
+        CoreError::Validation {
+            message,
+            severity: _,
+        } => Status::invalid_argument(build_msg(
+            "E_VALIDATION",
+            format!("验证失败: {}", message),
+            "检查输入参数格式与取值范围",
+        )),
     }
 }

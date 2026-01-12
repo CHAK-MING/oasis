@@ -1,5 +1,5 @@
-use anyhow::Result;
 use oasis_core::config::TlsConfig;
+use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -41,7 +41,7 @@ impl TlsService {
     }
 
     /// 从文件加载证书
-    pub async fn load_certificates(&self) -> Result<(), anyhow::Error> {
+    pub async fn load_certificates(&self) -> Result<()> {
         let server_cert_path = self.config.grpc_server_cert_path();
         let server_key_path = self.config.grpc_server_key_path();
         let ca_cert_path = self.config.grpc_ca_path();
@@ -92,32 +92,38 @@ impl TlsService {
     }
 
     /// 从文件加载证书
-    async fn load_certificate(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
+    async fn load_certificate(&self, path: &str) -> Result<Vec<u8>> {
         let cert_path = PathBuf::from(path);
         if !cert_path.exists() {
-            return Err(anyhow::Error::msg(format!(
-                "Certificate file not found: {}",
-                path
-            )));
+            return Err(CoreError::File {
+                path: path.to_string(),
+                message: "Certificate file not found".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
 
-        fs::read(cert_path).await.map_err(|e| {
-            anyhow::Error::msg(format!("Failed to read certificate file {}: {}", path, e))
+        fs::read(cert_path).await.map_err(|e| CoreError::File {
+            path: path.to_string(),
+            message: format!("Failed to read certificate file: {}", e),
+            severity: ErrorSeverity::Error,
         })
     }
 
     /// 从文件加载私钥
-    async fn load_private_key(&self, path: &str) -> Result<Vec<u8>, anyhow::Error> {
+    async fn load_private_key(&self, path: &str) -> Result<Vec<u8>> {
         let key_path = PathBuf::from(path);
         if !key_path.exists() {
-            return Err(anyhow::Error::msg(format!(
-                "Private key file not found: {}",
-                path
-            )));
+            return Err(CoreError::File {
+                path: path.to_string(),
+                message: "Private key file not found".to_string(),
+                severity: ErrorSeverity::Error,
+            });
         }
 
-        fs::read(key_path).await.map_err(|e| {
-            anyhow::Error::msg(format!("Failed to read private key file {}: {}", path, e))
+        fs::read(key_path).await.map_err(|e| CoreError::File {
+            path: path.to_string(),
+            message: format!("Failed to read private key file: {}", e),
+            severity: ErrorSeverity::Error,
         })
     }
 }
