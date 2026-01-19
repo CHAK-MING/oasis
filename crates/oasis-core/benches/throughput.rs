@@ -3,11 +3,12 @@
 //! Enable with: OASIS_BENCH_ENABLE_NATS_IO=1
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures_util::StreamExt;
 use oasis_core::config::{NatsConfig, TlsConfig};
 use oasis_core::nats::NatsClientFactory;
 use prost::Message;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -87,7 +88,7 @@ fn bench_dispatch_throughput(c: &mut Criterion) {
     let setup_res: anyhow::Result<(async_nats::Client, String, Arc<AtomicU64>)> =
         rt.block_on(async {
             let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
-            let subject = format!("oasis.bench.throughput.{}", uuid::Uuid::new_v4());
+            let subject = format!("oasis.bench.throughput.{}", uuid::Uuid::now_v7());
             let counter = Arc::new(AtomicU64::new(0));
 
             let mut sub = client.subscribe(subject.clone()).await?;
@@ -165,8 +166,8 @@ fn bench_roundtrip_throughput(c: &mut Criterion) {
 
     let setup_res: anyhow::Result<(async_nats::Client, String, String)> = rt.block_on(async {
         let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
-        let task_subject = format!("oasis.bench.roundtrip.task.{}", uuid::Uuid::new_v4());
-        let result_subject = format!("oasis.bench.roundtrip.result.{}", uuid::Uuid::new_v4());
+        let task_subject = format!("oasis.bench.roundtrip.task.{}", uuid::Uuid::now_v7());
+        let result_subject = format!("oasis.bench.roundtrip.result.{}", uuid::Uuid::now_v7());
 
         let mut task_sub = client.subscribe(task_subject.clone()).await?;
         let agent_client = client.clone();
@@ -285,8 +286,8 @@ fn bench_sustained_throughput(c: &mut Criterion) {
 
     let result: anyhow::Result<(u64, Duration, u64)> = rt.block_on(async {
         let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
-        let task_subject = format!("oasis.bench.sustained.task.{}", uuid::Uuid::new_v4());
-        let result_subject = format!("oasis.bench.sustained.result.{}", uuid::Uuid::new_v4());
+        let task_subject = format!("oasis.bench.sustained.task.{}", uuid::Uuid::now_v7());
+        let result_subject = format!("oasis.bench.sustained.result.{}", uuid::Uuid::now_v7());
 
         let sent_counter = Arc::new(AtomicU64::new(0));
         let recv_counter = Arc::new(AtomicU64::new(0));

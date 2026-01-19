@@ -177,12 +177,13 @@ impl FileService {
         let success = failed_agents.is_empty();
 
         // 成功后更新当前版本指针
-        if success
-            && let Err(e) = self
+        if success {
+            if let Err(e) = self
                 .set_active_revision(&config.source_path, config.revision)
                 .await
-        {
-            warn!("Failed to update active revision pointer: {}", e);
+            {
+                warn!("Failed to update active revision pointer: {}", e);
+            }
         }
 
         Ok(FileOperationResult {

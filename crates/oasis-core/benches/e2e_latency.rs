@@ -6,11 +6,12 @@
 //! Enable with: OASIS_BENCH_ENABLE_NATS_IO=1
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures_util::StreamExt;
 use oasis_core::config::{NatsConfig, TlsConfig};
 use oasis_core::nats::NatsClientFactory;
 use prost::Message;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -108,8 +109,8 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
     let setup_res: anyhow::Result<(async_nats::Client, String, String)> = rt.block_on(async {
         let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
 
-        let task_subject = format!("oasis.bench.task.{}", uuid::Uuid::new_v4());
-        let result_subject = format!("oasis.bench.result.{}", uuid::Uuid::new_v4());
+        let task_subject = format!("oasis.bench.task.{}", uuid::Uuid::now_v7());
+        let result_subject = format!("oasis.bench.result.{}", uuid::Uuid::now_v7());
 
         let mut task_sub = client.subscribe(task_subject.clone()).await?;
         let agent_client = client.clone();
@@ -260,7 +261,7 @@ fn bench_dispatch_latency(c: &mut Criterion) {
     let setup_res: anyhow::Result<(async_nats::Client, String, Arc<AtomicU64>)> =
         rt.block_on(async {
             let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
-            let subject = format!("oasis.bench.dispatch.{}", uuid::Uuid::new_v4());
+            let subject = format!("oasis.bench.dispatch.{}", uuid::Uuid::now_v7());
             let counter = Arc::new(AtomicU64::new(0));
 
             let mut sub = client.subscribe(subject.clone()).await?;
@@ -331,8 +332,8 @@ fn bench_concurrent_agents(c: &mut Criterion) {
     for agent_count in [10, 100, 500, 1000] {
         let setup_res: anyhow::Result<(async_nats::Client, String, String)> = rt.block_on(async {
             let client = NatsClientFactory::connect_with_config(&nats, &tls).await?;
-            let task_subject = format!("oasis.bench.concurrent.task.{}", uuid::Uuid::new_v4());
-            let result_subject = format!("oasis.bench.concurrent.result.{}", uuid::Uuid::new_v4());
+            let task_subject = format!("oasis.bench.concurrent.task.{}", uuid::Uuid::now_v7());
+            let result_subject = format!("oasis.bench.concurrent.result.{}", uuid::Uuid::now_v7());
 
             for _agent_id in 0..agent_count {
                 let mut task_sub = client.subscribe(task_subject.clone()).await?;

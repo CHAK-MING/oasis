@@ -28,7 +28,7 @@ impl AgentId {
         &self.0
     }
     pub fn generate() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 }
 
@@ -40,7 +40,7 @@ impl TaskId {
         &self.0
     }
     pub fn generate() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 }
 
@@ -52,7 +52,7 @@ impl BatchId {
         &self.0
     }
     pub fn generate() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 }
 
@@ -64,7 +64,7 @@ impl RolloutId {
         &self.0
     }
     pub fn generate() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 }
 

@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use console::style;
+use rcgen::string::Ia5String;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
+    BasicConstraints, CertificateParams, CertifiedKey, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    SanType,
 };
 use std::net::IpAddr;
 
@@ -18,8 +20,8 @@ impl CertificateGenerator {
 
         // 生成 CA 证书
         let ca = Self::generate_ca("Oasis Root CA")?;
-        let ca_pem = ca.serialize_pem()?;
-        let ca_key_pem = ca.serialize_private_key_pem();
+        let ca_pem = ca.cert.pem();
+        let ca_key_pem = ca.signing_key.serialize_pem();
 
         // 保存 CA 证书
         std::fs::write(certs_dir.join("ca.pem"), &ca_pem)?;
@@ -45,37 +47,38 @@ impl CertificateGenerator {
     /// 生成 Agent 证书
     pub async fn generate_agent_certificate(
         agent_id: &str,
-        ca: &Certificate,
+        ca: &CertifiedKey<KeyPair>,
         output_dir: &std::path::Path,
     ) -> Result<()> {
         std::fs::create_dir_all(output_dir)?;
+
+        let ca_params = Self::get_ca_params();
 
         // 生成客户端证书
         let client_cert = Self::generate_client_cert(
             &format!("oasis-agent-{}", agent_id),
             &[ExtendedKeyUsagePurpose::ClientAuth],
             Some(agent_id),
+            ca,
+            &ca_params,
         )?;
 
         // 保存 NATS 客户端证书
-        std::fs::write(
-            output_dir.join("nats-client.pem"),
-            client_cert.serialize_pem_with_signer(ca)?,
-        )?;
+        std::fs::write(output_dir.join("nats-client.pem"), client_cert.cert.pem())?;
         std::fs::write(
             output_dir.join("nats-client-key.pem"),
-            client_cert.serialize_private_key_pem(),
+            client_cert.signing_key.serialize_pem(),
         )?;
 
         // 复制 CA 证书
-        let ca_pem = ca.serialize_pem()?;
+        let ca_pem = ca.cert.pem();
         std::fs::write(output_dir.join("nats-ca.pem"), &ca_pem)?;
 
         Ok(())
     }
 
     /// 加载 CA 证书
-    pub fn load_ca(certs_dir: &std::path::Path) -> Result<Certificate> {
+    pub fn load_ca(certs_dir: &std::path::Path) -> Result<CertifiedKey<KeyPair>> {
         let ca_key = std::fs::read_to_string(certs_dir.join("ca-key.pem"))
             .context("Failed to read CA private key")?;
 
@@ -87,7 +90,6 @@ impl CertificateGenerator {
         dn.push(DnType::CommonName, "Oasis Root CA");
 
         let mut params = CertificateParams::default();
-        params.alg = &PKCS_ECDSA_P256_SHA256;
         params.distinguished_name = dn;
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -95,45 +97,66 @@ impl CertificateGenerator {
             KeyUsagePurpose::CrlSign,
             KeyUsagePurpose::DigitalSignature,
         ];
-        params.key_pair = Some(key_pair);
+        let cert = params.self_signed(&key_pair)?;
 
-        Ok(Certificate::from_params(params)?)
+        Ok(CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        })
+    }
+
+    /// 获取 CA 参数
+    fn get_ca_params() -> CertificateParams {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "Oasis Root CA");
+
+        let mut params = CertificateParams::default();
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        params
     }
 
     /// 生成 CA 证书
-    fn generate_ca(common_name: &str) -> Result<Certificate> {
+    fn generate_ca(common_name: &str) -> Result<CertifiedKey<KeyPair>> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, common_name);
 
-        let mut params = CertificateParams::default();
-        params.alg = &PKCS_ECDSA_P256_SHA256;
-        params.distinguished_name = dn;
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
-        Ok(Certificate::from_params(params)?)
+        let params = Self::get_ca_params();
+        let cert = params.self_signed(&key_pair)?;
+
+        Ok(CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        })
     }
 
     /// 生成服务器证书
-    fn generate_server_certificates(certs_dir: &std::path::Path, ca: &Certificate) -> Result<()> {
+    fn generate_server_certificates(
+        certs_dir: &std::path::Path,
+        ca: &CertifiedKey<KeyPair>,
+    ) -> Result<()> {
+        let ca_params = Self::get_ca_params();
+
         // NATS 服务器证书
         let nats_cert = Self::generate_server_cert(
             "nats-server",
             &["localhost", "nats", "oasis-nats", "*.nats.local"],
             &Self::parse_ip_addresses(&["127.0.0.1", "::1", "0.0.0.0"])?,
+            ca,
+            &ca_params,
         )?;
 
-        std::fs::write(
-            certs_dir.join("nats-server.pem"),
-            nats_cert.serialize_pem_with_signer(ca)?,
-        )?;
+        std::fs::write(certs_dir.join("nats-server.pem"), nats_cert.cert.pem())?;
         std::fs::write(
             certs_dir.join("nats-server-key.pem"),
-            nats_cert.serialize_private_key_pem(),
+            nats_cert.signing_key.serialize_pem(),
         )?;
 
         // gRPC 服务器证书
@@ -141,43 +164,46 @@ impl CertificateGenerator {
             "oasis-grpc-server",
             &["localhost", "oasis-server", "*.oasis.local"],
             &Self::parse_ip_addresses(&["127.0.0.1", "::1", "0.0.0.0"])?,
+            ca,
+            &ca_params,
         )?;
 
-        std::fs::write(
-            certs_dir.join("grpc-server.pem"),
-            grpc_cert.serialize_pem_with_signer(ca)?,
-        )?;
+        std::fs::write(certs_dir.join("grpc-server.pem"), grpc_cert.cert.pem())?;
         std::fs::write(
             certs_dir.join("grpc-server-key.pem"),
-            grpc_cert.serialize_private_key_pem(),
+            grpc_cert.signing_key.serialize_pem(),
         )?;
 
         Ok(())
     }
 
     /// 生成客户端证书
-    fn generate_client_certificates(certs_dir: &std::path::Path, ca: &Certificate) -> Result<()> {
-        let client_cert =
-            Self::generate_client_cert("oasis-cli", &[ExtendedKeyUsagePurpose::ClientAuth], None)?;
+    fn generate_client_certificates(
+        certs_dir: &std::path::Path,
+        ca: &CertifiedKey<KeyPair>,
+    ) -> Result<()> {
+        let ca_params = Self::get_ca_params();
+
+        let client_cert = Self::generate_client_cert(
+            "oasis-cli",
+            &[ExtendedKeyUsagePurpose::ClientAuth],
+            None,
+            ca,
+            &ca_params,
+        )?;
 
         // 保存 NATS 客户端证书
-        std::fs::write(
-            certs_dir.join("nats-client.pem"),
-            client_cert.serialize_pem_with_signer(ca)?,
-        )?;
+        std::fs::write(certs_dir.join("nats-client.pem"), client_cert.cert.pem())?;
         std::fs::write(
             certs_dir.join("nats-client-key.pem"),
-            client_cert.serialize_private_key_pem(),
+            client_cert.signing_key.serialize_pem(),
         )?;
 
         // 保存 gRPC 客户端证书
-        std::fs::write(
-            certs_dir.join("grpc-client.pem"),
-            client_cert.serialize_pem_with_signer(ca)?,
-        )?;
+        std::fs::write(certs_dir.join("grpc-client.pem"), client_cert.cert.pem())?;
         std::fs::write(
             certs_dir.join("grpc-client-key.pem"),
-            client_cert.serialize_private_key_pem(),
+            client_cert.signing_key.serialize_pem(),
         )?;
 
         Ok(())
@@ -188,12 +214,15 @@ impl CertificateGenerator {
         common_name: &str,
         extended_key_usage: &[ExtendedKeyUsagePurpose],
         agent_id: Option<&str>,
-    ) -> Result<Certificate> {
+        ca: &CertifiedKey<KeyPair>,
+        ca_params: &CertificateParams,
+    ) -> Result<CertifiedKey<KeyPair>> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, common_name);
 
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+
         let mut params = CertificateParams::default();
-        params.alg = &PKCS_ECDSA_P256_SHA256;
         params.distinguished_name = dn;
         params.is_ca = IsCa::NoCa;
         params.key_usages = vec![
@@ -206,10 +235,16 @@ impl CertificateGenerator {
         if let Some(id) = agent_id {
             params
                 .subject_alt_names
-                .push(SanType::DnsName(id.to_string()));
+                .push(SanType::DnsName(Ia5String::try_from(id.to_string())?));
         }
 
-        Ok(Certificate::from_params(params)?)
+        let issuer = Issuer::from_params(ca_params, &ca.signing_key);
+        let cert = params.signed_by(&key_pair, &issuer)?;
+
+        Ok(CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        })
     }
 
     /// 生成服务器证书
@@ -217,12 +252,15 @@ impl CertificateGenerator {
         common_name: &str,
         sans_dns: &[&str],
         sans_ip: &[IpAddr],
-    ) -> Result<Certificate> {
+        ca: &CertifiedKey<KeyPair>,
+        ca_params: &CertificateParams,
+    ) -> Result<CertifiedKey<KeyPair>> {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, common_name);
 
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+
         let mut params = CertificateParams::default();
-        params.alg = &PKCS_ECDSA_P256_SHA256;
         params.distinguished_name = dn;
         params.is_ca = IsCa::NoCa;
         params.key_usages = vec![
@@ -236,7 +274,7 @@ impl CertificateGenerator {
         for dns in sans_dns {
             params
                 .subject_alt_names
-                .push(SanType::DnsName(dns.to_string()));
+                .push(SanType::DnsName(Ia5String::try_from((*dns).to_string())?));
         }
 
         // 添加 IP SAN - 确保包含所有必要的 IP
@@ -244,7 +282,13 @@ impl CertificateGenerator {
             params.subject_alt_names.push(SanType::IpAddress(*ip));
         }
 
-        Ok(Certificate::from_params(params)?)
+        let issuer = Issuer::from_params(ca_params, &ca.signing_key);
+        let cert = params.signed_by(&key_pair, &issuer)?;
+
+        Ok(CertifiedKey {
+            cert,
+            signing_key: key_pair,
+        })
     }
 
     /// 安全地解析 IP 地址列表

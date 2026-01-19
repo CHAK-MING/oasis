@@ -52,7 +52,7 @@ fn build_agent_info(
 async fn main() -> Result<()> {
     // 从环境变量读取 Agent ID
     let agent_id = std::env::var("OASIS_AGENT_ID")
-        .unwrap_or_else(|_| format!("agent-{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|_| format!("agent-{}", uuid::Uuid::now_v7()));
 
     // 读取 Agent 标签配置
     let labels = parse_env_labels("OASIS_AGENT_LABELS");

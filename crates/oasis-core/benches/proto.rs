@@ -1,9 +1,10 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use oasis_core::proto::{
     AgentId, AgentInfoMsg, BatchRequestMsg, FileApplyRequestMsg, FileChunkMsg, FileConfigMsg,
     FileSpecMsg, SelectorExpression, SubmitBatchRequest,
 };
 use prost::Message;
+use std::hint::black_box;
 
 fn bench_submit_batch_encode_decode(c: &mut Criterion) {
     let msg = SubmitBatchRequest {

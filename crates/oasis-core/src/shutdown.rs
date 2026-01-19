@@ -54,6 +54,7 @@ impl GracefulShutdown {
         };
 
         tokio::select! {
+            biased;
             _ = ctrl_c => {
                 info!("Received Ctrl+C signal");
             }
@@ -132,18 +133,20 @@ pub async fn execute_process_with_cancellation(
         }
         _ = cancel_token.cancelled() => {
             // 取消：杀死子进程
-            if let Some(pid) = child_id
-                && let Err(e) = kill_process_safely(pid) {
+            if let Some(pid) = child_id {
+                if let Err(e) = kill_process_safely(pid) {
                     warn!("Failed to kill process {} during cancellation: {}", pid, e);
                 }
+            }
             Err(ExecutionError::Cancelled)
         }
         _ = tokio::time::sleep(timeout) => {
             // 超时：杀死子进程
-            if let Some(pid) = child_id
-                && let Err(e) = kill_process_safely(pid) {
+            if let Some(pid) = child_id {
+                if let Err(e) = kill_process_safely(pid) {
                     warn!("Failed to kill process {} during timeout: {}", pid, e);
                 }
+            }
             Err(ExecutionError::Timeout(timeout))
         }
     }
@@ -157,6 +160,8 @@ fn kill_process_safely(pid: u32) -> Result<(), ExecutionError> {
         return Err(ExecutionError::Failed(anyhow::anyhow!("Invalid PID: 0")));
     }
 
+    // SAFETY: `pid` is validated to be non-zero and comes from an OS process ID.
+    // libc::kill does not take ownership of pointers and only uses the numeric PID.
     unsafe {
         // 更安全的调用：检查返回值
         let result = libc::kill(pid as i32, libc::SIGTERM);

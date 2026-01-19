@@ -1,10 +1,9 @@
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use time::UtcOffset;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
-// 全局可重载的日志过滤器句柄
-static LOG_FILTER_HANDLE: OnceCell<reload::Handle<EnvFilter, tracing_subscriber::Registry>> =
-    OnceCell::new();
+static LOG_FILTER_HANDLE: OnceLock<reload::Handle<EnvFilter, tracing_subscriber::Registry>> =
+    OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct LogConfig {

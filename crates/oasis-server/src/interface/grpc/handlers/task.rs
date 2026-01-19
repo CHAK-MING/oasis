@@ -16,7 +16,7 @@ pub struct TaskHandlers;
 
 impl TaskHandlers {
     /// 提交批量任务
-    #[instrument(skip_all)]
+    #[instrument(skip(srv, request), fields(command, target))]
     pub async fn submit_batch(
         srv: &OasisServer,
         request: tonic::Request<proto::SubmitBatchRequest>,
@@ -34,6 +34,10 @@ impl TaskHandlers {
         }
 
         let batch_request = BatchRequest::from(&proto_request);
+
+        // 记录关键字段
+        tracing::Span::current().record("command", &batch_request.command.as_str());
+        tracing::Span::current().record("target", &batch_request.selector.as_str());
 
         let selector_expr = batch_request.selector.as_str();
         let result = srv

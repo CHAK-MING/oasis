@@ -53,7 +53,35 @@ impl NatsClientFactory {
         // 健壮的心跳与超时，避免长时间空闲后连接“假存活”
         options = options
             .ping_interval(Duration::from_secs(20))
-            .connection_timeout(Duration::from_secs(5));
+            .connection_timeout(Duration::from_secs(5))
+            .event_callback(|event| async move {
+                match event {
+                    async_nats::Event::Connected => {
+                        info!("NATS connected");
+                    }
+                    async_nats::Event::Disconnected => {
+                        warn!("NATS disconnected");
+                    }
+                    async_nats::Event::LameDuckMode => {
+                        warn!("NATS server entering lame duck mode");
+                    }
+                    async_nats::Event::SlowConsumer(_) => {
+                        warn!("NATS slow consumer detected");
+                    }
+                    async_nats::Event::ServerError(err) => {
+                        error!(error = %err, "NATS server error");
+                    }
+                    async_nats::Event::ClientError(err) => {
+                        error!(error = %err, "NATS client error");
+                    }
+                    async_nats::Event::Draining => {
+                        info!("NATS connection draining");
+                    }
+                    async_nats::Event::Closed => {
+                        info!("NATS connection closed");
+                    }
+                }
+            });
 
         // 连接到 NATS
         let client = match options.connect(&nats_config.url).await {

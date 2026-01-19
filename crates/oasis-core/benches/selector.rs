@@ -1,7 +1,8 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use pest::Parser;
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
+use std::hint::black_box;
 
 #[derive(pest_derive::Parser)]
 #[grammar_inline = r#"

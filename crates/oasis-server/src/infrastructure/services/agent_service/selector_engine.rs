@@ -211,12 +211,13 @@ impl SelectorEngine {
 
             loop {
                 tokio::select! {
+                    biased;
+                    _ = shutdown_token.cancelled() => {
+                        info!("SelectorEngine cache cleanup stopped");
+                        return;
+                    }
                     _ = interval.tick() => {
                         Self::perform_cache_cleanup(&cache, &config).await;
-                    }
-                    _ = shutdown_token.cancelled() => {
-                        info!("SelectorEngine cache cleanup task stopped");
-                        break;
                     }
                 }
             }
@@ -229,15 +230,15 @@ impl SelectorEngine {
         cache_key: &str,
         expression: &str,
     ) -> CoreResult<RoaringBitmap> {
-        if self.cache_config.enable_cache
-            && let Some(cached_bitmap) = self.get_cached_result(cache_key).await?
-        {
-            debug!(
-                "Cache hit for key: {} (len={})",
-                cache_key,
-                cached_bitmap.len()
-            );
-            return Ok(cached_bitmap);
+        if self.cache_config.enable_cache {
+            if let Some(cached_bitmap) = self.get_cached_result(cache_key).await? {
+                debug!(
+                    "Cache hit for key: {} (len={})",
+                    cache_key,
+                    cached_bitmap.len()
+                );
+                return Ok(cached_bitmap);
+            }
         }
 
         let t0 = std::time::Instant::now();
@@ -442,12 +443,13 @@ impl SelectorEngine {
 
     fn union_all_agents(&self) -> RoaringBitmap {
         // 检查缓存（60秒过期）
-        if let Ok(cache) = self.all_agents_cache.try_read()
-            && let Some((cached_bitmap, cached_time)) = cache.as_ref()
-            && cached_time.elapsed() < Duration::from_secs(60)
-        {
-            debug!("All agents cache hit, size={}", cached_bitmap.len());
-            return cached_bitmap.clone();
+        if let Ok(cache) = self.all_agents_cache.try_read() {
+            if let Some((cached_bitmap, cached_time)) = cache.as_ref() {
+                if cached_time.elapsed() < Duration::from_secs(60) {
+                    debug!("All agents cache hit, size={}", cached_bitmap.len());
+                    return cached_bitmap.clone();
+                }
+            }
         }
 
         // 使用 AgentInfoMonitor 的新方法获取所有 agent
@@ -578,10 +580,10 @@ impl SelectorEngine {
         }
 
         // 2) 更新 "all" 的缓存位图：移除该 id32
-        if let Ok(mut cache) = self.all_agents_cache.try_write()
-            && let Some((ref mut bm, _ts)) = *cache
-        {
-            bm.remove(id32);
+        if let Ok(mut cache) = self.all_agents_cache.try_write() {
+            if let Some((ref mut bm, _ts)) = *cache {
+                bm.remove(id32);
+            }
         }
 
         tracing::debug!(agent_id = %agent_id, affected_cache_entries = affected, "SelectorEngine: removed agent from cached bitmaps");

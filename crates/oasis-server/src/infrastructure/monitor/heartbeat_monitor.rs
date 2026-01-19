@@ -107,6 +107,11 @@ impl HeartbeatMonitor {
 
             loop {
                 tokio::select! {
+                    biased;
+                    _ = shutdown_token.cancelled() => {
+                        info!("Heartbeat timeout checker stopped");
+                        return;
+                    }
                     _ = interval.tick() => {
                         let current_time = chrono::Utc::now().timestamp();
                         let mut timeout_count = 0;
@@ -176,6 +181,8 @@ impl HeartbeatMonitor {
 
                         loop {
                             tokio::select! {
+                                biased;
+                                _ = shutdown_token.cancelled() => { info!("Heartbeat watcher shutdown requested"); return; }
                                 msg = watcher.next() => {
                                     match msg {
                                         Some(Ok(entry)) => {

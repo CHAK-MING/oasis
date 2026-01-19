@@ -17,6 +17,7 @@ use crate::rollout_types::RolloutStatus;
 use crate::rollout_types::RolloutStrategy;
 use crate::rollout_types::RolloutTaskType;
 use crate::task_types::*;
+use tracing::warn;
 
 // ===== TaskId 转换 =====
 
@@ -758,6 +759,15 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             }
             None => RolloutStrategy::default(),
         };
+        let fallback_file_config = || crate::file_types::FileConfig {
+            source_path: String::new(),
+            destination_path: String::new(),
+            revision: 0,
+            owner: None,
+            mode: None,
+            target: None,
+        };
+
         let task_type = match cfg.task_type.and_then(|t| t.task_type) {
             Some(crate::proto::rollout_task_type_msg::TaskType::Command(cmd)) => {
                 RolloutTaskType::Command {
@@ -767,7 +777,19 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
                 }
             }
             Some(crate::proto::rollout_task_type_msg::TaskType::FileDeployment(file)) => {
-                let fc = crate::file_types::FileConfig::try_from(file.config.unwrap()).unwrap();
+                let fc = match file.config {
+                    Some(config) => match crate::file_types::FileConfig::try_from(config) {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            warn!("Invalid rollout file config: {}", e);
+                            fallback_file_config()
+                        }
+                    },
+                    None => {
+                        warn!("Missing rollout file config in task type");
+                        fallback_file_config()
+                    }
+                };
                 RolloutTaskType::FileDeployment { config: fc }
             }
             None => RolloutTaskType::Command {
@@ -776,10 +798,27 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
                 timeout_seconds: 60,
             },
         };
+        let rollout_id = cfg
+            .rollout_id
+            .as_ref()
+            .map(|id| RolloutId::from(id.value.clone()))
+            .unwrap_or_else(|| {
+                warn!("Missing rollout_id in RolloutConfigMsg, using 'unknown'");
+                RolloutId::from("unknown".to_string())
+            });
+        let target = cfg
+            .target
+            .clone()
+            .map(SelectorExpression::from)
+            .unwrap_or_else(|| {
+                warn!("Missing rollout target selector, using empty selector");
+                SelectorExpression::from(String::new())
+            });
+
         let rollout_config = RolloutConfig {
-            rollout_id: RolloutId::from(cfg.rollout_id.unwrap().value),
+            rollout_id,
             name: cfg.name,
-            target: SelectorExpression::from(cfg.target.unwrap()),
+            target,
             strategy,
             task_type,
             auto_advance: cfg.auto_advance,

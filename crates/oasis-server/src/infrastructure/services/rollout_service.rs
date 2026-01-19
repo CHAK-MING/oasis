@@ -52,20 +52,24 @@ impl RolloutService {
             Ok(mut keys) => {
                 let mut loaded_count = 0;
                 while let Some(key) = keys.next().await {
-                    if let Ok(key_str) = key
-                        && let Ok(entry) = kv_store.get(&key_str).await
-                        && let Some(bytes) = entry
-                    {
-                        match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
-                            Ok(proto_status) => {
-                                let status: RolloutStatus = (&proto_status).into();
-                                let rollout_id = status.config.rollout_id.clone();
-                                self.rollout_cache.insert(rollout_id.clone(), status);
-                                loaded_count += 1;
-                                info!("Loaded rollout {} from JetStream", rollout_id);
-                            }
-                            Err(e) => {
-                                warn!("Failed to decode rollout from key {}: {}", key_str, e);
+                    if let Ok(key_str) = key {
+                        if let Ok(entry) = kv_store.get(&key_str).await {
+                            if let Some(bytes) = entry {
+                                match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
+                                    Ok(proto_status) => {
+                                        let status: RolloutStatus = (&proto_status).into();
+                                        let rollout_id = status.config.rollout_id.clone();
+                                        self.rollout_cache.insert(rollout_id.clone(), status);
+                                        loaded_count += 1;
+                                        info!("Loaded rollout {} from JetStream", rollout_id);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to decode rollout from key {}: {}",
+                                            key_str, e
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -364,7 +368,19 @@ impl RolloutService {
             };
             status_val.updated_at = chrono::Utc::now().timestamp();
             status_val.state = RolloutState::Running;
-            let current_stage = status_val.current_stage_status_mut().unwrap();
+            let current_stage = match status_val.current_stage_status_mut() {
+                Some(stage) => stage,
+                None => {
+                    warn!(
+                        "Missing current stage while advancing rollout {}",
+                        rollout_id
+                    );
+                    return Err(CoreError::Internal {
+                        message: format!("Missing current stage for rollout {}", rollout_id),
+                        severity: ErrorSeverity::Error,
+                    });
+                }
+            };
             current_stage.batch_id = batch_id;
             current_stage.version_snapshot = version_snapshot;
             if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {

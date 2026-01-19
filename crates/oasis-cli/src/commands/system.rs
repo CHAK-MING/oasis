@@ -112,12 +112,12 @@ fn find_oasis_server_bin(explicit: &Option<PathBuf>) -> Result<PathBuf> {
         return Ok(b.clone());
     }
 
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let sibling = dir.join("oasis-server");
-        if sibling.is_file() {
-            return Ok(sibling);
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("oasis-server");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
         }
     }
 

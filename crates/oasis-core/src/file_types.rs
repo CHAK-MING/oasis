@@ -97,33 +97,35 @@ impl FileConfig {
         }
 
         // 验证权限模式
-        if let Some(ref mode) = self.mode
-            && (!mode.starts_with('0')
+        if let Some(mode) = self.mode.as_ref() {
+            if !mode.starts_with('0')
                 || mode.len() != 4
-                || !mode[1..].chars().all(|c| c.is_digit(8)))
-        {
-            return Err(CoreError::InvalidTask {
-                reason: "invalid mode format (expected octal like '0644')".to_string(),
-                severity: crate::error::ErrorSeverity::Error,
-            });
+                || !mode[1..].chars().all(|c| c.is_digit(8))
+            {
+                return Err(CoreError::InvalidTask {
+                    reason: "invalid mode format (expected octal like '0644')".to_string(),
+                    severity: crate::error::ErrorSeverity::Error,
+                });
+            }
         }
 
         // 验证所有者格式
-        if let Some(owner) = &self.owner
-            && let Some((user, group)) = owner.split_once(':')
-            && (user.is_empty() || group.is_empty())
-        {
-            return Err(CoreError::InvalidTask {
-                reason: "invalid owner format (expected 'user:group')".to_string(),
-                severity: crate::error::ErrorSeverity::Error,
-            });
+        if let Some(owner) = &self.owner {
+            if let Some((user, group)) = owner.split_once(':') {
+                if user.is_empty() || group.is_empty() {
+                    return Err(CoreError::InvalidTask {
+                        reason: "invalid owner format (expected 'user:group')".to_string(),
+                        severity: crate::error::ErrorSeverity::Error,
+                    });
+                }
+            }
         }
 
         Ok(())
     }
 
     /// 获取解析的权限模式
-    pub fn get_parsed_mode(&self) -> u32 {
+    pub fn parsed_mode(&self) -> u32 {
         self.mode
             .as_ref()
             .and_then(|m| u32::from_str_radix(&m[1..], 8).ok())
@@ -131,7 +133,7 @@ impl FileConfig {
     }
 
     /// 获取解析的所有者信息
-    pub fn get_parsed_owner(&self) -> (Option<String>, Option<String>) {
+    pub fn parsed_owner(&self) -> (Option<String>, Option<String>) {
         match &self.owner {
             Some(owner) => {
                 if let Some((user, group)) = owner.split_once(':') {
@@ -184,7 +186,7 @@ impl FileHistory {
     }
 
     /// 获取当前版本
-    pub fn get_current_version(&self) -> Option<&FileVersion> {
+    pub fn current_version(&self) -> Option<&FileVersion> {
         self.versions.iter().find(|v| v.is_current)
     }
 

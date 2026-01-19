@@ -137,7 +137,7 @@ impl Task {
         }
     }
 
-    pub fn get_task_id(&self) -> TaskId {
+    pub fn task_id(&self) -> TaskId {
         self.task_id.clone()
     }
 }
@@ -251,7 +251,7 @@ impl Batch {
         self
     }
 
-    pub fn get_batch_id(&self) -> BatchId {
+    pub fn batch_id(&self) -> BatchId {
         self.batch_id.clone()
     }
 }
@@ -443,9 +443,9 @@ mod tests {
         }
 
         #[test]
-        fn test_get_task_id() {
+        fn test_task_id() {
             let task = create_test_task();
-            let id = task.get_task_id();
+            let id = task.task_id();
             assert_eq!(id, task.task_id);
         }
 
@@ -535,9 +535,9 @@ mod tests {
         }
 
         #[test]
-        fn test_get_batch_id() {
+        fn test_batch_id() {
             let batch = Batch::new("cmd".to_string(), vec![], 30);
-            let id = batch.get_batch_id();
+            let id = batch.batch_id();
             assert_eq!(id, batch.batch_id);
         }
     }

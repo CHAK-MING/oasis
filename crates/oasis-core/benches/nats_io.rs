@@ -1,9 +1,10 @@
 use anyhow::Context;
 use bytes::Bytes;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use futures_util::StreamExt;
 use oasis_core::config::{NatsConfig, TlsConfig};
 use oasis_core::nats::NatsClientFactory;
+use std::hint::black_box;
 use std::time::Duration;
 
 fn enabled() -> bool {
@@ -78,7 +79,7 @@ fn bench_nats_request_reply(c: &mut Criterion) {
             .await
             .context("connect to nats")?;
 
-        let subject = format!("oasis.bench.nats.req.{}", uuid::Uuid::new_v4());
+        let subject = format!("oasis.bench.nats.req.{}", uuid::Uuid::now_v7());
 
         // responder
         let mut sub = client.subscribe(subject.clone()).await?;
@@ -152,7 +153,7 @@ fn bench_jetstream_kv_put_get(c: &mut Criterion) {
 
         let bucket = format!(
             "OASIS_BENCH_KV_{}",
-            uuid::Uuid::new_v4().to_string().replace('-', "")
+            uuid::Uuid::now_v7().to_string().replace('-', "")
         );
         let kv = js
             .create_key_value(async_nats::jetstream::kv::Config {

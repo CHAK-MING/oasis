@@ -1,7 +1,8 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use oasis_core::core_types::{AgentId, TaskId};
 use oasis_core::proto;
 use oasis_core::task_types::{TaskExecution, TaskState};
+use std::hint::black_box;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AggregatedStats {

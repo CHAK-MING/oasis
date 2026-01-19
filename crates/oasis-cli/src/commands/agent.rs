@@ -104,9 +104,9 @@ pub struct AgentDeployArgs {
 
 #[derive(Parser, Debug)]
 pub struct AgentListArgs {
-    /// 显示详细信息（包括 facts）
-    #[arg(short, long)]
-    verbose: bool,
+    /// 详细程度 (-v: 基础信息, -vv: 包含 facts, -vvv: 完整调试)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 
     #[arg(long, short = 't', help = "目标（选择器语法）", default_value = "all")]
     target: String,
@@ -169,7 +169,8 @@ async fn run_agent_deploy(
 
     print_header(&format!("部署 Agent 到 {}", style(&args.ssh_target).cyan()));
 
-    let re_id = regex::Regex::new(r"^[A-Za-z0-9]{1,64}$").unwrap();
+    let re_id = regex::Regex::new(r"^[A-Za-z0-9]{1,64}$")
+        .map_err(|e| anyhow::anyhow!("Agent ID 正则初始化失败: {}", e))?;
     if !re_id.is_match(&args.agent_id) {
         return Err(anyhow::anyhow!("Agent ID 非法（仅允许 1-64 位字母或数字）"));
     }
@@ -248,7 +249,7 @@ async fn run_agent_list(
         target: Some(oasis_core::proto::SelectorExpression {
             expression: args.target.clone(),
         }),
-        verbose: args.verbose,
+        verbose: args.verbose > 0,
         is_online: args.is_online,
     };
 
@@ -271,7 +272,7 @@ async fn run_agent_list(
         return Ok(());
     }
 
-    if args.verbose {
+    if args.verbose >= 1 {
         // 详细模式：显示 agent 信息（分离 groups、系统信息、普通标签）
         for agent in agents {
             let agent_id = agent
@@ -560,7 +561,8 @@ async fn run_agent_set(
     // labels 是每一个参数输入的是 k=v 的形式，和 hashmap 的方式一样
     // group 是每一个参数输入的是 xxx,xxx,xxx 的形式，需要设置成 key为__groups，value为 xxx,xxx,xxx
     // labels: KEY=VALUE 格式，使用正则校验，避免 unwrap 崩溃
-    let re_label = regex::Regex::new(r"^[^=\s]+=[^\s]*$").unwrap();
+    let re_label = regex::Regex::new(r"^[^=\s]+=[^\s]*$")
+        .map_err(|e| anyhow::anyhow!("标签正则初始化失败: {}", e))?;
     for label in args.labels.unwrap_or_default() {
         if !re_label.is_match(&label) {
             return Err(anyhow::anyhow!(format!(
@@ -610,10 +612,10 @@ async fn run_agent_auto_deploy(
     agent_id: &str,
 ) -> Result<()> {
     let ssh_key_args = if let Some(key_path) = key {
-        vec![
-            "-i",
-            key_path.to_str().expect("Key path should be valid UTF-8"),
-        ]
+        let key_str = key_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("SSH 私钥路径不是有效的 UTF-8"))?;
+        vec!["-i", key_str]
     } else {
         vec![]
     };
@@ -652,12 +654,11 @@ async fn run_agent_auto_deploy(
 
     let rsync_result = rsync_cmd.output().await;
 
-    if rsync_result.is_err()
-        || !rsync_result
-            .expect("rsync_result should be Ok")
-            .status
-            .success()
-    {
+    let rsync_status = match rsync_result {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    };
+    if !rsync_status {
         pb.set_message("rsync 失败，回退到 scp...");
         // 如果 rsync 失败，回退到 scp
         let mut scp_cmd = tokio::process::Command::new("scp");
@@ -725,10 +726,10 @@ async fn verify_agent_deployment(target: &str, key: &Option<PathBuf>) -> Result<
     print_info("验证 Agent 部署...");
 
     let ssh_key_args = if let Some(key_path) = key {
-        vec![
-            "-i",
-            key_path.to_str().expect("Key path should be valid UTF-8"),
-        ]
+        let key_str = key_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("SSH 私钥路径不是有效的 UTF-8"))?;
+        vec!["-i", key_str]
     } else {
         vec![]
     };

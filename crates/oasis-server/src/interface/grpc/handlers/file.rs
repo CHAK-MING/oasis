@@ -1,18 +1,17 @@
 //! 文件上传处理器 - 适配统一文件类型系统
 
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use sha2::{Digest, Sha256};
+use tokio::task;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, instrument, warn};
 
 use oasis_core::error::Result;
 
 use crate::interface::grpc::server::OasisServer;
-
-// Session管理
-use dashmap::DashMap;
-use lazy_static::lazy_static;
-use sha2::{Digest, Sha256};
-use std::time::{Duration, Instant};
-use tokio::task;
 
 /// 文件上传会话
 #[derive(Debug, Clone)]
@@ -218,9 +217,7 @@ impl FileHandlers {
     }
 }
 
-lazy_static! {
-    static ref SESSIONS: SessionManager = SessionManager::new();
-}
+static SESSIONS: LazyLock<SessionManager> = LazyLock::new(SessionManager::new);
 
 /// 文件上传相关的 gRPC 处理器
 pub struct FileHandlers;
@@ -254,7 +251,7 @@ impl FileHandlers {
         }
 
         // 生成上传 ID
-        let upload_id = uuid::Uuid::new_v4().to_string();
+        let upload_id = uuid::Uuid::now_v7().to_string();
 
         // 创建会话
         let received = FileHandlers::create(

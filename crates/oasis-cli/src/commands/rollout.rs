@@ -406,11 +406,16 @@ async fn run_rollout_rollback(
 fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrategyMsg> {
     use oasis_core::proto::*;
 
-    let re_pct = regex::Regex::new(r"(?i)^percentage:(\d+(?:,\d+)*)$").unwrap();
-    let re_cnt = regex::Regex::new(r"(?i)^count:(\d+(?:,\d+)*)$").unwrap();
+    let re_pct = regex::Regex::new(r"(?i)^percentage:(\d+(?:,\d+)*)$")
+        .map_err(|e| anyhow!("策略正则初始化失败(percentage): {}", e))?;
+    let re_cnt = regex::Regex::new(r"(?i)^count:(\d+(?:,\d+)*)$")
+        .map_err(|e| anyhow!("策略正则初始化失败(count): {}", e))?;
 
     if let Some(caps) = re_pct.captures(strategy_str.trim()) {
-        let list = caps.get(1).unwrap().as_str();
+        let list = caps
+            .get(1)
+            .ok_or_else(|| anyhow!("策略格式无效，缺少百分比分组"))?
+            .as_str();
         let stages: Result<Vec<u32>, _> =
             list.split(',').map(|s| s.trim().parse::<u32>()).collect();
 
@@ -428,7 +433,10 @@ fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrate
             Err(_) => Err(anyhow!("无效的百分比格式")),
         }
     } else if let Some(caps) = re_cnt.captures(strategy_str.trim()) {
-        let list = caps.get(1).unwrap().as_str();
+        let list = caps
+            .get(1)
+            .ok_or_else(|| anyhow!("策略格式无效，缺少计数分组"))?
+            .as_str();
         let stages: Result<Vec<u32>, _> =
             list.split(',').map(|s| s.trim().parse::<u32>()).collect();
 
@@ -604,10 +612,10 @@ fn display_rollout_status(status: &oasis_core::proto::RolloutStatusMsg) {
         ));
 
         // 显示错误信息（如果有）
-        if let Some(err) = &status.error_message
-            && !err.is_empty()
-        {
-            print_warning(&format!("错误信息: {}", err));
+        if let Some(err) = &status.error_message {
+            if !err.is_empty() {
+                print_warning(&format!("错误信息: {}", err));
+            }
         }
 
         // 显示配置详情

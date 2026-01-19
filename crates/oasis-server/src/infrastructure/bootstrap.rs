@@ -159,17 +159,9 @@ impl Bootstrap {
             tokio::spawn(async move {
                 info!("gRPC server manager task started");
 
-                // 创建服务工厂函数
                 let make_service = || {
                     info!("Creating new gRPC service instance");
-                    match Self::create_grpc_service(app_context.clone()) {
-                        Ok(service) => service,
-                        Err(e) => {
-                            tracing::error!("Failed to create gRPC service: {}", e);
-                            // 返回一个错误的服务，让调用者处理
-                            panic!("Failed to create gRPC service: {}", e);
-                        }
-                    }
+                    Self::create_grpc_service(app_context.clone())
                 };
 
                 // 使用 ServerManager 启动服务器

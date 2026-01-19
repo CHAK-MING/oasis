@@ -5,10 +5,12 @@ use crate::commands::file::{FileArgs, run_file};
 use crate::commands::rollout::{RolloutArgs, run_rollout};
 use crate::commands::system::{SystemArgs, run_system};
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{Shell, generate};
 use console::style;
 use oasis_core::backoff::{execute_with_backoff_selective, network_connect_backoff};
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
+use std::io;
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
@@ -54,13 +56,20 @@ pub enum Commands {
     File(FileArgs),
     System(SystemArgs),
     Rollout(RolloutArgs),
+    /// 生成 Shell 补全脚本
+    Completion {
+        /// 目标 Shell 类型
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<()> {
     match cli.command {
-        Commands::System(args) => {
-            // 系统命令不需要 grpc
-            run_system(args).await?
+        Commands::System(args) => run_system(args).await?,
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "oasis-cli", &mut io::stdout());
         }
         _ => {
             let client = create_grpc_client(config)
@@ -72,7 +81,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
                 Commands::File(args) => run_file(client, args).await?,
                 Commands::Agent(args) => run_agent(client, args).await?,
                 Commands::Rollout(args) => run_rollout(client, args).await?,
-                Commands::System(_) => {
+                Commands::System(_) | Commands::Completion { .. } => {
                     unreachable!()
                 }
             }

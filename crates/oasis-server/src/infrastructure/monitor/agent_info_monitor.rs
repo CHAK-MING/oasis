@@ -62,7 +62,7 @@ impl AgentInfoMonitor {
     pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
         let monitor = self.clone();
         tokio::spawn(async move {
-            let cleanup_handle = monitor.start_cache_cleanup();
+            let _cleanup_handle = monitor.start_cache_cleanup();
 
             let monitor_handle = async {
                 if let Err(e) = monitor.start().await {
@@ -71,11 +71,11 @@ impl AgentInfoMonitor {
             };
 
             tokio::select! {
-                _ = cleanup_handle => {},
-                _ = monitor_handle => {},
+                biased;
                 _ = monitor.shutdown_token.cancelled() => {
                     info!("AgentInfoMonitor shutdown requested");
                 }
+                _ = monitor_handle => {}
             }
         })
     }
@@ -151,6 +151,8 @@ impl AgentInfoMonitor {
 
                         loop {
                             tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => { info!("AgentInfoMonitor watcher shutdown requested"); return; }
                                 msg = watcher.next() => {
                                     match msg {
                                         Some(Ok(entry)) => {

@@ -10,16 +10,20 @@ use console::style;
 
 use oasis_core::{config_strategies::CliConfigStrategy, config_strategy::ConfigStrategy};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = client::Cli::parse();
-
-    // 启用 ANSI 颜色
+fn main() -> Result<()> {
+    // SAFETY: 在 tokio runtime 启动前设置环境变量（单线程安全）
     if std::env::var("CLICOLOR_FORCE").is_err() {
-        unsafe {
-            std::env::set_var("CLICOLOR_FORCE", "1");
-        }
+        unsafe { std::env::set_var("CLICOLOR_FORCE", "1") };
     }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
+    let cli = client::Cli::parse();
 
     // 统一从 oasis.toml 加载配置
     let strategy = CliConfigStrategy::new(cli.config.as_deref().map(std::path::PathBuf::from));

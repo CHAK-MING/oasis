@@ -1,7 +1,7 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
 use crate::ui::{confirm_action, print_header, print_info};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
 use oasis_core::{
@@ -144,7 +144,9 @@ async fn run_file_apply(
         return Err(anyhow::anyhow!("源文件不存在: {}", args.src));
     }
 
-    let abs_path = path.canonicalize().unwrap();
+    let abs_path = path
+        .canonicalize()
+        .with_context(|| format!("无法解析源文件路径: {}", args.src))?;
 
     // 获取文件信息
     let file_metadata = tokio::fs::metadata(&args.src).await?;
@@ -301,7 +303,7 @@ async fn run_file_history(
 
     let source_path = std::path::Path::new(&args.source_path)
         .canonicalize()
-        .unwrap();
+        .with_context(|| format!("无法解析源文件路径: {}", args.source_path))?;
 
     let base_req = GetFileHistoryRequest {
         source_path: source_path.to_string_lossy().to_string(),
@@ -310,12 +312,13 @@ async fn run_file_history(
         .await?
         .into_inner();
 
-    if response.file_history.is_none() {
-        print_info("没有找到文件历史信息");
-        return Ok(());
-    }
-
-    let file_history = response.file_history.unwrap();
+    let file_history = match response.file_history {
+        Some(file_history) => file_history,
+        None => {
+            print_info("没有找到文件历史信息");
+            return Ok(());
+        }
+    };
 
     print_info(&format!("文件名: {}", style(&file_history.name).green()));
     print_info(&format!(
@@ -388,7 +391,7 @@ async fn run_file_rollback(
 
     let abs_path = std::path::Path::new(&args.source_path)
         .canonicalize()
-        .unwrap();
+        .with_context(|| format!("无法解析源文件路径: {}", args.source_path))?;
 
     let request = RollbackFileRequest {
         config: Some(FileConfigMsg {

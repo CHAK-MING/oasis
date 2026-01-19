@@ -1,8 +1,8 @@
-use oasis_core::shutdown::{GracefulShutdown, wait_for_tasks_with_timeout};
+use oasis_core::shutdown::GracefulShutdown;
 use std::collections::HashMap;
 
-use tokio::task::JoinHandle;
-use tracing::info;
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{info, warn};
 
 /// 服务优先级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,13 +15,6 @@ pub enum ServicePriority {
     Low = 3,
 }
 
-/// 服务信息
-#[derive(Debug)]
-pub struct ServiceInfo {
-    pub priority: ServicePriority,
-    pub handle: JoinHandle<()>,
-}
-
 /// 生命周期管理器
 ///
 /// 负责统一管理所有服务的生命周期，包括：
@@ -32,8 +25,10 @@ pub struct ServiceInfo {
 pub struct LifecycleManager {
     /// 优雅关闭管理器
     shutdown: GracefulShutdown,
-    /// 注册的服务
-    services: HashMap<String, ServiceInfo>,
+    /// 任务集合（使用 JoinSet 管理）
+    tasks: JoinSet<()>,
+    /// 服务元数据
+    service_metadata: HashMap<String, ServicePriority>,
     /// 关闭超时时间（秒）
     shutdown_timeout_secs: u64,
 }
@@ -43,7 +38,8 @@ impl LifecycleManager {
     pub fn new() -> Self {
         Self {
             shutdown: GracefulShutdown::new(),
-            services: HashMap::new(),
+            tasks: JoinSet::new(),
+            service_metadata: HashMap::new(),
             shutdown_timeout_secs: 30,
         }
     }
@@ -67,8 +63,10 @@ impl LifecycleManager {
         handle: JoinHandle<()>,
     ) {
         info!("Registering service: {} (priority: {:?})", name, priority);
-        self.services
-            .insert(name.clone(), ServiceInfo { priority, handle });
+        self.service_metadata.insert(name, priority);
+        self.tasks.spawn(async move {
+            let _ = handle.await;
+        });
     }
 
     /// 注册高优先级服务
@@ -88,12 +86,12 @@ impl LifecycleManager {
 
     /// 获取服务数量
     pub fn service_count(&self) -> usize {
-        self.services.len()
+        self.tasks.len()
     }
 
     /// 获取服务名称列表
     pub fn list_service_names(&self) -> Vec<String> {
-        self.services.keys().cloned().collect()
+        self.service_metadata.keys().cloned().collect()
     }
 
     /// 启动信号监听（后台任务）
@@ -115,29 +113,25 @@ impl LifecycleManager {
     pub async fn graceful_shutdown(
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        info!(
-            "Starting graceful shutdown of {} services",
-            self.services.len()
-        );
+        let service_count = self.tasks.len();
+        info!("Starting graceful shutdown of {} services", service_count);
 
-        // 按优先级排序服务
-        let mut services: Vec<_> = self.services.drain().collect();
-        services.sort_by(|(_, a), (_, b)| a.priority.cmp(&b.priority));
+        let timeout = tokio::time::Duration::from_secs(self.shutdown_timeout_secs);
+        let result = tokio::time::timeout(timeout, async {
+            while let Some(result) = self.tasks.join_next().await {
+                match result {
+                    Ok(_) => info!("Service completed successfully"),
+                    Err(e) if e.is_cancelled() => info!("Service was cancelled"),
+                    Err(e) => warn!("Service failed: {}", e),
+                }
+            }
+        })
+        .await;
 
-        // 提取所有任务句柄
-        let handles: Vec<JoinHandle<()>> = services
-            .into_iter()
-            .map(|(name, service_info)| {
-                info!(
-                    "Shutting down service: {} (priority: {:?})",
-                    name, service_info.priority
-                );
-                service_info.handle
-            })
-            .collect();
-
-        // 等待所有任务完成
-        wait_for_tasks_with_timeout(handles, self.shutdown_timeout_secs).await;
+        if result.is_err() {
+            warn!("Graceful shutdown timeout reached, aborting remaining tasks");
+            self.tasks.abort_all();
+        }
 
         info!("All services shut down successfully");
         Ok(())

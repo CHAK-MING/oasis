@@ -2,6 +2,10 @@
 name = "oasis-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "oasis-cli"
@@ -29,11 +33,12 @@ tokio = { workspace = true, features = [
 ] }
 regex = { workspace = true }
 
-humantime = "2.1"
-which = "6.0"
+humantime = "2.3"
+which = "8.0"
 
-console = "0.15"
+console = "0.16"
 comfy-table = "7.1"
 
-bytesize = "1.3"
-indicatif = "0.17"
+bytesize = "2.3"
+indicatif = "0.18"
+clap_complete = "4.5.65"

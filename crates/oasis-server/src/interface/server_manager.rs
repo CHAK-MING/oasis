@@ -18,8 +18,10 @@ impl GrpcServerManager {
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> Result<()>
     where
-        F: FnMut() -> oasis_core::proto::oasis_service_server::OasisServiceServer<
-            crate::interface::grpc::server::OasisServer,
+        F: FnMut() -> Result<
+            oasis_core::proto::oasis_service_server::OasisServiceServer<
+                crate::interface::grpc::server::OasisServer,
+            >,
         >,
     {
         info!("Starting gRPC server manager on {}", addr);
@@ -32,7 +34,25 @@ impl GrpcServerManager {
             }
 
             info!("Creating new gRPC service instance");
-            let svc = make_svc();
+            let svc = match make_svc() {
+                Ok(svc) => svc,
+                Err(e) => {
+                    error!("Failed to create gRPC service: {}", e);
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => {
+                            info!("Shutdown requested; stop restarting gRPC server");
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                    }
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
+                    info!(
+                        "Retrying gRPC service creation after backoff: {} ms",
+                        backoff_ms
+                    );
+                    continue;
+                }
+            };
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let token = shutdown_token.clone();
 

@@ -153,12 +153,12 @@ where
         .wait_for_permission(cancellation_token.clone(), operation_name)
         .await?;
 
-    if let Some(ref token) = cancellation_token
-        && token.is_cancelled()
-    {
-        return Err(CoreError::internal_error(
-            "Operation cancelled before execution",
-        ));
+    if let Some(token) = cancellation_token.as_ref() {
+        if token.is_cancelled() {
+            return Err(CoreError::internal_error(
+                "Operation cancelled before execution",
+            ));
+        }
     }
 
     operation().await

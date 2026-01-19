@@ -1,6 +1,6 @@
 # Oasis
 
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
 
 Oasis 是一个大规模集群节点管理工具，支持 OpenCloudOS Stream 23/OpenCloudOS 9。提供统一的命令行界面来管理大规模 Linux 节点。支持任务执行、文件分发、灰度发布等核心功能。
 
