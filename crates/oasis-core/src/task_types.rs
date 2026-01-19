@@ -152,6 +152,7 @@ pub struct TaskExecution {
     /// 执行状态
     pub state: TaskState,
     /// 退出码
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// 标准输出
     pub stdout: String,
@@ -160,8 +161,10 @@ pub struct TaskExecution {
     /// 开始时间
     pub started_at: i64,
     /// 完成时间
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
     /// 执行时长（毫秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
 }
 

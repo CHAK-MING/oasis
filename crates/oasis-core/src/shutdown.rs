@@ -162,6 +162,7 @@ fn kill_process_safely(pid: u32) -> Result<(), ExecutionError> {
 
     // SAFETY: `pid` is validated to be non-zero and comes from an OS process ID.
     // libc::kill does not take ownership of pointers and only uses the numeric PID.
+    #[allow(unsafe_code)]
     unsafe {
         // 更安全的调用：检查返回值
         let result = libc::kill(pid as i32, libc::SIGTERM);

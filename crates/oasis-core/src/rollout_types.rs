@@ -162,6 +162,7 @@ pub struct RolloutStageStatus {
     /// 目标Agent列表
     pub target_agents: Vec<AgentId>,
     /// 关联的BatchId（用于命令执行）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<BatchId>,
     /// 已开始的Agent数量
     pub started_count: u32,
@@ -170,12 +171,15 @@ pub struct RolloutStageStatus {
     /// 失败的Agent数量
     pub failed_count: u32,
     /// 开始时间
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     /// 完成时间
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
     /// 失败的任务执行详情
     pub failed_executions: Vec<TaskExecution>,
     /// 版本快照信息
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version_snapshot: Option<VersionSnapshot>,
 }
 
@@ -191,6 +195,7 @@ pub struct VersionSnapshot {
 pub enum SnapshotData {
     FileSnapshot {
         file_config: FileConfig,
+        #[serde(skip_serializing_if = "Option::is_none")]
         previous_revision: Option<u64>, // 推进前的文件版本
     },
     CommandSnapshot {
@@ -236,6 +241,7 @@ pub struct RolloutStatus {
     /// 更新时间
     pub updated_at: i64,
     /// 错误信息（如果有）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     /// 当前动作
     pub current_action: String,

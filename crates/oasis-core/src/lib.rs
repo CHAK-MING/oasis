@@ -23,5 +23,6 @@ pub mod utils;
 pub use constants::*;
 
 pub mod proto {
+    #![allow(clippy::similar_names)]
     tonic::include_proto!("oasis");
 }
