@@ -1,3 +1,9 @@
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+version = "0.1.0"
+authors = ["Oasis Team"]
+
 [workspace]
 members = [
   "crates/oasis-core",
@@ -38,7 +44,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
 futures = "0.3"
 
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 toml = "0.9"
 
 rcgen = "0.14"

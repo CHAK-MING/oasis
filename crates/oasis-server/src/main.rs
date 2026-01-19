@@ -1,5 +1,7 @@
 use clap::Parser;
 
+use fs4::fs_std::FileExt;
+
 mod application;
 mod infrastructure;
 mod interface;
@@ -41,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(true)
         .open(lock_path)?;
 
-    if let Err(e) = fs2::FileExt::try_lock_exclusive(&file) {
+    if let Err(e) = file.try_lock_exclusive() {
         eprintln!(
             "oasis-server 已在运行（锁文件: {}）。若确定未运行，请删除锁文件后重试。错误: {}",
             lock_path.display(),

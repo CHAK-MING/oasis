@@ -42,4 +42,4 @@ pest = "2.8"
 pest_derive = "2.8"
 
 rustls-pemfile = "2.2"
-fs2 = "0.4"
+fs4 = "0.12"
