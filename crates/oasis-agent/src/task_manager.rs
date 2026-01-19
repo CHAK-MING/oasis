@@ -423,7 +423,10 @@ mod tests {
             let result = TaskManager::encode_output(b"hello world");
             assert!(result.starts_with("base64:"));
 
-            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let encoded_part = result
+                .strip_prefix("base64:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid encoded format"))
+                .unwrap();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded_part)
                 .unwrap();
@@ -436,7 +439,10 @@ mod tests {
             let result = TaskManager::encode_output(&binary_data);
             assert!(result.starts_with("base64:"));
 
-            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let encoded_part = result
+                .strip_prefix("base64:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid encoded format"))
+                .unwrap();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded_part)
                 .unwrap();
@@ -448,7 +454,10 @@ mod tests {
             let utf8_text = "你好世界 🌍";
             let result = TaskManager::encode_output(utf8_text.as_bytes());
 
-            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let encoded_part = result
+                .strip_prefix("base64:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid encoded format"))
+                .unwrap();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded_part)
                 .unwrap();
@@ -460,7 +469,10 @@ mod tests {
             let text_with_newlines = "line1\nline2\nline3";
             let result = TaskManager::encode_output(text_with_newlines.as_bytes());
 
-            let encoded_part = result.strip_prefix("base64:").unwrap();
+            let encoded_part = result
+                .strip_prefix("base64:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid encoded format"))
+                .unwrap();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded_part)
                 .unwrap();
