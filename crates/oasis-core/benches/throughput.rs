@@ -46,8 +46,8 @@ fn create_task_payload(task_id: &str) -> Vec<u8> {
         args: vec!["test".to_string()],
         timeout_seconds: 30,
         state: 1,
-        created_at: chrono::Utc::now().timestamp(),
-        updated_at: chrono::Utc::now().timestamp(),
+        created_at: 0,
+        updated_at: 0,
     };
     task.encode_to_vec()
 }
@@ -65,8 +65,8 @@ fn create_execution_payload(task_id: &str) -> Vec<u8> {
         stdout: "ok".to_string(),
         stderr: String::new(),
         duration_ms: Some(0.5),
-        started_at: chrono::Utc::now().timestamp(),
-        finished_at: Some(chrono::Utc::now().timestamp()),
+        started_at: 0,
+        finished_at: Some(0),
     };
     exec.encode_to_vec()
 }

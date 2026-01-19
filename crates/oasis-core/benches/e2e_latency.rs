@@ -49,8 +49,8 @@ fn create_task_payload(task_id: &str) -> Vec<u8> {
         args: vec!["hello".to_string()],
         timeout_seconds: 30,
         state: 1,
-        created_at: chrono::Utc::now().timestamp(),
-        updated_at: chrono::Utc::now().timestamp(),
+        created_at: 0,
+        updated_at: 0,
     };
     task.encode_to_vec()
 }
@@ -68,8 +68,8 @@ fn create_execution_payload(task_id: &str) -> Vec<u8> {
         stdout: "hello".to_string(),
         stderr: String::new(),
         duration_ms: Some(1.5),
-        started_at: chrono::Utc::now().timestamp(),
-        finished_at: Some(chrono::Utc::now().timestamp()),
+        started_at: 0,
+        finished_at: Some(0),
     };
     exec.encode_to_vec()
 }
@@ -131,11 +131,10 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
             }
         });
 
-        for i in 0..100u32 {
-            let task_id = format!("warmup-{}", i);
-            let payload = create_task_payload(&task_id);
+        let warmup_payload = Bytes::from(create_task_payload("warmup"));
+        for _ in 0..100u32 {
             client
-                .publish(task_subject.clone(), Bytes::from(payload))
+                .publish(task_subject.clone(), warmup_payload.clone())
                 .await?;
         }
         client.flush().await?;
@@ -165,13 +164,11 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
                 let mut result_sub = client.subscribe(result_subject.clone()).await.unwrap();
                 let mut total = Duration::ZERO;
 
-                for i in 0..iters {
-                    let task_id = format!("bench-{}", i);
-                    let payload = create_task_payload(&task_id);
-
+                let payload = Bytes::from(create_task_payload("bench"));
+                for _ in 0..iters {
                     let start = Instant::now();
                     client
-                        .publish(task_subject.clone(), Bytes::from(payload))
+                        .publish(task_subject.clone(), payload.clone())
                         .await
                         .unwrap();
 
@@ -191,13 +188,11 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
         let mut result_sub = client.subscribe(result_subject.clone()).await.unwrap();
         let mut lats = Vec::with_capacity(1000);
 
-        for i in 0..1000u32 {
-            let task_id = format!("percentile-{}", i);
-            let payload = create_task_payload(&task_id);
-
+        let payload = Bytes::from(create_task_payload("percentile"));
+        for _ in 0..1000u32 {
             let start = Instant::now();
             client
-                .publish(task_subject.clone(), Bytes::from(payload))
+                .publish(task_subject.clone(), payload.clone())
                 .await
                 .unwrap();
 
@@ -396,9 +391,11 @@ fn bench_concurrent_agents(c: &mut Criterion) {
 
                             let mut received = 0;
                             while received < cnt {
-                                if let Ok(Some(_)) =
-                                    tokio::time::timeout(Duration::from_secs(10), result_sub.next())
-                                        .await
+                                if tokio::time::timeout(Duration::from_secs(10), result_sub.next())
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
                                 {
                                     received += 1;
                                 } else {
