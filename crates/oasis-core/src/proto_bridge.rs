@@ -32,7 +32,7 @@ impl From<&TaskId> for proto::TaskId {
 impl From<TaskId> for proto::TaskId {
     fn from(task_id: TaskId) -> Self {
         Self {
-            value: task_id.to_string(),
+            value: task_id.into(),
         }
     }
 }
@@ -62,7 +62,7 @@ impl From<&AgentId> for proto::AgentId {
 impl From<AgentId> for proto::AgentId {
     fn from(agent_id: AgentId) -> Self {
         Self {
-            value: agent_id.to_string(),
+            value: agent_id.into(),
         }
     }
 }
@@ -90,7 +90,7 @@ impl From<&BatchId> for proto::BatchId {
 impl From<BatchId> for proto::BatchId {
     fn from(batch_id: BatchId) -> Self {
         Self {
-            value: batch_id.to_string(),
+            value: batch_id.into(),
         }
     }
 }
@@ -118,7 +118,7 @@ impl From<&RolloutId> for proto::RolloutId {
 impl From<RolloutId> for proto::RolloutId {
     fn from(rollout_id: RolloutId) -> Self {
         Self {
-            value: rollout_id.to_string(),
+            value: rollout_id.into(),
         }
     }
 }
@@ -146,7 +146,7 @@ impl From<&SelectorExpression> for proto::SelectorExpression {
 impl From<SelectorExpression> for proto::SelectorExpression {
     fn from(selector_expression: SelectorExpression) -> Self {
         Self {
-            expression: selector_expression.to_string(),
+            expression: selector_expression.into(),
         }
     }
 }
@@ -270,7 +270,17 @@ impl From<&Task> for proto::TaskMsg {
 
 impl From<Task> for proto::TaskMsg {
     fn from(task: Task) -> Self {
-        (&task).into()
+        Self {
+            task_id: Some(proto::TaskId::from(task.task_id)),
+            batch_id: Some(proto::BatchId::from(task.batch_id)),
+            agent_id: Some(proto::AgentId::from(task.agent_id)),
+            command: task.command,
+            args: task.args,
+            timeout_seconds: task.timeout_seconds,
+            state: proto::TaskStateEnum::from(task.state) as i32,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        }
     }
 }
 
@@ -301,7 +311,13 @@ impl From<proto::TaskMsg> for Task {
 
 impl From<Batch> for proto::BatchMsg {
     fn from(batch: Batch) -> Self {
-        (&batch).into()
+        Self {
+            batch_id: Some(proto::BatchId::from(batch.batch_id)),
+            command: batch.command,
+            args: batch.args,
+            timeout_seconds: batch.timeout_seconds,
+            created_at: batch.created_at,
+        }
     }
 }
 
@@ -352,7 +368,17 @@ impl From<&TaskExecution> for proto::TaskExecutionMsg {
 
 impl From<TaskExecution> for proto::TaskExecutionMsg {
     fn from(execution: TaskExecution) -> Self {
-        (&execution).into()
+        Self {
+            task_id: Some(proto::TaskId::from(execution.task_id)),
+            agent_id: Some(proto::AgentId::from(execution.agent_id)),
+            state: proto::TaskStateEnum::from(execution.state) as i32,
+            exit_code: execution.exit_code,
+            stdout: execution.stdout,
+            stderr: execution.stderr,
+            started_at: execution.started_at,
+            finished_at: execution.finished_at,
+            duration_ms: execution.duration_ms,
+        }
     }
 }
 
@@ -424,7 +450,14 @@ impl From<&AgentInfo> for proto::AgentInfoMsg {
 
 impl From<AgentInfo> for proto::AgentInfoMsg {
     fn from(info: AgentInfo) -> Self {
-        (&info).into()
+        Self {
+            agent_id: Some(proto::AgentId::from(info.agent_id)),
+            status: proto::AgentStatusEnum::from(info.status) as i32,
+            info: info.info,
+            last_heartbeat: info.last_heartbeat,
+            version: info.version,
+            capabilities: info.capabilities,
+        }
     }
 }
 
@@ -573,7 +606,14 @@ impl From<&FileConfig> for crate::proto::FileConfigMsg {
 
 impl From<FileConfig> for crate::proto::FileConfigMsg {
     fn from(config: FileConfig) -> Self {
-        (&config).into()
+        Self {
+            source_path: config.source_path,
+            destination_path: config.destination_path,
+            revision: config.revision,
+            owner: config.owner.unwrap_or_default(),
+            mode: config.mode.unwrap_or_default(),
+            target: config.target.map(|t| t.into()),
+        }
     }
 }
 
@@ -639,7 +679,13 @@ impl From<&FileSpec> for crate::proto::FileSpecMsg {
 
 impl From<FileSpec> for crate::proto::FileSpecMsg {
     fn from(spec: FileSpec) -> Self {
-        (&spec).into()
+        Self {
+            source_path: spec.source_path,
+            size: spec.size,
+            checksum: spec.checksum,
+            content_type: spec.content_type,
+            created_at: spec.created_at,
+        }
     }
 }
 
@@ -685,7 +731,11 @@ impl From<&FileOperationResult> for crate::proto::FileOperationResult {
 
 impl From<FileOperationResult> for crate::proto::FileOperationResult {
     fn from(result: FileOperationResult) -> Self {
-        (&result).into()
+        Self {
+            success: result.success,
+            message: result.message,
+            revision: result.revision,
+        }
     }
 }
 
@@ -741,7 +791,27 @@ impl From<&RolloutStatus> for proto::RolloutStatusMsg {
 
 impl From<RolloutStatus> for proto::RolloutStatusMsg {
     fn from(status: RolloutStatus) -> Self {
-        (&status).into()
+        let config = proto::RolloutConfigMsg::from(status.config);
+        let stages = status
+            .stages
+            .into_iter()
+            .map(proto::RolloutStageStatusMsg::from)
+            .collect();
+
+        proto::RolloutStatusMsg {
+            config: Some(config),
+            state: proto::RolloutStateEnum::from(status.state) as i32,
+            current_stage_idx: status.current_stage_idx,
+            stages,
+            all_target_agents: status
+                .all_target_agents
+                .into_iter()
+                .map(|id| proto::AgentId { value: id.into() })
+                .collect(),
+            updated_at: status.updated_at,
+            error_message: status.error_message,
+            current_action: Some(status.current_action),
+        }
     }
 }
 
@@ -898,7 +968,23 @@ impl From<&RolloutConfig> for proto::RolloutConfigMsg {
 
 impl From<RolloutConfig> for proto::RolloutConfigMsg {
     fn from(config: RolloutConfig) -> Self {
-        (&config).into()
+        let strategy = proto::RolloutStrategyMsg::from(config.strategy);
+        let task_type = proto::RolloutTaskTypeMsg::from(config.task_type);
+
+        proto::RolloutConfigMsg {
+            rollout_id: Some(proto::RolloutId {
+                value: config.rollout_id.into(),
+            }),
+            name: config.name,
+            target: Some(proto::SelectorExpression {
+                expression: config.target.into(),
+            }),
+            strategy: Some(strategy),
+            task_type: Some(task_type),
+            auto_advance: config.auto_advance,
+            advance_interval_seconds: config.advance_interval_seconds,
+            created_at: config.created_at,
+        }
     }
 }
 
@@ -927,7 +1013,20 @@ impl From<&RolloutStrategy> for proto::RolloutStrategyMsg {
 
 impl From<RolloutStrategy> for proto::RolloutStrategyMsg {
     fn from(strategy: RolloutStrategy) -> Self {
-        (&strategy).into()
+        match strategy {
+            RolloutStrategy::Percentage { stages } => proto::RolloutStrategyMsg {
+                strategy: Some(proto::rollout_strategy_msg::Strategy::Percentage(
+                    proto::PercentageStrategy {
+                        stages: stages.into_iter().map(|s| s as u32).collect(),
+                    },
+                )),
+            },
+            RolloutStrategy::Count { stages } => proto::RolloutStrategyMsg {
+                strategy: Some(proto::rollout_strategy_msg::Strategy::Count(
+                    proto::CountStrategy { stages },
+                )),
+            },
+        }
     }
 }
 
@@ -962,7 +1061,28 @@ impl From<&RolloutTaskType> for proto::RolloutTaskTypeMsg {
 
 impl From<RolloutTaskType> for proto::RolloutTaskTypeMsg {
     fn from(task_type: RolloutTaskType) -> Self {
-        (&task_type).into()
+        match task_type {
+            RolloutTaskType::Command {
+                command,
+                args,
+                timeout_seconds,
+            } => proto::RolloutTaskTypeMsg {
+                task_type: Some(proto::rollout_task_type_msg::TaskType::Command(
+                    proto::CommandTask {
+                        command,
+                        args,
+                        timeout_seconds,
+                    },
+                )),
+            },
+            RolloutTaskType::FileDeployment { config } => proto::RolloutTaskTypeMsg {
+                task_type: Some(proto::rollout_task_type_msg::TaskType::FileDeployment(
+                    proto::FileDeploymentTask {
+                        config: Some(config.into()),
+                    },
+                )),
+            },
+        }
     }
 }
 
@@ -998,7 +1118,25 @@ impl From<&RolloutStageStatus> for proto::RolloutStageStatusMsg {
 
 impl From<RolloutStageStatus> for proto::RolloutStageStatusMsg {
     fn from(stage: RolloutStageStatus) -> Self {
-        (&stage).into()
+        proto::RolloutStageStatusMsg {
+            stage_name: stage.stage_name,
+            target_agents: stage
+                .target_agents
+                .into_iter()
+                .map(|id| proto::AgentId { value: id.into() })
+                .collect(),
+            batch_id: stage.batch_id.map(|id| proto::BatchId { value: id.into() }),
+            started_count: stage.started_count,
+            completed_count: stage.completed_count,
+            failed_count: stage.failed_count,
+            started_at: stage.started_at,
+            completed_at: stage.completed_at,
+            failed_executions: stage
+                .failed_executions
+                .into_iter()
+                .map(proto::TaskExecutionMsg::from)
+                .collect(),
+        }
     }
 }
 

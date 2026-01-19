@@ -79,12 +79,13 @@ impl TaskService {
         let publish_futures: Vec<_> = tasks_and_agents
             .iter()
             .map(|(task, agent_id)| async move {
-                self.publish_task_unicast(task, agent_id).await?;
+                let task_id = task.task_id.clone();
+                self.publish_task_unicast(task.clone(), agent_id).await?;
                 info!(
                     "Task {} published as unicast to agent {}",
-                    task.task_id, agent_id
+                    task_id, agent_id
                 );
-                Ok::<TaskId, CoreError>(task.task_id.clone())
+                Ok::<TaskId, CoreError>(task_id)
             })
             .collect();
 
@@ -274,7 +275,7 @@ impl TaskService {
     }
 
     /// 单播任务发布 - 发到特定代理
-    async fn publish_task_unicast(&self, task: &Task, agent_id: &AgentId) -> Result<()> {
+    async fn publish_task_unicast(&self, task: Task, agent_id: &AgentId) -> Result<()> {
         let subject = constants::tasks_unicast_subject(agent_id);
 
         let proto_task = oasis_core::proto::TaskMsg::from(task);
