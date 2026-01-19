@@ -52,11 +52,9 @@ fn create_task_payload(task_id: &str) -> Vec<u8> {
     task.encode_to_vec()
 }
 
-fn create_execution_payload(task_id: &str) -> Vec<u8> {
+fn create_execution_payload(task_id: String) -> Vec<u8> {
     let exec = oasis_core::proto::TaskExecutionMsg {
-        task_id: Some(oasis_core::proto::TaskId {
-            value: task_id.to_string(),
-        }),
+        task_id: Some(oasis_core::proto::TaskId { value: task_id }),
         agent_id: Some(oasis_core::proto::AgentId {
             value: "throughput-agent".to_string(),
         }),
@@ -99,9 +97,10 @@ fn bench_dispatch_throughput(c: &mut Criterion) {
                 }
             });
 
+            let warmup_payload = Bytes::from(create_task_payload("warmup"));
             for _ in 0..500u32 {
                 client
-                    .publish(subject.clone(), Bytes::from(create_task_payload("warmup")))
+                    .publish(subject.clone(), warmup_payload.clone())
                     .await?;
             }
             client.flush().await?;
@@ -129,12 +128,12 @@ fn bench_dispatch_throughput(c: &mut Criterion) {
             BenchmarkId::new("dispatch_batch", batch_size),
             &batch_size,
             |b, &size| {
+                let payload = Bytes::from(create_task_payload("bench"));
                 b.iter(|| {
                     rt.block_on(async {
-                        for i in 0..size {
-                            let payload = create_task_payload(&format!("t-{}", i));
+                        for _ in 0..size {
                             client
-                                .publish(subject.clone(), Bytes::from(payload))
+                                .publish(subject.clone(), payload.clone())
                                 .await
                                 .unwrap();
                         }
@@ -180,7 +179,7 @@ fn bench_roundtrip_throughput(c: &mut Criterion) {
                         .task_id
                         .map(|t| t.value)
                         .unwrap_or_else(|| "unknown".to_string());
-                    let exec_payload = create_execution_payload(&task_id);
+                    let exec_payload = create_execution_payload(task_id);
                     let _ = agent_client
                         .publish(result_subj.clone(), Bytes::from(exec_payload))
                         .await;
@@ -188,12 +187,10 @@ fn bench_roundtrip_throughput(c: &mut Criterion) {
             }
         });
 
+        let warmup_payload = Bytes::from(create_task_payload("warmup"));
         for _ in 0..200u32 {
             client
-                .publish(
-                    task_subject.clone(),
-                    Bytes::from(create_task_payload("warmup")),
-                )
+                .publish(task_subject.clone(), warmup_payload.clone())
                 .await?;
         }
         client.flush().await?;
@@ -227,16 +224,16 @@ fn bench_roundtrip_throughput(c: &mut Criterion) {
                     rt.block_on(async {
                         let mut total = Duration::ZERO;
 
-                        for _ in 0..iters {
-                            let mut result_sub =
-                                client.subscribe(result_subject.clone()).await.unwrap();
+                        let mut result_sub =
+                            client.subscribe(result_subject.clone()).await.unwrap();
 
+                        let payload = Bytes::from(create_task_payload("rt"));
+                        for _ in 0..iters {
                             let start = Instant::now();
 
-                            for i in 0..size {
-                                let payload = create_task_payload(&format!("rt-{}", i));
+                            for _ in 0..size {
                                 client
-                                    .publish(task_subject.clone(), Bytes::from(payload))
+                                    .publish(task_subject.clone(), payload.clone())
                                     .await
                                     .unwrap();
                             }
@@ -244,14 +241,11 @@ fn bench_roundtrip_throughput(c: &mut Criterion) {
 
                             let mut received = 0;
                             while received < size {
-                                if let Ok(Some(_)) =
-                                    tokio::time::timeout(Duration::from_secs(30), result_sub.next())
-                                        .await
-                                {
-                                    received += 1;
-                                } else {
-                                    break;
-                                }
+                                tokio::time::timeout(Duration::from_secs(30), result_sub.next())
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                received += 1;
                             }
 
                             total += start.elapsed();
@@ -303,7 +297,7 @@ fn bench_sustained_throughput(c: &mut Criterion) {
                         .task_id
                         .map(|t| t.value)
                         .unwrap_or_else(|| "unknown".to_string());
-                    let exec_payload = create_execution_payload(&task_id);
+                    let exec_payload = create_execution_payload(task_id);
                     let _ = agent_client
                         .publish(result_subj.clone(), Bytes::from(exec_payload))
                         .await;
@@ -325,11 +319,11 @@ fn bench_sustained_throughput(c: &mut Criterion) {
         let start = Instant::now();
         let mut task_counter = 0u64;
 
+        let payload = Bytes::from(create_task_payload("sustained"));
         while start.elapsed() < duration {
             for _ in 0..100 {
-                let payload = create_task_payload(&format!("sustained-{}", task_counter));
                 client
-                    .publish(task_subject.clone(), Bytes::from(payload))
+                    .publish(task_subject.clone(), payload.clone())
                     .await?;
                 task_counter += 1;
                 sent_counter.fetch_add(1, Ordering::Relaxed);

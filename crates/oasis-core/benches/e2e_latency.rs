@@ -55,11 +55,9 @@ fn create_task_payload(task_id: &str) -> Vec<u8> {
     task.encode_to_vec()
 }
 
-fn create_execution_payload(task_id: &str) -> Vec<u8> {
+fn create_execution_payload(task_id: String) -> Vec<u8> {
     let exec = oasis_core::proto::TaskExecutionMsg {
-        task_id: Some(oasis_core::proto::TaskId {
-            value: task_id.to_string(),
-        }),
+        task_id: Some(oasis_core::proto::TaskId { value: task_id }),
         agent_id: Some(oasis_core::proto::AgentId {
             value: "bench-agent".to_string(),
         }),
@@ -123,7 +121,7 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
                         .task_id
                         .map(|t| t.value)
                         .unwrap_or_else(|| "unknown".to_string());
-                    let exec_payload = create_execution_payload(&task_id);
+                    let exec_payload = create_execution_payload(task_id);
                     let _ = agent_client
                         .publish(result_subj.clone(), Bytes::from(exec_payload))
                         .await;
@@ -172,7 +170,10 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
                         .await
                         .unwrap();
 
-                    let _ = tokio::time::timeout(Duration::from_secs(5), result_sub.next()).await;
+                    tokio::time::timeout(Duration::from_secs(5), result_sub.next())
+                        .await
+                        .unwrap()
+                        .unwrap();
                     total += start.elapsed();
                 }
 
@@ -196,11 +197,11 @@ fn bench_e2e_roundtrip_latency(c: &mut Criterion) {
                 .await
                 .unwrap();
 
-            if let Ok(Some(_)) =
-                tokio::time::timeout(Duration::from_secs(5), result_sub.next()).await
-            {
-                lats.push(start.elapsed());
-            }
+            tokio::time::timeout(Duration::from_secs(5), result_sub.next())
+                .await
+                .unwrap()
+                .unwrap();
+            lats.push(start.elapsed());
         }
         lats
     });
@@ -267,10 +268,10 @@ fn bench_dispatch_latency(c: &mut Criterion) {
                 }
             });
 
+            let warmup_payload = Bytes::from(create_task_payload("warmup"));
             for _ in 0..100u32 {
-                let payload = create_task_payload("warmup");
                 client
-                    .publish(subject.clone(), Bytes::from(payload))
+                    .publish(subject.clone(), warmup_payload.clone())
                     .await?;
             }
             client.flush().await?;
@@ -292,12 +293,12 @@ fn bench_dispatch_latency(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("e2e_latency");
 
+    let dispatch_payload = Bytes::from(create_task_payload("bench"));
     group.bench_function("dispatch_only", |b| {
         b.iter(|| {
             rt.block_on(async {
-                let payload = create_task_payload("bench");
                 client
-                    .publish(subject.clone(), Bytes::from(payload))
+                    .publish(subject.clone(), dispatch_payload.clone())
                     .await
                     .unwrap();
                 client.flush().await.unwrap();
@@ -342,7 +343,7 @@ fn bench_concurrent_agents(c: &mut Criterion) {
                                 .task_id
                                 .map(|t| t.value)
                                 .unwrap_or_else(|| "unknown".to_string());
-                            let exec_payload = create_execution_payload(&task_id);
+                            let exec_payload = create_execution_payload(task_id);
                             let _ = agent_client
                                 .publish(result_subj.clone(), Bytes::from(exec_payload))
                                 .await;
@@ -379,13 +380,11 @@ fn bench_concurrent_agents(c: &mut Criterion) {
                             client.subscribe(result_subject.clone()).await.unwrap();
                         let mut total = Duration::ZERO;
 
-                        for i in 0..iters {
-                            let task_id = format!("concurrent-{}", i);
-                            let payload = create_task_payload(&task_id);
-
+                        let payload = Bytes::from(create_task_payload("concurrent"));
+                        for _ in 0..iters {
                             let start = Instant::now();
                             client
-                                .publish(task_subject.clone(), Bytes::from(payload))
+                                .publish(task_subject.clone(), payload.clone())
                                 .await
                                 .unwrap();
 
