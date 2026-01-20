@@ -97,7 +97,6 @@ fn bench_fanout_aggregate_only(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &executions, |b, execs| {
             b.iter(|| {
                 let stats = aggregate_stats(black_box(execs));
-                // 模拟常见逻辑：判断批次是否已经全部完成
                 let done = stats.terminal == stats.total;
                 black_box(done);
                 black_box(stats)
@@ -115,10 +114,8 @@ fn bench_fanout_map_to_proto(c: &mut Criterion) {
         let executions = build_executions(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &executions, |b, execs| {
             b.iter(|| {
-                let out: Vec<proto::TaskExecutionMsg> = execs
-                    .iter()
-                    .map(|e| proto::TaskExecutionMsg::from(e.clone()))
-                    .collect();
+                let out: Vec<proto::TaskExecutionMsg> =
+                    execs.iter().map(proto::TaskExecutionMsg::from).collect();
                 black_box(out)
             })
         });

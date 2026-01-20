@@ -267,43 +267,6 @@ impl HeartbeatMonitor {
         }
     }
 
-    /// 获取所有状态映射的快照
-    #[allow(dead_code)]
-    pub fn get_status_snapshot(&self) -> std::collections::HashMap<AgentId, AgentHeartbeatInfo> {
-        self.status_cache
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect()
-    }
-
-    /// 获取指定 Agent 的状态
-    #[allow(dead_code)]
-    pub fn get_agent_status(&self, agent_id: &AgentId) -> Option<AgentHeartbeatInfo> {
-        self.status_cache
-            .get(agent_id)
-            .map(|entry| entry.value().clone())
-    }
-
-    /// 批量检查 Agent 在线状态
-    #[allow(dead_code)]
-    pub fn batch_check_online(
-        &self,
-        agent_ids: &[AgentId],
-    ) -> std::collections::HashMap<AgentId, bool> {
-        let mut result = std::collections::HashMap::with_capacity(agent_ids.len());
-
-        for agent_id in agent_ids {
-            let is_online = self
-                .status_cache
-                .get(agent_id)
-                .map(|entry| matches!(entry.value().status, AgentStatus::Online))
-                .unwrap_or(false);
-            result.insert(agent_id.clone(), is_online);
-        }
-
-        result
-    }
-
     /// 过滤出在线的 Agent
     pub fn filter_online_agents(&self, agent_ids: Vec<AgentId>) -> Vec<AgentId> {
         agent_ids
@@ -316,38 +279,4 @@ impl HeartbeatMonitor {
             })
             .collect()
     }
-
-    /// 获取在线 Agent 数量
-    #[allow(dead_code)]
-    pub fn get_online_count(&self) -> usize {
-        self.status_cache
-            .iter()
-            .filter(|entry| matches!(entry.value().status, AgentStatus::Online))
-            .count()
-    }
-
-    /// 获取统计信息
-    #[allow(dead_code)]
-    pub fn get_stats(&self) -> HeartbeatMonitorStats {
-        let total = self.status_cache.len();
-        let online = self.get_online_count();
-        let offline = total - online;
-
-        HeartbeatMonitorStats {
-            total_agents: total,
-            online_agents: online,
-            offline_agents: offline,
-            heartbeat_timeout: self.heartbeat_timeout,
-        }
-    }
-}
-
-/// 心跳监控器统计信息
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct HeartbeatMonitorStats {
-    pub total_agents: usize,
-    pub online_agents: usize,
-    pub offline_agents: usize,
-    pub heartbeat_timeout: u64,
 }

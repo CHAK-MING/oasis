@@ -75,22 +75,42 @@ impl TaskService {
         let tasks_and_agents: Vec<(Task, AgentId)> =
             futures_util::future::try_join_all(task_futures).await?;
 
-        // 步骤3: 并发发布所有任务
-        let publish_futures: Vec<_> = tasks_and_agents
-            .iter()
-            .map(|(task, agent_id)| async move {
-                let task_id = task.task_id.clone();
-                self.publish_task_unicast(task.clone(), agent_id).await?;
-                info!(
-                    "Task {} published as unicast to agent {}",
-                    task_id, agent_id
-                );
-                Ok::<TaskId, CoreError>(task_id)
-            })
-            .collect();
+        // 步骤3: 批量发布所有任务
+        let mut ack_futures = Vec::with_capacity(tasks_and_agents.len());
+        let mut task_ids = Vec::with_capacity(tasks_and_agents.len());
 
-        // 步骤4: 等待所有发布完成，收集 task_ids
-        let task_ids: Vec<TaskId> = futures_util::future::try_join_all(publish_futures).await?;
+        for (task, agent_id) in &tasks_and_agents {
+            let subject = constants::tasks_unicast_subject(agent_id);
+            let proto_task = oasis_core::proto::TaskMsg::from(task);
+            let payload = proto_task.encode_to_vec();
+
+            // 发布消息，获取 PublishAckFuture（此时消息已发送到 NATS）
+            let ack_future = self
+                .jetstream
+                .publish(subject, payload.into())
+                .await
+                .map_err(|e| CoreError::Nats {
+                    message: format!("Failed to publish unicast task: {}", e),
+                    severity: ErrorSeverity::Error,
+                })?;
+
+            ack_futures.push((task.task_id.clone(), ack_future));
+            task_ids.push(task.task_id.clone());
+        }
+
+        // 步骤4: 统一等待所有 ACK 确认
+        for (task_id, ack_future) in ack_futures {
+            ack_future.await.map_err(|e| CoreError::Nats {
+                message: format!("Failed to confirm task {} publish: {}", task_id, e),
+                severity: ErrorSeverity::Error,
+            })?;
+        }
+
+        debug!(
+            "Batch {} published {} tasks to NATS",
+            batch_id,
+            task_ids.len()
+        );
 
         // 步骤5: 一次性批量缓存（避免竞态条件）
 
@@ -271,30 +291,6 @@ impl TaskService {
             "Batch {} cancelled successfully, {} tasks cancelled",
             batch_id, cancelled_count
         );
-        Ok(())
-    }
-
-    /// 单播任务发布 - 发到特定代理
-    async fn publish_task_unicast(&self, task: Task, agent_id: &AgentId) -> Result<()> {
-        let subject = constants::tasks_unicast_subject(agent_id);
-
-        let proto_task = oasis_core::proto::TaskMsg::from(task);
-        let payload = proto_task.encode_to_vec();
-
-        let ack = self
-            .jetstream
-            .publish(subject, payload.into())
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to publish unicast task: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
-
-        ack.await.map_err(|e| CoreError::Nats {
-            message: format!("Failed to confirm unicast task publish: {}", e),
-            severity: ErrorSeverity::Error,
-        })?;
-
         Ok(())
     }
 
