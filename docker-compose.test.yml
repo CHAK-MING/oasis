@@ -1,0 +1,43 @@
+services:
+  nats-test:
+    image: nats:2.10-alpine
+    container_name: oasis-test-nats
+    ports:
+      - "14222:4222"
+      - "18222:8222"
+    volumes:
+      - ./data/nats:/data
+      - ./certs:/certs:ro
+    command: |
+      --store_dir=/data
+      --jetstream
+      --http_port=8222
+      --tls
+      --tlscert=/certs/nats-server.pem
+      --tlskey=/certs/nats-server-key.pem
+      --tlscacert=/certs/nats-ca.pem
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-check-certificate",
+          "-qO-",
+          "http://localhost:8222/healthz",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    driver: bridge
+
+# 使用说明:
+# 1. 确保已运行 `oasis-cli system init` 生成证书
+# 2. 启动测试环境: docker compose -f docker-compose.test.yml up -d
+# 3. 等待 NATS 启动: sleep 3
+# 4. 运行集成测试: TEST_NATS_URL=tls://localhost:14222 cargo test --package oasis-core --test cert_bootstrap_integration -- --ignored --nocapture --test-threads=1
+# 5. 清理测试环境: docker compose -f docker-compose.test.yml down -v

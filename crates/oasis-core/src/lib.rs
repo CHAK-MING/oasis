@@ -1,5 +1,6 @@
 pub mod agent_types;
 pub mod core_types;
+pub mod csr_types;
 pub mod file_types;
 pub mod rollout_types;
 pub mod task_types;

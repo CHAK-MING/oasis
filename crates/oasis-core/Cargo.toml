@@ -26,7 +26,7 @@ toml = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
 governor = { workspace = true }
-backoff = { workspace = true }
+backon = { workspace = true }
 sha2 = { workspace = true }
 dashmap = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
@@ -34,6 +34,8 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+rcgen = { workspace = true }
+x509-parser = { workspace = true }
 
 libc = "0.2"
 thiserror = "2.0"
@@ -45,6 +47,7 @@ derive_more = { version = "2.1", features = [
 ] }
 bytes = "1.11"
 rand = "0.9"
+getrandom = "0.2"
 signal-hook = "0.4"
 signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 
@@ -59,6 +62,12 @@ pest = "2.8"
 pest_derive = "2.8"
 serde_json = "1.0"
 rayon = "1.10"
+tempfile = "3.14"
+anyhow = { workspace = true }
+oasis-server = { path = "../oasis-server" }
+oasis-agent = { path = "../oasis-agent" }
+async-nats = { workspace = true }
+futures = { workspace = true }
 
 [[bench]]
 name = "proto"

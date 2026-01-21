@@ -3,6 +3,7 @@
 use crate::error::{CoreError, ErrorSeverity, Result};
 use async_nats::ConnectOptions;
 use async_nats::{Client, jetstream};
+use backon::Retryable;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -30,19 +31,39 @@ impl NatsClientFactory {
                 ca = %ca_path.display(),
                 cert = %cert_path.display(),
                 key = %key_path.display(),
-                "Connecting to NATS (TLS mode if certs present)"
+                require_tls = %tls_config.require_tls,
+                "Connecting to NATS (TLS mode)"
             );
 
             if ca_path.exists() {
                 options = options.add_root_certificates(ca_path);
+            } else if tls_config.require_tls {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "NATS CA certificate not found at '{}'. Set tls.require_tls=false to allow insecure connections.",
+                        ca_path.display()
+                    ),
+                    severity: ErrorSeverity::Critical,
+                });
             } else {
-                warn!("NATS CA not found; proceeding without custom CA");
+                warn!("NATS CA not found; proceeding without custom CA (require_tls=false)");
             }
 
             if cert_path.exists() && key_path.exists() {
                 options = options.add_client_certificate(cert_path, key_path);
+            } else if tls_config.require_tls {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "NATS client certificate not found at '{}' or key at '{}'. Set tls.require_tls=false to allow connections without mTLS.",
+                        cert_path.display(),
+                        key_path.display()
+                    ),
+                    severity: ErrorSeverity::Critical,
+                });
             } else {
-                info!("NATS client certificate not found; proceeding without mTLS");
+                warn!(
+                    "NATS client certificate not found; proceeding without mTLS (require_tls=false)"
+                );
             }
 
             options = options.require_tls(true);
@@ -107,18 +128,16 @@ impl NatsClientFactory {
         info!("Connecting to NATS with JetStream url={}", nats_config.url);
 
         // 使用退避策略进行连接重试
-        let backoff = crate::backoff::network_publish_backoff();
-        let client = crate::backoff::execute_with_backoff(
-            || async {
-                Self::connect_with_config(nats_config, tls_config)
-                    .await
-                    .map_err(|e| CoreError::Nats {
-                        message: format!("NATS connection attempt failed: {}", e),
-                        severity: ErrorSeverity::Error,
-                    })
-            },
-            backoff,
-        )
+        let backoff = crate::backoff::network_publish_backoff().build();
+        let client = (|| async {
+            Self::connect_with_config(nats_config, tls_config)
+                .await
+                .map_err(|e| CoreError::Nats {
+                    message: format!("NATS connection attempt failed: {}", e),
+                    severity: ErrorSeverity::Error,
+                })
+        })
+        .retry(&backoff)
         .await
         .map_err(|e| CoreError::Nats {
             message: format!("Failed to connect to NATS with retry: {}", e),

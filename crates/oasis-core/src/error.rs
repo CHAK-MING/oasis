@@ -445,3 +445,299 @@ impl From<anyhow::Error> for CoreError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_severity_default() {
+        let severity = ErrorSeverity::default();
+        assert_eq!(severity, ErrorSeverity::Error);
+    }
+
+    #[test]
+    fn test_core_error_is_retriable_network() {
+        let err = CoreError::Network {
+            message: "timeout".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_is_retriable_connection() {
+        let err = CoreError::Connection {
+            endpoint: "localhost:5000".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_is_retriable_nats() {
+        let err = CoreError::Nats {
+            message: "connection lost".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_is_retriable_service_unavailable() {
+        let err = CoreError::ServiceUnavailable {
+            service: "grpc".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(err.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_is_retriable_task_execution() {
+        let err = CoreError::TaskExecutionFailed {
+            task_id: TaskId::generate(),
+            reason: "failed".to_string(),
+            retry_count: 1,
+            severity: ErrorSeverity::Error,
+        };
+        assert!(err.is_retriable());
+
+        let err_max_retries = CoreError::TaskExecutionFailed {
+            task_id: TaskId::generate(),
+            reason: "failed".to_string(),
+            retry_count: 3,
+            severity: ErrorSeverity::Error,
+        };
+        assert!(!err_max_retries.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_is_not_retriable() {
+        let err = CoreError::InvalidTask {
+            reason: "bad command".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(!err.is_retriable());
+
+        let err = CoreError::Validation {
+            message: "invalid input".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        assert!(!err.is_retriable());
+    }
+
+    #[test]
+    fn test_core_error_severity() {
+        let err = CoreError::Internal {
+            message: "error".to_string(),
+            severity: ErrorSeverity::Critical,
+        };
+        assert_eq!(err.severity(), ErrorSeverity::Critical);
+
+        let err = CoreError::Network {
+            message: "error".to_string(),
+            severity: ErrorSeverity::Warning,
+        };
+        assert_eq!(err.severity(), ErrorSeverity::Warning);
+    }
+
+    #[test]
+    fn test_core_error_agent_error() {
+        let err = CoreError::agent_error("agent-1", "test error", ErrorSeverity::Error);
+        match err {
+            CoreError::Agent {
+                agent_id,
+                message,
+                severity,
+            } => {
+                assert_eq!(agent_id.as_str(), "agent-1");
+                assert_eq!(message, "test error");
+                assert_eq!(severity, ErrorSeverity::Error);
+            }
+            _ => panic!("Expected Agent error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_agent_not_found() {
+        let err = CoreError::agent_not_found("agent-1");
+        match err {
+            CoreError::Agent { message, .. } => {
+                assert_eq!(message, "Agent not found");
+            }
+            _ => panic!("Expected Agent error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_agent_offline() {
+        let err = CoreError::agent_offline("agent-1");
+        match err {
+            CoreError::Agent {
+                message, severity, ..
+            } => {
+                assert_eq!(message, "Agent offline");
+                assert_eq!(severity, ErrorSeverity::Warning);
+            }
+            _ => panic!("Expected Agent error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_invalid_task() {
+        let err = CoreError::invalid_task("command is empty");
+        match err {
+            CoreError::InvalidTask { reason, .. } => {
+                assert_eq!(reason, "command is empty");
+            }
+            _ => panic!("Expected InvalidTask error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_internal() {
+        let err = CoreError::internal("unexpected state");
+        match err {
+            CoreError::Internal { message, severity } => {
+                assert_eq!(message, "unexpected state");
+                assert_eq!(severity, ErrorSeverity::Critical);
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_config_error() {
+        let err = CoreError::config_error("missing field");
+        match err {
+            CoreError::Config { message, severity } => {
+                assert_eq!(message, "missing field");
+                assert_eq!(severity, ErrorSeverity::Error);
+            }
+            _ => panic!("Expected Config error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_file_error() {
+        let err = CoreError::file_error("/etc/config", "permission denied");
+        match err {
+            CoreError::File { path, message, .. } => {
+                assert_eq!(path, "/etc/config");
+                assert_eq!(message, "permission denied");
+            }
+            _ => panic!("Expected File error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_connection_error() {
+        let err = CoreError::connection_error("localhost:5000");
+        match err {
+            CoreError::Connection { endpoint, .. } => {
+                assert_eq!(endpoint, "localhost:5000");
+            }
+            _ => panic!("Expected Connection error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_batch_not_found() {
+        let err = CoreError::batch_not_found("batch-123");
+        match err {
+            CoreError::Batch { message, .. } => {
+                assert_eq!(message, "Batch not found");
+            }
+            _ => panic!("Expected Batch error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_from_anyhow() {
+        let anyhow_err = anyhow::anyhow!("test error");
+        let task_id = TaskId::generate();
+        let err = CoreError::from_anyhow(anyhow_err, Some(task_id.clone()));
+
+        match err {
+            CoreError::TaskExecutionFailed {
+                reason,
+                retry_count,
+                ..
+            } => {
+                assert!(reason.contains("test error"));
+                assert_eq!(retry_count, 0);
+            }
+            _ => panic!("Expected TaskExecutionFailed error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_from_anyhow_no_task() {
+        let anyhow_err = anyhow::anyhow!("test error");
+        let err = CoreError::from_anyhow(anyhow_err, None);
+
+        match err {
+            CoreError::Internal { severity, .. } => {
+                assert_eq!(severity, ErrorSeverity::Critical);
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_from_io_not_found() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: CoreError = io_err.into();
+
+        match err {
+            CoreError::File { severity, .. } => {
+                assert_eq!(severity, ErrorSeverity::Warning);
+            }
+            _ => panic!("Expected File error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_from_io_permission_denied() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err: CoreError = io_err.into();
+
+        match err {
+            CoreError::File { severity, .. } => {
+                assert_eq!(severity, ErrorSeverity::Error);
+            }
+            _ => panic!("Expected File error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_from_io_with_path() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let err = CoreError::from_io_with_path(io_err, "/etc/config");
+
+        match err {
+            CoreError::File { path, .. } => {
+                assert_eq!(path, "/etc/config");
+            }
+            _ => panic!("Expected File error"),
+        }
+    }
+
+    #[test]
+    fn test_core_error_display() {
+        let err = CoreError::InvalidTask {
+            reason: "empty command".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Invalid task"));
+        assert!(display.contains("empty command"));
+    }
+
+    #[test]
+    fn test_error_severity_variants() {
+        assert_ne!(ErrorSeverity::Warning, ErrorSeverity::Error);
+        assert_ne!(ErrorSeverity::Error, ErrorSeverity::Critical);
+        assert_ne!(ErrorSeverity::Warning, ErrorSeverity::Critical);
+    }
+}

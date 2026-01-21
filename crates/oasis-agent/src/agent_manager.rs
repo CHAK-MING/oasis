@@ -1,5 +1,5 @@
 use crate::{
-    file_manager::FileManager, heartbeat_service::HeartbeatService, nats_client::NatsClient,
+    file_manager::FileManager, nats_client::NatsClient,
     task_manager::TaskManager,
 };
 use if_addrs::get_if_addrs;
@@ -7,11 +7,42 @@ use oasis_core::{
     agent_types::{AgentInfo, AgentStatus},
     core_types::AgentId,
     error::Result,
+    constants::{JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, kv_key_facts, kv_key_heartbeat},
 };
 use std::{collections::HashMap, net::UdpSocket};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubServiceStatus {
+    Running,
+    Failed,
+}
+
+struct SubServiceHealth {
+    task_manager: SubServiceStatus,
+    file_manager: SubServiceStatus,
+}
+
+impl SubServiceHealth {
+    fn new() -> Self {
+        Self {
+            task_manager: SubServiceStatus::Running,
+            file_manager: SubServiceStatus::Running,
+        }
+    }
+
+    fn overall_status(&self) -> AgentStatus {
+        if self.task_manager == SubServiceStatus::Failed
+            || self.file_manager == SubServiceStatus::Failed
+        {
+            AgentStatus::Degraded
+        } else {
+            AgentStatus::Online
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentManager {
@@ -37,18 +68,8 @@ impl AgentManager {
     }
 
     pub async fn run(&self) -> Result<()> {
-        // 确保 NATS 资源
         self.nats_client.ensure_resources().await?;
-
-        // 发布初始 Agent 信息
         self.publish_agent_info(AgentStatus::Online).await?;
-
-        // 创建各个服务
-        let heartbeat_service = HeartbeatService::new(
-            self.agent_id.clone(),
-            self.nats_client.clone(),
-            self.shutdown_token.clone(),
-        );
 
         let task_manager = TaskManager::new(
             self.agent_id.clone(),
@@ -62,54 +83,109 @@ impl AgentManager {
             self.shutdown_token.clone(),
         );
 
-        // 启动所有服务
-        let heartbeat_handle = tokio::spawn({
-            let service = heartbeat_service.clone();
-            async move {
-                if let Err(e) = service.run().await {
-                    error!("Heartbeat service failed: {}", e);
-                }
-            }
-        });
-
-        let task_handle = tokio::spawn({
+        let mut task_handle = tokio::spawn({
             let manager = task_manager.clone();
-            async move {
-                if let Err(e) = manager.run().await {
-                    error!("Task manager failed: {}", e);
-                }
-            }
+            async move { manager.run().await }
         });
 
-        let file_handle = tokio::spawn({
+        let mut file_handle = tokio::spawn({
             let manager = file_manager.clone();
-            async move {
-                if let Err(e) = manager.run().await {
-                    error!("File manager failed: {}", e);
-                }
-            }
+            async move { manager.run().await }
         });
 
         info!("All services started successfully");
 
-        // 等待关闭信号
-        self.shutdown_token.cancelled().await;
+        let mut health = SubServiceHealth::new();
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut task_done = false;
+        let mut file_done = false;
 
-        info!("Shutdown requested, stopping services...");
+        loop {
+            tokio::select! {
+                _ = heartbeat_interval.tick() => {
+                    let current_status = health.overall_status();
+                    if let Err(e) = self.send_heartbeat_with_status(current_status).await {
+                        error!("Failed to send heartbeat: {}", e);
+                    }
+                }
+                
+                result = &mut task_handle, if !task_done => {
+                    task_done = true;
+                    match result {
+                        Ok(Err(e)) => {
+                            error!("Task manager failed: {}", e);
+                            health.task_manager = SubServiceStatus::Failed;
+                            if let Err(pub_err) = self.publish_agent_info(AgentStatus::Degraded).await {
+                                error!("Failed to publish degraded status: {}", pub_err);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Task manager panicked: {}", e);
+                            health.task_manager = SubServiceStatus::Failed;
+                            if let Err(pub_err) = self.publish_agent_info(AgentStatus::Degraded).await {
+                                error!("Failed to publish degraded status: {}", pub_err);
+                            }
+                        }
+                        Ok(Ok(())) => {
+                            info!("Task manager exited normally");
+                        }
+                    }
+                }
+                
+                result = &mut file_handle, if !file_done => {
+                    file_done = true;
+                    match result {
+                        Ok(Err(e)) => {
+                            error!("File manager failed: {}", e);
+                            health.file_manager = SubServiceStatus::Failed;
+                            if let Err(pub_err) = self.publish_agent_info(AgentStatus::Degraded).await {
+                                error!("Failed to publish degraded status: {}", pub_err);
+                            }
+                        }
+                        Err(e) => {
+                            error!("File manager panicked: {}", e);
+                            health.file_manager = SubServiceStatus::Failed;
+                            if let Err(pub_err) = self.publish_agent_info(AgentStatus::Degraded).await {
+                                error!("Failed to publish degraded status: {}", pub_err);
+                            }
+                        }
+                        Ok(Ok(())) => {
+                            info!("File manager exited normally");
+                        }
+                    }
+                }
+                
+                _ = self.shutdown_token.cancelled() => {
+                    info!("Shutdown requested, stopping services...");
+                    break;
+                }
+            }
+        }
 
-        // 发布离线状态
         if let Err(e) = self.publish_agent_info(AgentStatus::Offline).await {
             error!("Failed to publish offline status: {}", e);
         }
 
-        // 等待所有服务完成
-        let _ = tokio::join!(heartbeat_handle, task_handle, file_handle);
+        Ok(())
+    }
+
+    async fn send_heartbeat_with_status(&self, status: AgentStatus) -> Result<()> {
+        let kv = self
+            .nats_client
+            .jetstream
+            .get_key_value(JS_KV_AGENT_HEARTBEAT)
+            .await?;
+        let key = kv_key_heartbeat(self.agent_id.as_str());
+        let timestamp = chrono::Utc::now().timestamp();
+        
+        let heartbeat_data = format!("{}|{:?}", timestamp, status);
+        kv.put(&key, heartbeat_data.into()).await?;
+        debug!("Sent heartbeat for agent: {} with status: {:?}", self.agent_id, status);
 
         Ok(())
     }
 
     async fn publish_agent_info(&self, status: AgentStatus) -> Result<()> {
-        use oasis_core::constants::{JS_KV_AGENT_INFOS, kv_key_facts};
         use prost::Message;
 
         let info: HashMap<String, String> = if status == AgentStatus::Online {
@@ -119,7 +195,6 @@ impl AgentManager {
                 .and_then(|s| s.into_string().ok())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // 获取主要 IP 地址：优先选非回环的 IPv4
             let primary_ip = get_if_addrs()
                 .ok()
                 .and_then(|ifs| {
@@ -132,7 +207,6 @@ impl AgentManager {
                         .next()
                 })
                 .unwrap_or_else(|| {
-                    // 回退到本地绑定法
                     UdpSocket::bind("0.0.0.0:0")
                         .ok()
                         .and_then(|s| s.local_addr().ok())
@@ -140,8 +214,6 @@ impl AgentManager {
                         .unwrap_or_else(|| "127.0.0.1".to_string())
                 });
 
-            // 只刷新需要的信息：CPU 数量和内存总量
-            // 比 System::new_all() + refresh_all() 减少 50%+ 系统调用
             let system = System::new_with_specifics(
                 RefreshKind::nothing()
                     .with_cpu(CpuRefreshKind::nothing())

@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use console::style;
-use oasis_core::backoff::{execute_with_backoff_selective, network_connect_backoff};
+use oasis_core::backoff::network_connect_backoff;
+use backon::Retryable;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use std::io;
 use std::time::Duration;
@@ -271,7 +272,7 @@ where
     let classifier = std::sync::Arc::new(|e: &Status| is_transient_status(e));
 
     // 使用重试机制处理瞬态错误
-    execute_with_backoff_selective(op, network_connect_backoff(), classifier).await
+    (op).retry(&network_connect_backoff().build()).when(|e| classifier(e)).await
 }
 
 #[macro_export]

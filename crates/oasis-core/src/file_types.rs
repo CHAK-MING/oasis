@@ -215,3 +215,268 @@ impl FileOperationResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_config_validate_empty_destination() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_validate_path_traversal() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/../passwd".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_validate_missing_target() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_validate_invalid_mode() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: Some("644".to_string()), // missing leading 0
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_validate_invalid_mode_non_octal() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: Some("0999".to_string()), // invalid octal
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_validate_valid_mode() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: Some("0644".to_string()),
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_file_config_validate_invalid_owner() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: Some(":group".to_string()), // empty user
+            mode: None,
+            target: Some(SelectorExpression::from("all".to_string())),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_parsed_mode() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: Some("0755".to_string()),
+            target: None,
+        };
+        assert_eq!(config.parsed_mode(), 0o755);
+    }
+
+    #[test]
+    fn test_file_config_parsed_mode_default() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: None,
+        };
+        assert_eq!(config.parsed_mode(), 0o644);
+    }
+
+    #[test]
+    fn test_file_config_parsed_owner() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: Some("root:wheel".to_string()),
+            mode: None,
+            target: None,
+        };
+        let (user, group) = config.parsed_owner();
+        assert_eq!(user, Some("root".to_string()));
+        assert_eq!(group, Some("wheel".to_string()));
+    }
+
+    #[test]
+    fn test_file_config_parsed_owner_no_group() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: Some("root".to_string()),
+            mode: None,
+            target: None,
+        };
+        let (user, group) = config.parsed_owner();
+        assert_eq!(user, Some("root".to_string()));
+        assert_eq!(group, None);
+    }
+
+    #[test]
+    fn test_file_version_new() {
+        let version = FileVersion::new(
+            "config.yaml".to_string(),
+            3,
+            1024,
+            "sha256:abc123".to_string(),
+            1234567890,
+            true,
+        );
+        assert_eq!(version.name, "config.yaml");
+        assert_eq!(version.revision, 3);
+        assert_eq!(version.size, 1024);
+        assert!(version.is_current);
+    }
+
+    #[test]
+    fn test_file_history_new() {
+        let versions = vec![
+            FileVersion::new(
+                "app.conf".to_string(),
+                1,
+                512,
+                "v1".to_string(),
+                1000,
+                false,
+            ),
+            FileVersion::new("app.conf".to_string(), 2, 600, "v2".to_string(), 2000, true),
+        ];
+        let history = FileHistory::new("app.conf".to_string(), versions);
+
+        assert_eq!(history.name, "app.conf");
+        assert_eq!(history.current_version, 2);
+        assert_eq!(history.versions.len(), 2);
+    }
+
+    #[test]
+    fn test_file_history_current_version() {
+        let versions = vec![
+            FileVersion::new(
+                "app.conf".to_string(),
+                1,
+                512,
+                "v1".to_string(),
+                1000,
+                false,
+            ),
+            FileVersion::new("app.conf".to_string(), 2, 600, "v2".to_string(), 2000, true),
+        ];
+        let history = FileHistory::new("app.conf".to_string(), versions);
+
+        let current = history.current_version();
+        assert!(current.is_some());
+        assert_eq!(current.unwrap().revision, 2);
+    }
+
+    #[test]
+    fn test_file_history_sort_versions() {
+        let versions = vec![
+            FileVersion::new("app.conf".to_string(), 3, 700, "v3".to_string(), 3000, true),
+            FileVersion::new(
+                "app.conf".to_string(),
+                1,
+                512,
+                "v1".to_string(),
+                1000,
+                false,
+            ),
+            FileVersion::new(
+                "app.conf".to_string(),
+                2,
+                600,
+                "v2".to_string(),
+                2000,
+                false,
+            ),
+        ];
+        let mut history = FileHistory::new("app.conf".to_string(), versions);
+        history.sort_versions();
+
+        assert_eq!(history.versions[0].revision, 1);
+        assert_eq!(history.versions[1].revision, 2);
+        assert_eq!(history.versions[2].revision, 3);
+    }
+
+    #[test]
+    fn test_file_operation_result_success() {
+        let result = FileOperationResult::success("File deployed".to_string(), 5);
+        assert!(result.success);
+        assert_eq!(result.message, "File deployed");
+        assert_eq!(result.revision, 5);
+    }
+
+    #[test]
+    fn test_file_operation_result_failure() {
+        let result = FileOperationResult::failure("Failed to deploy".to_string(), 0);
+        assert!(!result.success);
+        assert_eq!(result.message, "Failed to deploy");
+    }
+
+    #[test]
+    fn test_file_spec_creation() {
+        let spec = FileSpec {
+            source_path: "config.yaml".to_string(),
+            size: 2048,
+            checksum: "sha256:xyz789".to_string(),
+            content_type: "application/yaml".to_string(),
+            created_at: 1234567890,
+        };
+        assert_eq!(spec.size, 2048);
+        assert!(!spec.checksum.is_empty());
+    }
+}

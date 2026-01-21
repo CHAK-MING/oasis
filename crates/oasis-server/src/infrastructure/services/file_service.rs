@@ -7,8 +7,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+use backon::Retryable;
 use futures::StreamExt;
-use oasis_core::backoff::{execute_with_backoff, fast_backoff, network_publish_backoff};
+use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{FILES_SUBJECT_PREFIX, file_types::*};
 
@@ -81,18 +82,16 @@ impl FileService {
         // 获取对象存储
         let store = self.get_object_store().await?;
 
-        let put_res = execute_with_backoff(
-            || async {
-                store
-                    .put(object_key.as_str(), &mut data.as_slice())
-                    .await
-                    .map_err(|e| CoreError::Internal {
-                        message: format!("Failed to upload file: {}", e),
-                        severity: ErrorSeverity::Error,
-                    })
-            },
-            fast_backoff(),
-        )
+        let put_res = (|| async {
+            store
+                .put(object_key.as_str(), &mut data.as_slice())
+                .await
+                .map_err(|e| CoreError::Internal {
+                    message: format!("Failed to upload file: {}", e),
+                    severity: ErrorSeverity::Error,
+                })
+        })
+        .retry(&fast_backoff().build())
         .await;
 
         match put_res {
@@ -214,23 +213,21 @@ impl FileService {
         headers.insert("Nats-Msg-Id", dedupe_key);
 
         // 发布并等待 ACK
-        execute_with_backoff(
-            || async {
-                let ack = self
-                    .jetstream
-                    .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
-                    .await
-                    .map_err(|e| CoreError::Internal {
-                        message: format!("Failed to publish file task: {}", e),
-                        severity: ErrorSeverity::Error,
-                    })?;
-                ack.await.map_err(|e| CoreError::Internal {
-                    message: format!("Failed to confirm file task publish: {}", e),
+        (|| async {
+            let ack = self
+                .jetstream
+                .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
+                .await
+                .map_err(|e| CoreError::Internal {
+                    message: format!("Failed to publish file task: {}", e),
                     severity: ErrorSeverity::Error,
-                })
-            },
-            network_publish_backoff(),
-        )
+                })?;
+            ack.await.map_err(|e| CoreError::Internal {
+                message: format!("Failed to confirm file task publish: {}", e),
+                severity: ErrorSeverity::Error,
+            })
+        })
+        .retry(&network_publish_backoff().build())
         .await?;
 
         debug!("Published file apply task to subject: {}", subject);

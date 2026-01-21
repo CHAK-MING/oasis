@@ -408,6 +408,7 @@ impl From<AgentStatus> for proto::AgentStatusEnum {
     fn from(status: AgentStatus) -> Self {
         match status {
             AgentStatus::Online => proto::AgentStatusEnum::AgentOnline,
+            AgentStatus::Degraded => proto::AgentStatusEnum::AgentDegraded,
             AgentStatus::Offline => proto::AgentStatusEnum::AgentOffline,
             AgentStatus::Removed => proto::AgentStatusEnum::AgentRemoved,
             AgentStatus::Unknown => proto::AgentStatusEnum::AgentUnknown,
@@ -420,6 +421,7 @@ impl From<proto::AgentStatusEnum> for AgentStatus {
         match proto {
             proto::AgentStatusEnum::AgentOffline => AgentStatus::Offline,
             proto::AgentStatusEnum::AgentOnline => AgentStatus::Online,
+            proto::AgentStatusEnum::AgentDegraded => AgentStatus::Degraded,
             proto::AgentStatusEnum::AgentRemoved => AgentStatus::Removed,
             proto::AgentStatusEnum::AgentUnknown => AgentStatus::Unknown,
         }
@@ -1224,5 +1226,390 @@ impl From<proto::FileHistoryMsg> for FileHistory {
             versions: msg.versions.into_iter().map(|v| v.into()).collect(),
             current_version: msg.current_version,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== ID 转换测试 =====
+
+    #[test]
+    fn test_task_id_conversion() {
+        let task_id = TaskId::generate();
+        let proto_id: proto::TaskId = (&task_id).into();
+        let back: TaskId = proto_id.into();
+        assert_eq!(task_id.to_string(), back.to_string());
+    }
+
+    #[test]
+    fn test_agent_id_conversion() {
+        let agent_id = AgentId::new("test-agent-123");
+        let proto_id: proto::AgentId = (&agent_id).into();
+        let back: AgentId = proto_id.into();
+        assert_eq!(agent_id.as_str(), back.as_str());
+    }
+
+    #[test]
+    fn test_batch_id_conversion() {
+        let batch_id = BatchId::generate();
+        let proto_id: proto::BatchId = (&batch_id).into();
+        let back: BatchId = proto_id.into();
+        assert_eq!(batch_id.to_string(), back.to_string());
+    }
+
+    #[test]
+    fn test_rollout_id_conversion() {
+        let rollout_id = RolloutId::generate();
+        let proto_id: proto::RolloutId = (&rollout_id).into();
+        let back: RolloutId = proto_id.into();
+        assert_eq!(rollout_id.to_string(), back.to_string());
+    }
+
+    #[test]
+    fn test_selector_expression_conversion() {
+        let expr = SelectorExpression::from("labels[\"env\"] == \"prod\"".to_string());
+        let proto_expr: proto::SelectorExpression = (&expr).into();
+        let back: SelectorExpression = proto_expr.into();
+        assert_eq!(expr.to_string(), back.to_string());
+    }
+
+    // ===== TaskState 转换测试 =====
+
+    #[test]
+    fn test_task_state_conversion_all_variants() {
+        let states = vec![
+            TaskState::Created,
+            TaskState::Pending,
+            TaskState::Running,
+            TaskState::Success,
+            TaskState::Failed,
+            TaskState::Timeout,
+            TaskState::Cancelled,
+        ];
+
+        for state in states {
+            let proto_state: proto::TaskStateEnum = state.into();
+            let back: TaskState = proto_state.into();
+            assert_eq!(state, back);
+        }
+    }
+
+    #[test]
+    fn test_task_state_from_invalid_i32() {
+        let state: TaskState = 999.into();
+        assert_eq!(state, TaskState::Created); // 默认值
+    }
+
+    // ===== AgentStatus 转换测试 =====
+
+    #[test]
+    fn test_agent_status_conversion_all_variants() {
+        let statuses = vec![
+            AgentStatus::Online,
+            AgentStatus::Degraded,
+            AgentStatus::Offline,
+            AgentStatus::Removed,
+            AgentStatus::Unknown,
+        ];
+
+        for status in statuses {
+            let proto_status: proto::AgentStatusEnum = status.into();
+            let back: AgentStatus = proto_status.into();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn test_agent_status_from_invalid_i32() {
+        let status: AgentStatus = 999.into();
+        assert_eq!(status, AgentStatus::Offline); // 默认值
+    }
+
+    // ===== RolloutState 转换测试 =====
+
+    #[test]
+    fn test_rollout_state_conversion_all_variants() {
+        let states = vec![
+            RolloutState::Created,
+            RolloutState::Running,
+            RolloutState::Completed,
+            RolloutState::Failed,
+            RolloutState::RollingBack,
+            RolloutState::RollbackFailed,
+            RolloutState::RolledBack,
+        ];
+
+        for state in states {
+            let proto_state: proto::RolloutStateEnum = state.into();
+            let back: RolloutState = proto_state.into();
+            assert_eq!(state, back);
+        }
+    }
+
+    #[test]
+    fn test_rollout_state_from_invalid_i32() {
+        let state: RolloutState = 999.into();
+        assert_eq!(state, RolloutState::Created); // 默认值
+    }
+
+    // ===== BatchRequest 转换测试 =====
+
+    #[test]
+    fn test_batch_request_conversion() {
+        let request = BatchRequest {
+            command: "echo".to_string(),
+            args: vec!["hello".to_string()],
+            selector: SelectorExpression::from("all".to_string()),
+            timeout_seconds: 60,
+        };
+
+        let proto_msg: proto::BatchRequestMsg = (&request).into();
+        let back: BatchRequest = proto_msg.into();
+
+        assert_eq!(request.command, back.command);
+        assert_eq!(request.args, back.args);
+        assert_eq!(request.timeout_seconds, back.timeout_seconds);
+    }
+
+    #[test]
+    fn test_batch_request_msg_validate_empty_command() {
+        let msg = proto::BatchRequestMsg {
+            command: String::new(),
+            args: vec![],
+            target: Some(proto::SelectorExpression {
+                expression: "all".to_string(),
+            }),
+            timeout_seconds: 60,
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn test_batch_request_msg_validate_zero_timeout() {
+        let msg = proto::BatchRequestMsg {
+            command: "echo".to_string(),
+            args: vec![],
+            target: Some(proto::SelectorExpression {
+                expression: "all".to_string(),
+            }),
+            timeout_seconds: 0,
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn test_batch_request_msg_validate_missing_target() {
+        let msg = proto::BatchRequestMsg {
+            command: "echo".to_string(),
+            args: vec![],
+            target: None,
+            timeout_seconds: 60,
+        };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn test_batch_request_msg_validate_success() {
+        let msg = proto::BatchRequestMsg {
+            command: "echo".to_string(),
+            args: vec!["hello".to_string()],
+            target: Some(proto::SelectorExpression {
+                expression: "all".to_string(),
+            }),
+            timeout_seconds: 60,
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    // ===== Task 转换测试 =====
+
+    #[test]
+    fn test_task_conversion() {
+        let task = Task {
+            task_id: TaskId::generate(),
+            batch_id: BatchId::generate(),
+            agent_id: AgentId::new("agent-1"),
+            command: "uptime".to_string(),
+            args: vec![],
+            timeout_seconds: 30,
+            state: TaskState::Running,
+            created_at: 1000,
+            updated_at: 1001,
+        };
+
+        let proto_msg: proto::TaskMsg = (&task).into();
+        let back: Task = proto_msg.into();
+
+        assert_eq!(task.command, back.command);
+        assert_eq!(task.state, back.state);
+        assert_eq!(task.timeout_seconds, back.timeout_seconds);
+    }
+
+    // ===== ID Validation 测试 =====
+
+    #[test]
+    fn test_task_id_validate_empty() {
+        let id = proto::TaskId {
+            value: String::new(),
+        };
+        assert!(id.validate().is_err());
+    }
+
+    #[test]
+    fn test_task_id_validate_success() {
+        let id = proto::TaskId {
+            value: "task-123".to_string(),
+        };
+        assert!(id.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_id_validate_empty() {
+        let id = proto::AgentId {
+            value: String::new(),
+        };
+        assert!(id.validate().is_err());
+    }
+
+    #[test]
+    fn test_agent_id_validate_success() {
+        let id = proto::AgentId {
+            value: "agent-123".to_string(),
+        };
+        assert!(id.validate().is_ok());
+    }
+
+    #[test]
+    fn test_batch_id_validate_empty() {
+        let id = proto::BatchId {
+            value: String::new(),
+        };
+        assert!(id.validate().is_err());
+    }
+
+    #[test]
+    fn test_rollout_id_validate_empty() {
+        let id = proto::RolloutId {
+            value: String::new(),
+        };
+        assert!(id.validate().is_err());
+    }
+
+    // ===== AgentInfo 转换测试 =====
+
+    #[test]
+    fn test_agent_info_conversion() {
+        let info = AgentInfo {
+            agent_id: AgentId::new("test-agent"),
+            status: AgentStatus::Online,
+            info: std::collections::HashMap::from([(
+                "hostname".to_string(),
+                "server1".to_string(),
+            )]),
+            last_heartbeat: 1234567890,
+            version: "1.0.0".to_string(),
+            capabilities: vec!["exec".to_string()],
+        };
+
+        let proto_msg: proto::AgentInfoMsg = (&info).into();
+        let back: AgentInfo = proto_msg.into();
+
+        assert_eq!(info.agent_id.as_str(), back.agent_id.as_str());
+        assert_eq!(info.status, back.status);
+        assert_eq!(info.version, back.version);
+    }
+
+    // ===== FileVersion/FileHistory 转换测试 =====
+
+    #[test]
+    fn test_file_version_conversion() {
+        let version = FileVersion {
+            name: "config.yaml".to_string(),
+            revision: 3,
+            size: 1024,
+            checksum: "abc123".to_string(),
+            created_at: 1000,
+            is_current: true,
+        };
+
+        let proto_msg: proto::FileVersionMsg = version.clone().into();
+        let back: FileVersion = proto_msg.into();
+
+        assert_eq!(version.name, back.name);
+        assert_eq!(version.revision, back.revision);
+        assert_eq!(version.is_current, back.is_current);
+    }
+
+    #[test]
+    fn test_file_history_conversion() {
+        let history = FileHistory {
+            name: "app.conf".to_string(),
+            versions: vec![
+                FileVersion {
+                    name: "app.conf".to_string(),
+                    revision: 1,
+                    size: 512,
+                    checksum: "v1hash".to_string(),
+                    created_at: 1000,
+                    is_current: false,
+                },
+                FileVersion {
+                    name: "app.conf".to_string(),
+                    revision: 2,
+                    size: 600,
+                    checksum: "v2hash".to_string(),
+                    created_at: 2000,
+                    is_current: true,
+                },
+            ],
+            current_version: 2,
+        };
+
+        let proto_msg: proto::FileHistoryMsg = history.clone().into();
+        let back: FileHistory = proto_msg.into();
+
+        assert_eq!(history.name, back.name);
+        assert_eq!(history.versions.len(), back.versions.len());
+        assert_eq!(history.current_version, back.current_version);
+    }
+
+    // ===== Response 构造测试 =====
+
+    #[test]
+    fn test_submit_batch_response_success() {
+        let batch_id = BatchId::generate();
+        let response = proto::SubmitBatchResponse::success(batch_id.clone(), 5);
+
+        assert!(response.batch_id.is_some());
+        assert_eq!(response.agent_nums, 5);
+    }
+
+    #[test]
+    fn test_cancel_batch_response() {
+        let success = proto::CancelBatchResponse::success();
+        assert!(success.success);
+
+        let failure = proto::CancelBatchResponse::failure();
+        assert!(!failure.success);
+    }
+
+    #[test]
+    fn test_list_batches_response() {
+        let batches = vec![proto::BatchMsg {
+            batch_id: Some(proto::BatchId {
+                value: "b1".to_string(),
+            }),
+            command: "echo".to_string(),
+            args: vec![],
+            timeout_seconds: 30,
+            created_at: 1000,
+        }];
+
+        let response = proto::ListBatchesResponse::new(batches, 10);
+        assert_eq!(response.batches.len(), 1);
+        assert_eq!(response.total_count, 10);
+        assert!(response.has_more);
     }
 }

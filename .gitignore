@@ -1,7 +1,8 @@
 target/
-tests/
 docs/
 certs/
+
+data/
 
 agent-deploy/
 docker-compose.yml

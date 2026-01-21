@@ -2,10 +2,13 @@ use crate::application::context::ApplicationContext;
 use crate::infrastructure::monitor::agent_info_monitor::AgentInfoMonitor;
 use crate::infrastructure::monitor::heartbeat_monitor::HeartbeatMonitor;
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
-use crate::infrastructure::services::{AgentService, FileService, RolloutService, TaskService};
+use crate::infrastructure::services::{
+    AgentService, CaService, FileService, RolloutService, TaskService,
+};
 use crate::{
     infrastructure::lifecycle::LifecycleManager, interface::server_manager::GrpcServerManager,
 };
+use futures_util::StreamExt;
 use oasis_core::config_strategies::ServerConfigStrategy;
 use oasis_core::config_strategy::ConfigStrategy;
 use oasis_core::error::Result;
@@ -63,6 +66,7 @@ impl Bootstrap {
         debug!("Connecting to NATS...");
         let nats_client =
             NatsClientFactory::create_nats_client_with_jetstream(&config.nats, &config.tls).await?;
+        let nats_raw = nats_client.client.clone();
         let jetstream = Arc::new(nats_client.jetstream);
 
         // 4. 确保JetStream流和KV存储存在
@@ -90,6 +94,92 @@ impl Bootstrap {
 
         // 6. 创建服务层
         debug!("Initializing services...");
+
+        // CA CSR 服务（通过 NATS request/reply 提供证书签发）
+        let ca_service = Arc::new(
+            CaService::new(
+                config.ca.ca_cert_path.clone(),
+                config.ca.ca_key_path.clone(),
+                (config.ca.cert_validity_days as u64).saturating_mul(24),
+            )
+            .await?,
+        );
+
+        // CA CSR responder
+        let ca_responder_handle = {
+            let ca_service = ca_service.clone();
+            let client = nats_raw.clone();
+            let shutdown_token = lifecycle_manager.shutdown_token();
+            tokio::spawn(async move {
+                let mut sub = match client.subscribe("oasis.ca.csr".to_string()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Failed to subscribe CA CSR subject: {}", e);
+                        return;
+                    }
+                };
+
+                loop {
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => {
+                            info!("CA CSR responder shutting down");
+                            break;
+                        }
+                        msg = sub.next() => {
+                            let Some(msg) = msg else { break; };
+
+                            let Some(reply) = msg.reply.clone() else {
+                                continue;
+                            };
+
+                            let request: std::result::Result<oasis_core::csr_types::CsrRequest, _> =
+                                serde_json::from_slice(&msg.payload);
+
+                            let response = match request {
+                                Ok(req) => ca_service.handle_csr_request(req).await,
+                                Err(e) => oasis_core::csr_types::CsrResponse::error(format!(
+                                    "Invalid CSR request: {e}"
+                                )),
+                            };
+
+                            let payload = match serde_json::to_vec(&response) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    let fallback = oasis_core::csr_types::CsrResponse::error(format!(
+                                        "Failed to serialize response: {e}"
+                                    ));
+                                    serde_json::to_vec(&fallback).unwrap_or_default()
+                                }
+                            };
+
+                            if let Err(e) = client.publish(reply, payload.into()).await {
+                                error!("Failed to publish CSR response: {}", e);
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
+        lifecycle_manager
+            .register_low_priority_service("ca_csr_responder".to_string(), ca_responder_handle);
+
+        // CA token cleanup
+        let ca_cleanup_handle = {
+            let ca_service = ca_service.clone();
+            let shutdown_token = lifecycle_manager.shutdown_token();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => break,
+                        _ = interval.tick() => ca_service.cleanup_expired_tokens().await,
+                    }
+                }
+            })
+        };
+        lifecycle_manager
+            .register_low_priority_service("ca_token_cleanup".to_string(), ca_cleanup_handle);
 
         // 启动 TaskMonitor
         let task_monitor = Arc::new(TaskMonitor::new(
@@ -123,6 +213,7 @@ impl Bootstrap {
             task_service,
             file_service,
             rollout_service,
+            ca_service: ca_service.clone(),
         });
 
         info!("Application context built successfully");
@@ -137,12 +228,24 @@ impl Bootstrap {
 
         // 9. 启用进程内 TLS（原生 TLS）
         let tls_service: Option<std::sync::Arc<crate::infrastructure::tls::TlsService>> =
-            match crate::infrastructure::tls::TlsService::new_with_paths(config.tls.certs_dir).await
+            match crate::infrastructure::tls::TlsService::new_with_paths(
+                config.tls.certs_dir.clone(),
+            )
+            .await
             {
                 Ok(svc) => Some(std::sync::Arc::new(svc)),
                 Err(e) => {
+                    if config.tls.require_tls {
+                        return Err(oasis_core::error::CoreError::Config {
+                            message: format!(
+                                "TLS initialization failed and require_tls=true: {}. Set tls.require_tls=false to allow plaintext connections.",
+                                e
+                            ),
+                            severity: oasis_core::error::ErrorSeverity::Critical,
+                        });
+                    }
                     tracing::warn!(
-                        "Failed to initialize TLS service: {}, falling back to plaintext",
+                        "Failed to initialize TLS service: {}, falling back to plaintext (require_tls=false)",
                         e
                     );
                     None

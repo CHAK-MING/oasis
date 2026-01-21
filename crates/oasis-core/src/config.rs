@@ -16,12 +16,14 @@ pub struct OasisConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub ca: CaConfig,
 }
 
 impl OasisConfig {
     /// 从指定路径或当前目录中的 oasis.toml 加载配置；支持以 OASIS_ 为前缀的环境变量覆盖（Figment）
     pub fn load_config(path: Option<&str>) -> Result<Self> {
-        use figment::{Figment, providers::Env, providers::Format, providers::Toml};
+        use figment::{providers::Env, providers::Format, providers::Toml, Figment};
         use std::path::Path;
 
         // 基础：默认配置
@@ -134,14 +136,24 @@ pub struct TlsConfig {
     /// 证书根目录
     #[serde(default = "default_certs_dir")]
     pub certs_dir: PathBuf,
+    /// 是否强制要求 TLS（默认 true）
+    /// 设置为 true 时，tls:// 或 https:// 协议下证书缺失将导致启动失败
+    /// 设置为 false 时，证书缺失仅警告并继续（仅限内网自用场景）
+    #[serde(default = "default_require_tls")]
+    pub require_tls: bool,
 }
 
 impl Default for TlsConfig {
     fn default() -> Self {
         Self {
             certs_dir: default_certs_dir(),
+            require_tls: default_require_tls(),
         }
     }
+}
+
+fn default_require_tls() -> bool {
+    true
 }
 
 impl TlsConfig {
@@ -183,6 +195,43 @@ impl TlsConfig {
     /// 获取 gRPC 客户端密钥路径
     pub fn grpc_client_key_path(&self) -> PathBuf {
         self.certs_dir.join("grpc-client-key.pem")
+    }
+}
+
+/// CA 服务配置（用于 CSR 证书签发）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CaConfig {
+    /// CA 证书路径
+    #[serde(default = "default_ca_cert_path")]
+    pub ca_cert_path: PathBuf,
+    /// CA 私钥路径
+    #[serde(default = "default_ca_key_path")]
+    pub ca_key_path: PathBuf,
+    /// 签发证书有效期（天）
+    #[serde(default = "default_cert_validity_days")]
+    pub cert_validity_days: u32,
+}
+
+fn default_ca_cert_path() -> PathBuf {
+    PathBuf::from("certs/ca.pem")
+}
+
+fn default_ca_key_path() -> PathBuf {
+    PathBuf::from("certs/ca-key.pem")
+}
+
+fn default_cert_validity_days() -> u32 {
+    365
+}
+
+impl Default for CaConfig {
+    fn default() -> Self {
+        Self {
+            ca_cert_path: default_ca_cert_path(),
+            ca_key_path: default_ca_key_path(),
+            cert_validity_days: default_cert_validity_days(),
+        }
     }
 }
 
@@ -246,6 +295,8 @@ impl OasisConfig {
         }
 
         make_absolute(&mut self.tls.certs_dir, base_dir);
+        make_absolute(&mut self.ca.ca_cert_path, base_dir);
+        make_absolute(&mut self.ca.ca_key_path, base_dir);
     }
 }
 
@@ -293,12 +344,14 @@ mod tests {
         fn test_default() {
             let config = TlsConfig::default();
             assert_eq!(config.certs_dir, PathBuf::from("certs"));
+            assert!(config.require_tls);
         }
 
         #[test]
         fn test_nats_paths() {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/etc/oasis/certs"),
+                require_tls: true,
             };
             assert_eq!(
                 config.nats_ca_path(),
@@ -318,6 +371,7 @@ mod tests {
         fn test_grpc_server_paths() {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/certs"),
+                require_tls: true,
             };
             assert_eq!(config.grpc_ca_path(), Path::new("/certs/grpc-ca.pem"));
             assert_eq!(
@@ -334,6 +388,7 @@ mod tests {
         fn test_grpc_client_paths() {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/certs"),
+                require_tls: true,
             };
             assert_eq!(
                 config.grpc_client_cert_path(),

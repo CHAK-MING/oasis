@@ -32,6 +32,7 @@ enum AgentStatusEnum {
   AGENT_OFFLINE = 1;
   AGENT_REMOVED = 2;
   AGENT_UNKNOWN = 3;
+  AGENT_DEGRADED = 4;
 }
 
 message SelectorExpression {
@@ -185,6 +186,20 @@ message SetInfoAgentRequest {
 message SetInfoAgentResponse {
   bool success = 1;
   string message = 2;
+}
+
+// Bootstrap Token 请求
+message CreateBootstrapTokenRequest {
+  AgentId agent_id = 1;
+  uint64 ttl_hours = 2;  // Token 有效期（小时）
+}
+
+// Bootstrap Token 响应
+message CreateBootstrapTokenResponse {
+  bool success = 1;
+  string token = 2;       // Bootstrap token 字符串
+  int64 expires_at = 3;   // Token 过期时间戳
+  string message = 4;     // 错误信息（如果有）
 }
 
 message FileSpecMsg {
@@ -440,6 +455,7 @@ service OasisService {
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
   rpc RemoveAgent(RemoveAgentRequest) returns (RemoveAgentResponse);
   rpc SetInfoAgent(SetInfoAgentRequest) returns (SetInfoAgentResponse);
+  rpc CreateBootstrapToken(CreateBootstrapTokenRequest) returns (CreateBootstrapTokenResponse);
   
   // 文件管理
   rpc BeginFileUpload(FileSpecMsg) returns (FileUploadSession);

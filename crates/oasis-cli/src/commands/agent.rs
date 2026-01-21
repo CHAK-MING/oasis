@@ -97,9 +97,9 @@ pub struct AgentDeployArgs {
     #[arg(long)]
     agent_binary: Option<PathBuf>,
 
-    /// 为 Agent 生成独立证书
-    #[arg(long)]
-    generate_cert: bool,
+    /// Bootstrap token 有效期（小时）
+    #[arg(long, default_value = "24")]
+    token_ttl_hours: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -160,7 +160,7 @@ pub async fn run_agent(
 }
 
 async fn run_agent_deploy(
-    _client: &mut OasisServiceClient<tonic::transport::Channel>,
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: AgentDeployArgs,
 ) -> Result<()> {
     if args.ssh_target.is_empty() {
@@ -180,16 +180,36 @@ async fn run_agent_deploy(
     std::fs::create_dir_all(&deploy_dir)?;
     print_status("创建部署目录", true);
 
-    // 如果需要，生成独立证书
-    if args.generate_cert {
-        print_info("生成 Agent 独立证书...");
-        generate_agent_certificates(&args.agent_id, &deploy_dir.join("certs")).await?;
-        print_status("生成独立证书", true);
-    } else {
-        // 复制默认证书
-        copy_default_certificates(&deploy_dir.join("certs"))?;
-        print_status("复制默认证书", true);
+    // 通过 Server 创建 bootstrap token（CSR 模式，唯一支持的方式）
+    print_info("向 Server 请求 bootstrap token...");
+    let req = oasis_core::proto::CreateBootstrapTokenRequest {
+        agent_id: Some(oasis_core::proto::AgentId {
+            value: args.agent_id.clone(),
+        }),
+        ttl_hours: args.token_ttl_hours,
+    };
+    let response = grpc_retry!(client, create_bootstrap_token(req.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("创建 bootstrap token 失败: {}", format_grpc_error(&e)))?
+        .into_inner();
+
+    if !response.success {
+        return Err(anyhow::anyhow!(
+            "创建 bootstrap token 失败: {}",
+            response.message
+        ));
     }
+
+    let bootstrap_token = response.token;
+    print_status(
+        &format!("创建 Bootstrap Token (有效期 {}小时)", args.token_ttl_hours),
+        true,
+    );
+    print_warning(&format!(
+        "Bootstrap Token: {}...",
+        &bootstrap_token[..16.min(bootstrap_token.len())]
+    ));
+    print_info("Agent 首次启动时将使用此 token 自动请求证书");
 
     // 复制 Agent 二进制文件（如果提供）
     if let Some(binary_path) = &args.agent_binary {
@@ -198,8 +218,13 @@ async fn run_agent_deploy(
     }
 
     // 生成环境变量文件
-    let env_file =
-        generate_agent_env_file(&args.nats_url, &args.labels, &args.groups, &args.agent_id)?;
+    let env_file = generate_agent_env_file(
+        &args.nats_url,
+        &args.labels,
+        &args.groups,
+        &args.agent_id,
+        Some(&bootstrap_token),
+    )?;
     std::fs::write(deploy_dir.join("agent.env"), env_file)?;
     print_status("生成环境变量文件", true);
 
@@ -765,36 +790,6 @@ async fn verify_agent_deployment(target: &str, key: &Option<PathBuf>) -> Result<
     }
 }
 
-/// 生成 Agent 独立证书
-async fn generate_agent_certificates(agent_id: &str, output_dir: &Path) -> Result<()> {
-    use crate::certificate::CertificateGenerator;
-
-    // 加载 CA 证书
-    let ca = CertificateGenerator::load_ca(&PathBuf::from("./certs"))?;
-
-    // 为 Agent 生成证书
-    CertificateGenerator::generate_agent_certificate(agent_id, &ca, output_dir).await?;
-
-    Ok(())
-}
-
-/// 复制默认证书
-fn copy_default_certificates(output_dir: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(output_dir)?;
-
-    let cert_files = ["nats-ca.pem", "nats-client.pem", "nats-client-key.pem"];
-
-    for file in &cert_files {
-        let src = PathBuf::from("./certs").join(file);
-        let dst = output_dir.join(file);
-        if src.exists() {
-            std::fs::copy(&src, &dst)?;
-        }
-    }
-
-    Ok(())
-}
-
 /// 生成改进的安装脚本
 fn generate_install_script(target: &str, agent_id: &str) -> Result<String> {
     let script = format!(
@@ -881,12 +876,12 @@ fi
     Ok(script)
 }
 
-/// 生成环境变量文件（包含 Agent ID）
 fn generate_agent_env_file(
     nats_url: &str,
     labels: &[String],
     groups: &[String],
     agent_id: &str,
+    bootstrap_token: Option<&str>,
 ) -> Result<String> {
     let labels_str = if labels.is_empty() {
         String::new()
@@ -898,6 +893,15 @@ fn generate_agent_env_file(
         String::new()
     } else {
         format!("\nOASIS_AGENT_GROUPS={}", groups.join(","))
+    };
+
+    let token_str = if let Some(token) = bootstrap_token {
+        format!(
+            "\n# Bootstrap Token (首次启动后自动失效)\nOASIS_BOOTSTRAP_TOKEN={}",
+            token
+        )
+    } else {
+        String::new()
     };
 
     let timestamp = format!(
@@ -923,7 +927,7 @@ OASIS__TLS__CERTS_DIR=/opt/oasis/certs
 # 日志配置
 OASIS__TELEMETRY__LOG_LEVEL=info
 OASIS__TELEMETRY__LOG_FORMAT=text
-OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}
+OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}{token_str}
 "#
     );
 
@@ -953,4 +957,163 @@ StandardError=journal
 WantedBy=multi-user.target
 "#;
     Ok(service.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_agent_env_file_basic() {
+        let env = generate_agent_env_file("tls://localhost:4222", &[], &[], "test-agent-001", None)
+            .unwrap();
+
+        assert!(env.contains("OASIS_AGENT_ID=test-agent-001"));
+        assert!(env.contains("OASIS__NATS__URL=tls://localhost:4222"));
+        assert!(env.contains("OASIS__TLS__CERTS_DIR=/opt/oasis/certs"));
+    }
+
+    #[test]
+    fn test_generate_agent_env_file_with_labels() {
+        let labels = vec!["env=prod".to_string(), "role=web".to_string()];
+        let env =
+            generate_agent_env_file("tls://localhost:4222", &labels, &[], "test-agent-002", None)
+                .unwrap();
+
+        assert!(env.contains("OASIS_AGENT_LABELS=env=prod,role=web"));
+    }
+
+    #[test]
+    fn test_generate_agent_env_file_with_groups() {
+        let groups = vec!["group1".to_string(), "group2".to_string()];
+        let env =
+            generate_agent_env_file("tls://localhost:4222", &[], &groups, "test-agent-003", None)
+                .unwrap();
+
+        assert!(env.contains("OASIS_AGENT_GROUPS=group1,group2"));
+    }
+
+    #[test]
+    fn test_generate_agent_env_file_with_bootstrap_token() {
+        let env = generate_agent_env_file(
+            "tls://localhost:4222",
+            &[],
+            &[],
+            "test-agent-004",
+            Some("my-bootstrap-token-123"),
+        )
+        .unwrap();
+
+        assert!(env.contains("OASIS_BOOTSTRAP_TOKEN=my-bootstrap-token-123"));
+    }
+
+    #[test]
+    fn test_generate_agent_env_file_without_token() {
+        let env = generate_agent_env_file("tls://localhost:4222", &[], &[], "test-agent-005", None)
+            .unwrap();
+
+        assert!(!env.contains("OASIS_BOOTSTRAP_TOKEN"));
+    }
+
+    #[test]
+    fn test_generate_systemd_service() {
+        let service = generate_systemd_service().unwrap();
+
+        assert!(service.contains("[Unit]"));
+        assert!(service.contains("[Service]"));
+        assert!(service.contains("[Install]"));
+        assert!(service.contains("ExecStart=/opt/oasis/agent/oasis-agent"));
+        assert!(service.contains("EnvironmentFile=/opt/oasis/agent/agent.env"));
+        assert!(service.contains("Restart=always"));
+        assert!(service.contains("WantedBy=multi-user.target"));
+    }
+
+    #[test]
+    fn test_generate_install_script() {
+        let script = generate_install_script("root@192.168.1.100", "my-agent").unwrap();
+
+        assert!(script.contains("#!/bin/bash"));
+        assert!(script.contains("my-agent"));
+        assert!(script.contains("mkdir -p /opt/oasis/agent"));
+        assert!(script.contains("systemctl"));
+    }
+
+    #[test]
+    fn test_agent_deploy_args() {
+        let args = AgentDeployArgs {
+            ssh_target: "root@host".to_string(),
+            agent_id: "test-agent".to_string(),
+            nats_url: "tls://localhost:4222".to_string(),
+            key: None,
+            output_dir: PathBuf::from("./deploy"),
+            labels: vec![],
+            groups: vec![],
+            agent_binary: None,
+            auto_install: false,
+            token_ttl_hours: 24,
+        };
+
+        assert_eq!(args.token_ttl_hours, 24);
+        assert!(!args.auto_install);
+        assert_eq!(args.ssh_target, "root@host");
+    }
+
+    #[test]
+    fn test_agent_list_args() {
+        let args = AgentListArgs {
+            target: "all".to_string(),
+            is_online: false,
+            verbose: 0,
+        };
+
+        assert!(!args.is_online);
+        assert_eq!(args.verbose, 0);
+        assert_eq!(args.target, "all");
+    }
+
+    #[test]
+    fn test_agent_remove_args() {
+        let args = AgentRemoveArgs {
+            ssh_target: "root@host".to_string(),
+            agent_id: "agent-to-remove".to_string(),
+            key: None,
+        };
+
+        assert_eq!(args.agent_id, "agent-to-remove");
+        assert_eq!(args.ssh_target, "root@host");
+    }
+
+    #[test]
+    fn test_agent_set_args() {
+        let args = AgentSetArgs {
+            agent_id: "agent-001".to_string(),
+            labels: Some(vec!["key1=value1".to_string()]),
+            groups: Some(vec!["group1".to_string()]),
+        };
+
+        assert_eq!(args.agent_id, "agent-001");
+        assert!(args.labels.is_some());
+        assert!(args.groups.is_some());
+    }
+
+    #[test]
+    fn test_agent_deploy_args_with_labels_and_groups() {
+        let args = AgentDeployArgs {
+            ssh_target: "user@server".to_string(),
+            agent_id: "prod-agent".to_string(),
+            nats_url: "tls://nats.example.com:4222".to_string(),
+            key: Some(PathBuf::from("/home/user/.ssh/id_rsa")),
+            output_dir: PathBuf::from("/tmp/deploy"),
+            labels: vec!["env=prod".to_string(), "region=us-west".to_string()],
+            groups: vec!["web".to_string(), "backend".to_string()],
+            agent_binary: Some(PathBuf::from("./oasis-agent")),
+            auto_install: true,
+            token_ttl_hours: 48,
+        };
+
+        assert_eq!(args.labels.len(), 2);
+        assert_eq!(args.groups.len(), 2);
+        assert!(args.auto_install);
+        assert_eq!(args.token_ttl_hours, 48);
+    }
 }

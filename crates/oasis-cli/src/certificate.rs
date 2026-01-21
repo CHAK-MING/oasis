@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use console::style;
 use rcgen::string::Ia5String;
 use rcgen::{
@@ -8,7 +8,6 @@ use rcgen::{
 };
 use std::net::IpAddr;
 
-/// 证书生成器
 pub struct CertificateGenerator;
 
 impl CertificateGenerator {
@@ -42,67 +41,6 @@ impl CertificateGenerator {
         );
 
         Ok(())
-    }
-
-    /// 生成 Agent 证书
-    pub async fn generate_agent_certificate(
-        agent_id: &str,
-        ca: &CertifiedKey<KeyPair>,
-        output_dir: &std::path::Path,
-    ) -> Result<()> {
-        std::fs::create_dir_all(output_dir)?;
-
-        let ca_params = Self::get_ca_params();
-
-        // 生成客户端证书
-        let client_cert = Self::generate_client_cert(
-            &format!("oasis-agent-{}", agent_id),
-            &[ExtendedKeyUsagePurpose::ClientAuth],
-            Some(agent_id),
-            ca,
-            &ca_params,
-        )?;
-
-        // 保存 NATS 客户端证书
-        std::fs::write(output_dir.join("nats-client.pem"), client_cert.cert.pem())?;
-        std::fs::write(
-            output_dir.join("nats-client-key.pem"),
-            client_cert.signing_key.serialize_pem(),
-        )?;
-
-        // 复制 CA 证书
-        let ca_pem = ca.cert.pem();
-        std::fs::write(output_dir.join("nats-ca.pem"), &ca_pem)?;
-
-        Ok(())
-    }
-
-    /// 加载 CA 证书
-    pub fn load_ca(certs_dir: &std::path::Path) -> Result<CertifiedKey<KeyPair>> {
-        let ca_key = std::fs::read_to_string(certs_dir.join("ca-key.pem"))
-            .context("Failed to read CA private key")?;
-
-        let key_pair =
-            rcgen::KeyPair::from_pem(&ca_key).context("Failed to parse CA private key")?;
-
-        // 重新生成 CA 参数
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "Oasis Root CA");
-
-        let mut params = CertificateParams::default();
-        params.distinguished_name = dn;
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-        let cert = params.self_signed(&key_pair)?;
-
-        Ok(CertifiedKey {
-            cert,
-            signing_key: key_pair,
-        })
     }
 
     /// 获取 CA 参数
@@ -309,5 +247,287 @@ impl CertificateGenerator {
         }
 
         Ok(addresses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use x509_parser::prelude::*;
+
+    #[tokio::test]
+    async fn test_generate_base_certificates() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        let result = CertificateGenerator::generate_base_certificates(certs_dir).await;
+        assert!(result.is_ok());
+
+        assert!(certs_dir.join("ca.pem").exists());
+        assert!(certs_dir.join("ca-key.pem").exists());
+        assert!(certs_dir.join("nats-ca.pem").exists());
+        assert!(certs_dir.join("grpc-ca.pem").exists());
+        assert!(certs_dir.join("nats-server.pem").exists());
+        assert!(certs_dir.join("nats-server-key.pem").exists());
+        assert!(certs_dir.join("grpc-server.pem").exists());
+        assert!(certs_dir.join("grpc-server-key.pem").exists());
+        assert!(certs_dir.join("nats-client.pem").exists());
+        assert!(certs_dir.join("nats-client-key.pem").exists());
+        assert!(certs_dir.join("grpc-client.pem").exists());
+        assert!(certs_dir.join("grpc-client-key.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn test_ca_certificate_is_valid() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let ca_pem = std::fs::read_to_string(certs_dir.join("ca.pem")).unwrap();
+
+        assert!(ca_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(ca_pem.contains("-----END CERTIFICATE-----"));
+
+        let pem = Pem::iter_from_buffer(ca_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, cert) = X509Certificate::from_der(&pem.contents).unwrap();
+
+        assert!(cert.is_ca());
+    }
+
+    #[tokio::test]
+    async fn test_load_ca() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let ca = CertificateGenerator::load_ca(certs_dir);
+        assert!(ca.is_ok());
+
+        let ca = ca.unwrap();
+        assert!(!ca.cert.pem().is_empty());
+        assert!(!ca.signing_key.serialize_pem().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_ca_missing_files() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        let result = CertificateGenerator::load_ca(certs_dir);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_generate_agent_certificate() {
+        let temp_dir = tempdir().unwrap();
+        let ca_dir = temp_dir.path().join("ca");
+        let agent_dir = temp_dir.path().join("agent");
+
+        CertificateGenerator::generate_base_certificates(&ca_dir)
+            .await
+            .unwrap();
+        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
+
+        let result =
+            CertificateGenerator::generate_agent_certificate("test-agent-123", &ca, &agent_dir)
+                .await;
+
+        assert!(result.is_ok());
+        assert!(agent_dir.join("nats-client.pem").exists());
+        assert!(agent_dir.join("nats-client-key.pem").exists());
+        assert!(agent_dir.join("nats-ca.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn test_agent_certificate_has_client_auth() {
+        let temp_dir = tempdir().unwrap();
+        let ca_dir = temp_dir.path().join("ca");
+        let agent_dir = temp_dir.path().join("agent");
+
+        CertificateGenerator::generate_base_certificates(&ca_dir)
+            .await
+            .unwrap();
+        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
+
+        CertificateGenerator::generate_agent_certificate("test-agent-456", &ca, &agent_dir)
+            .await
+            .unwrap();
+
+        let cert_pem = std::fs::read_to_string(agent_dir.join("nats-client.pem")).unwrap();
+        let pem = Pem::iter_from_buffer(cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, cert) = X509Certificate::from_der(&pem.contents).unwrap();
+
+        assert!(!cert.is_ca());
+    }
+
+    #[tokio::test]
+    async fn test_server_certificate_has_san() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let nats_cert_pem = std::fs::read_to_string(certs_dir.join("nats-server.pem")).unwrap();
+        let pem = Pem::iter_from_buffer(nats_cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, cert) = X509Certificate::from_der(&pem.contents).unwrap();
+
+        let san_ext = cert.get_extension_unique(&oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME);
+        assert!(san_ext.is_ok());
+    }
+
+    #[test]
+    fn test_parse_ip_addresses_valid() {
+        let ips = &["127.0.0.1", "::1", "0.0.0.0"];
+        let result = CertificateGenerator::parse_ip_addresses(ips);
+
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_ip_addresses_invalid() {
+        let ips = &["127.0.0.1", "invalid-ip", "::1"];
+        let result = CertificateGenerator::parse_ip_addresses(ips);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_ip_addresses_empty() {
+        let ips: &[&str] = &[];
+        let result = CertificateGenerator::parse_ip_addresses(ips);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_get_ca_params() {
+        let params = CertificateGenerator::get_ca_params();
+
+        assert!(matches!(params.is_ca, IsCa::Ca(_)));
+        assert!(params.key_usages.contains(&KeyUsagePurpose::KeyCertSign));
+        assert!(params.key_usages.contains(&KeyUsagePurpose::CrlSign));
+        assert!(
+            params
+                .key_usages
+                .contains(&KeyUsagePurpose::DigitalSignature)
+        );
+    }
+
+    #[test]
+    fn test_generate_ca() {
+        let result = CertificateGenerator::generate_ca("Test CA");
+        assert!(result.is_ok());
+
+        let ca = result.unwrap();
+        let cert_pem = ca.cert.pem();
+
+        assert!(cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(cert_pem.contains("-----END CERTIFICATE-----"));
+    }
+
+    #[tokio::test]
+    async fn test_nats_ca_equals_grpc_ca() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let nats_ca = std::fs::read_to_string(certs_dir.join("nats-ca.pem")).unwrap();
+        let grpc_ca = std::fs::read_to_string(certs_dir.join("grpc-ca.pem")).unwrap();
+        let main_ca = std::fs::read_to_string(certs_dir.join("ca.pem")).unwrap();
+
+        assert_eq!(nats_ca, main_ca);
+        assert_eq!(grpc_ca, main_ca);
+    }
+
+    #[tokio::test]
+    async fn test_client_cert_reusable() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let nats_client = std::fs::read_to_string(certs_dir.join("nats-client.pem")).unwrap();
+        let grpc_client = std::fs::read_to_string(certs_dir.join("grpc-client.pem")).unwrap();
+
+        assert_eq!(nats_client, grpc_client);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_agent_certificates() {
+        let temp_dir = tempdir().unwrap();
+        let ca_dir = temp_dir.path().join("ca");
+        let agent1_dir = temp_dir.path().join("agent1");
+        let agent2_dir = temp_dir.path().join("agent2");
+
+        CertificateGenerator::generate_base_certificates(&ca_dir)
+            .await
+            .unwrap();
+        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
+
+        CertificateGenerator::generate_agent_certificate("agent-1", &ca, &agent1_dir)
+            .await
+            .unwrap();
+        CertificateGenerator::generate_agent_certificate("agent-2", &ca, &agent2_dir)
+            .await
+            .unwrap();
+
+        let cert1 = std::fs::read_to_string(agent1_dir.join("nats-client.pem")).unwrap();
+        let cert2 = std::fs::read_to_string(agent2_dir.join("nats-client.pem")).unwrap();
+
+        assert_ne!(cert1, cert2);
+    }
+
+    #[tokio::test]
+    async fn test_certificates_directory_creation() {
+        let temp_dir = tempdir().unwrap();
+        let nested_dir = temp_dir.path().join("deeply").join("nested").join("certs");
+
+        let result = CertificateGenerator::generate_base_certificates(&nested_dir).await;
+        assert!(result.is_ok());
+        assert!(nested_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_ca_key_persistence() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let ca1 = CertificateGenerator::load_ca(certs_dir).unwrap();
+        let ca2 = CertificateGenerator::load_ca(certs_dir).unwrap();
+
+        assert_eq!(
+            ca1.signing_key.serialize_pem(),
+            ca2.signing_key.serialize_pem()
+        );
     }
 }

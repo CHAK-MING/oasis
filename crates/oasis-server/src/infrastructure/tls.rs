@@ -29,6 +29,7 @@ impl TlsService {
     pub async fn new_with_paths(cert_path: std::path::PathBuf) -> Result<Self> {
         let config = TlsConfig {
             certs_dir: cert_path.to_path_buf(),
+            require_tls: true,
         };
 
         let (reload_tx, _) = broadcast::channel(1);

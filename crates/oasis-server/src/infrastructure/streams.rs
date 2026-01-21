@@ -1,3 +1,4 @@
+use backon::Retryable;
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{JS_OBJ_ARTIFACTS, JS_STREAM_FILES, JS_STREAM_RESULTS, JS_STREAM_TASKS};
 use std::time::Duration;
@@ -96,26 +97,24 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
                 ..Default::default()
             };
             // 带 backoff 的创建
-            let backoff = oasis_core::backoff::kv_operations_backoff();
-            oasis_core::backoff::execute_with_backoff(
-                || {
-                    let js = js.clone();
-                    let cfg = cfg.clone();
-                    async move {
-                        info!("Attempting to create artifacts object store...");
-                        let result = js.create_object_store(cfg.clone()).await;
-                        match &result {
-                            Ok(_) => info!("Successfully created artifacts object store"),
-                            Err(e) => error!("Failed to create artifacts object store: {:?}", e),
-                        }
-                        result.map(|_| ()).map_err(|e| CoreError::Nats {
-                            message: format!("Failed to create artifacts object store: {}", e),
-                            severity: ErrorSeverity::Error,
-                        })
+            let backoff = oasis_core::backoff::kv_operations_backoff().build();
+            (|| {
+                let js = js.clone();
+                let cfg = cfg.clone();
+                async move {
+                    info!("Attempting to create artifacts object store...");
+                    let result = js.create_object_store(cfg.clone()).await;
+                    match &result {
+                        Ok(_) => info!("Successfully created artifacts object store"),
+                        Err(e) => error!("Failed to create artifacts object store: {:?}", e),
                     }
-                },
-                backoff,
-            )
+                    result.map(|_| ()).map_err(|e| CoreError::Nats {
+                        message: format!("Failed to create artifacts object store: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })
+                }
+            })
+            .retry(&backoff)
             .await?;
             js.get_object_store(JS_OBJ_ARTIFACTS).await?
         }
@@ -183,23 +182,21 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
     // 逐个确保存在
     for (_name, cfg) in kv_specs {
         if js.get_key_value(&cfg.bucket).await.is_err() {
-            let backoff = oasis_core::backoff::kv_operations_backoff();
-            oasis_core::backoff::execute_with_backoff(
-                || {
-                    let js = js.clone();
-                    let cfg = cfg.clone();
-                    async move {
-                        js.create_key_value(cfg.clone())
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| CoreError::Nats {
-                                message: format!("Failed to create KV bucket: {}", e),
-                                severity: ErrorSeverity::Error,
-                            })
-                    }
-                },
-                backoff,
-            )
+            let backoff = oasis_core::backoff::kv_operations_backoff().build();
+            (|| {
+                let js = js.clone();
+                let cfg = cfg.clone();
+                async move {
+                    js.create_key_value(cfg.clone())
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| CoreError::Nats {
+                            message: format!("Failed to create KV bucket: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })
+                }
+            })
+            .retry(&backoff)
             .await?;
         }
     }
@@ -225,26 +222,24 @@ async fn ensure_or_update_stream(
                 // NATS 要求 update 时包含相同的名称
                 new_cfg.name = name.to_string();
 
-                let backoff = oasis_core::backoff::kv_operations_backoff();
-                oasis_core::backoff::execute_with_backoff(
-                    || {
-                        let js = js.clone();
-                        let cfg = new_cfg.clone();
-                        async move {
-                            info!("Updating stream {} configuration...", name);
-                            let result = js.update_stream(cfg.clone()).await;
-                            match &result {
-                                Ok(_) => info!("Successfully updated stream {}", name),
-                                Err(e) => error!("Failed to update stream {}: {:?}", name, e),
-                            }
-                            result.map(|_| ()).map_err(|e| CoreError::Nats {
-                                message: format!("Failed to update stream: {}", e),
-                                severity: ErrorSeverity::Error,
-                            })
+                let backoff = oasis_core::backoff::kv_operations_backoff().build();
+                (|| {
+                    let js = js.clone();
+                    let cfg = new_cfg.clone();
+                    async move {
+                        info!("Updating stream {} configuration...", name);
+                        let result = js.update_stream(cfg.clone()).await;
+                        match &result {
+                            Ok(_) => info!("Successfully updated stream {}", name),
+                            Err(e) => error!("Failed to update stream {}: {:?}", name, e),
                         }
-                    },
-                    backoff,
-                )
+                        result.map(|_| ()).map_err(|e| CoreError::Nats {
+                            message: format!("Failed to update stream: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })
+                    }
+                })
+                .retry(&backoff)
                 .await?;
             } else {
                 info!("Stream {} configuration is up to date", name);
@@ -254,26 +249,24 @@ async fn ensure_or_update_stream(
         Err(e) => {
             warn!("Stream {} not found, creating: {:?}", name, e);
             // 不存在则创建（带 backoff）
-            let backoff = oasis_core::backoff::kv_operations_backoff();
-            oasis_core::backoff::execute_with_backoff(
-                || {
-                    let js = js.clone();
-                    let cfg = desired.clone();
-                    async move {
-                        info!("Creating stream {}...", name);
-                        let result = js.create_stream(cfg.clone()).await;
-                        match &result {
-                            Ok(_) => info!("Successfully created stream {}", name),
-                            Err(e) => error!("Failed to create stream {}: {:?}", name, e),
-                        }
-                        result.map(|_| ()).map_err(|e| CoreError::Nats {
-                            message: format!("Failed to create stream {}: {}", name, e),
-                            severity: ErrorSeverity::Error,
-                        })
+            let backoff = oasis_core::backoff::kv_operations_backoff().build();
+            (|| {
+                let js = js.clone();
+                let cfg = desired.clone();
+                async move {
+                    info!("Creating stream {}...", name);
+                    let result = js.create_stream(cfg.clone()).await;
+                    match &result {
+                        Ok(_) => info!("Successfully created stream {}", name),
+                        Err(e) => error!("Failed to create stream {}: {:?}", name, e),
                     }
-                },
-                backoff,
-            )
+                    result.map(|_| ()).map_err(|e| CoreError::Nats {
+                        message: format!("Failed to create stream {}: {}", name, e),
+                        severity: ErrorSeverity::Error,
+                    })
+                }
+            })
+            .retry(&backoff)
             .await?;
             Ok(())
         }

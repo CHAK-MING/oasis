@@ -1,4 +1,4 @@
-use oasis_agent::{agent_manager::AgentManager, nats_client::NatsClient};
+use oasis_agent::{agent_manager::AgentManager, cert_bootstrap::CertBootstrap, nats_client::NatsClient};
 use oasis_core::{
     config::{NatsConfig, TlsConfig},
     config_strategies::AgentConfigStrategy,
@@ -77,6 +77,21 @@ async fn main() -> Result<()> {
     info!("  Agent ID: {}", agent_id);
     info!("  NATS URL: {}", cfg.nats.url);
 
+    // 读取 bootstrap token（用于首次证书请求）
+    let bootstrap_token = std::env::var("OASIS_BOOTSTRAP_TOKEN").ok();
+
+    // 证书引导流程：如果证书不存在且有 bootstrap token，则请求证书
+    let cert_bootstrap = CertBootstrap::new(
+        AgentId::from(agent_id.clone()),
+        &cfg.tls.certs_dir,
+        cfg.nats.url.clone(),
+        bootstrap_token,
+    );
+
+    if cert_bootstrap.bootstrap_if_needed().await? {
+        info!("Certificate bootstrap completed, proceeding with TLS connection");
+    }
+
     // 连接到 NATS
     let nats_client = NatsClient::connect_with_oasis_config(
         &NatsConfig {
@@ -84,6 +99,7 @@ async fn main() -> Result<()> {
         },
         &TlsConfig {
             certs_dir: cfg.tls.certs_dir.clone(),
+            require_tls: cfg.tls.require_tls,
         },
     )
     .await?;

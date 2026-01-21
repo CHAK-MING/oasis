@@ -30,6 +30,7 @@ fn build_cfg() -> (NatsConfig, TlsConfig) {
         NatsConfig { url },
         TlsConfig {
             certs_dir: certs_dir.into(),
+            require_tls: true,
         },
     )
 }
