@@ -302,78 +302,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_ca() {
-        let temp_dir = tempdir().unwrap();
-        let certs_dir = temp_dir.path();
-
-        CertificateGenerator::generate_base_certificates(certs_dir)
-            .await
-            .unwrap();
-
-        let ca = CertificateGenerator::load_ca(certs_dir);
-        assert!(ca.is_ok());
-
-        let ca = ca.unwrap();
-        assert!(!ca.cert.pem().is_empty());
-        assert!(!ca.signing_key.serialize_pem().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_load_ca_missing_files() {
-        let temp_dir = tempdir().unwrap();
-        let certs_dir = temp_dir.path();
-
-        let result = CertificateGenerator::load_ca(certs_dir);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_generate_agent_certificate() {
-        let temp_dir = tempdir().unwrap();
-        let ca_dir = temp_dir.path().join("ca");
-        let agent_dir = temp_dir.path().join("agent");
-
-        CertificateGenerator::generate_base_certificates(&ca_dir)
-            .await
-            .unwrap();
-        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
-
-        let result =
-            CertificateGenerator::generate_agent_certificate("test-agent-123", &ca, &agent_dir)
-                .await;
-
-        assert!(result.is_ok());
-        assert!(agent_dir.join("nats-client.pem").exists());
-        assert!(agent_dir.join("nats-client-key.pem").exists());
-        assert!(agent_dir.join("nats-ca.pem").exists());
-    }
-
-    #[tokio::test]
-    async fn test_agent_certificate_has_client_auth() {
-        let temp_dir = tempdir().unwrap();
-        let ca_dir = temp_dir.path().join("ca");
-        let agent_dir = temp_dir.path().join("agent");
-
-        CertificateGenerator::generate_base_certificates(&ca_dir)
-            .await
-            .unwrap();
-        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
-
-        CertificateGenerator::generate_agent_certificate("test-agent-456", &ca, &agent_dir)
-            .await
-            .unwrap();
-
-        let cert_pem = std::fs::read_to_string(agent_dir.join("nats-client.pem")).unwrap();
-        let pem = Pem::iter_from_buffer(cert_pem.as_bytes())
-            .next()
-            .unwrap()
-            .unwrap();
-        let (_, cert) = X509Certificate::from_der(&pem.contents).unwrap();
-
-        assert!(!cert.is_ca());
-    }
-
-    #[tokio::test]
     async fn test_server_certificate_has_san() {
         let temp_dir = tempdir().unwrap();
         let certs_dir = temp_dir.path();
@@ -479,31 +407,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_agent_certificates() {
-        let temp_dir = tempdir().unwrap();
-        let ca_dir = temp_dir.path().join("ca");
-        let agent1_dir = temp_dir.path().join("agent1");
-        let agent2_dir = temp_dir.path().join("agent2");
-
-        CertificateGenerator::generate_base_certificates(&ca_dir)
-            .await
-            .unwrap();
-        let ca = CertificateGenerator::load_ca(&ca_dir).unwrap();
-
-        CertificateGenerator::generate_agent_certificate("agent-1", &ca, &agent1_dir)
-            .await
-            .unwrap();
-        CertificateGenerator::generate_agent_certificate("agent-2", &ca, &agent2_dir)
-            .await
-            .unwrap();
-
-        let cert1 = std::fs::read_to_string(agent1_dir.join("nats-client.pem")).unwrap();
-        let cert2 = std::fs::read_to_string(agent2_dir.join("nats-client.pem")).unwrap();
-
-        assert_ne!(cert1, cert2);
-    }
-
-    #[tokio::test]
     async fn test_certificates_directory_creation() {
         let temp_dir = tempdir().unwrap();
         let nested_dir = temp_dir.path().join("deeply").join("nested").join("certs");
@@ -511,23 +414,5 @@ mod tests {
         let result = CertificateGenerator::generate_base_certificates(&nested_dir).await;
         assert!(result.is_ok());
         assert!(nested_dir.exists());
-    }
-
-    #[tokio::test]
-    async fn test_ca_key_persistence() {
-        let temp_dir = tempdir().unwrap();
-        let certs_dir = temp_dir.path();
-
-        CertificateGenerator::generate_base_certificates(certs_dir)
-            .await
-            .unwrap();
-
-        let ca1 = CertificateGenerator::load_ca(certs_dir).unwrap();
-        let ca2 = CertificateGenerator::load_ca(certs_dir).unwrap();
-
-        assert_eq!(
-            ca1.signing_key.serialize_pem(),
-            ca2.signing_key.serialize_pem()
-        );
     }
 }

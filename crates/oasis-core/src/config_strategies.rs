@@ -180,7 +180,17 @@ impl AgentConfigStrategy {
             });
         }
 
+        // Certificate bootstrap flow: on first startup, Agent may only have the CA certificate.
+        // If a bootstrap token is provided, allow missing client cert/key so the bootstrap logic
+        // can run and persist them.
+        let has_bootstrap_token = std::env::var("OASIS_BOOTSTRAP_TOKEN")
+            .ok()
+            .is_some_and(|s| !s.trim().is_empty());
+
         if !config.tls.nats_client_cert_path().exists() {
+            if has_bootstrap_token {
+                return Ok(());
+            }
             return Err(CoreError::File {
                 path: config.tls.nats_client_cert_path().display().to_string(),
                 message: "未找到 NATS 客户端证书".to_string(),
@@ -189,6 +199,9 @@ impl AgentConfigStrategy {
         }
 
         if !config.tls.nats_client_key_path().exists() {
+            if has_bootstrap_token {
+                return Ok(());
+            }
             return Err(CoreError::File {
                 path: config.tls.nats_client_key_path().display().to_string(),
                 message: "未找到 NATS 客户端私钥".to_string(),

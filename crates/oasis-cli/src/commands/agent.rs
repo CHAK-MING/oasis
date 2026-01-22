@@ -243,6 +243,33 @@ async fn run_agent_deploy(
     )?;
     print_status("生成安装脚本", true);
 
+    // CSR bootstrap requires the NATS CA certificate to establish the initial TLS connection.
+    // We bundle it into the deployment package so install.sh can place it into CERTS_DIR.
+    if args.nats_url.starts_with("tls://") {
+        let ca_src = std::path::Path::new("certs").join("nats-ca.pem");
+        if !ca_src.exists() {
+            return Err(anyhow::anyhow!(
+                "找不到 NATS CA 证书文件: {}\n\
+请在包含 certs/nats-ca.pem 的目录下运行 deploy（通常是执行过 `oasis-cli system init` 的目录），\
+或手动将 nats-ca.pem 放入部署包的 certs/ 目录后再执行 install.sh",
+                ca_src.display()
+            ));
+        }
+
+        let certs_dir = deploy_dir.join("certs");
+        if certs_dir.exists() {
+            std::fs::remove_dir_all(&certs_dir)?;
+        }
+        std::fs::create_dir_all(&certs_dir)?;
+        let ca_dst = certs_dir.join("nats-ca.pem");
+        std::fs::copy(&ca_src, &ca_dst)?;
+        std::fs::set_permissions(
+            &ca_dst,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        print_status("复制 NATS CA 证书", true);
+    }
+
     // 如果启用自动安装
     if args.auto_install {
         print_header("自动部署 Agent");
@@ -831,12 +858,14 @@ cp agent.env /opt/oasis/agent/
 echo "  ✔ 环境变量文件已安装"
 
 echo "► 安装证书..."
-if [ -d "certs" ]; then
-    cp -r certs/* /opt/oasis/certs/
-    chmod 600 /opt/oasis/certs/*.pem 2>/dev/null || true
+if [ -f "certs/nats-ca.pem" ]; then
+    cp certs/nats-ca.pem /opt/oasis/certs/
+    chmod 600 /opt/oasis/certs/nats-ca.pem
     echo "  ✔ 证书已安装"
 else
-    echo "  ⚠ 证书目录未找到"
+    echo "  ✗ 缺少 NATS CA 证书 (certs/nats-ca.pem)，无法进行 CSR bootstrap"
+    echo "    解决：将 server 生成的 certs/nats-ca.pem 放入部署包的 certs/ 目录"
+    exit 1
 fi
 
 echo "► 安装 systemd 服务..."

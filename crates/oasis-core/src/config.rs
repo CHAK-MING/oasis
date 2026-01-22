@@ -23,7 +23,7 @@ pub struct OasisConfig {
 impl OasisConfig {
     /// 从指定路径或当前目录中的 oasis.toml 加载配置；支持以 OASIS_ 为前缀的环境变量覆盖（Figment）
     pub fn load_config(path: Option<&str>) -> Result<Self> {
-        use figment::{providers::Env, providers::Format, providers::Toml, Figment};
+        use figment::{Figment, providers::Env, providers::Format, providers::Toml};
         use std::path::Path;
 
         // 基础：默认配置
