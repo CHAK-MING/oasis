@@ -9,7 +9,7 @@ use oasis_core::proto::{
     AdvanceRolloutRequest, AdvanceRolloutResponse, CancelBatchRequest, CancelBatchResponse,
     CommitFileMsg, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, CreateRolloutRequest,
     CreateRolloutResponse, EmptyMsg, FileApplyRequestMsg, FileChunkMsg, FileChunkResponse,
-    FileOperationResult, FileSpecMsg, FileUploadSession, GetBatchDetailsRequest,
+    FileOperationResult, FileSpecMsg, FileUploadSession, GcFilesResponse, GetBatchDetailsRequest,
     GetBatchDetailsResponse, GetFileHistoryRequest, GetFileHistoryResponse,
     GetRolloutStatusRequest, GetRolloutStatusResponse, GetTaskOutputRequest, GetTaskOutputResponse,
     ListAgentsRequest, ListAgentsResponse, ListBatchesRequest, ListBatchesResponse,
@@ -94,19 +94,27 @@ impl oasis_service_server::OasisService for OasisServer {
     }
 
     #[instrument(skip_all)]
-    async fn get_file_history(
-        &self,
-        request: Request<GetFileHistoryRequest>,
-    ) -> std::result::Result<Response<GetFileHistoryResponse>, Status> {
-        crate::interface::grpc::handlers::FileHandlers::get_file_history(self, request).await
-    }
-
-    #[instrument(skip_all)]
     async fn rollback_file(
         &self,
         request: Request<RollbackFileRequest>,
     ) -> std::result::Result<Response<FileOperationResult>, Status> {
         crate::interface::grpc::handlers::FileHandlers::rollback_file(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn gc_files(
+        &self,
+        request: Request<oasis_core::proto::GcFilesRequest>,
+    ) -> std::result::Result<Response<GcFilesResponse>, Status> {
+        crate::interface::grpc::handlers::FileHandlers::gc_files(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_file_history(
+        &self,
+        request: Request<GetFileHistoryRequest>,
+    ) -> std::result::Result<Response<GetFileHistoryResponse>, Status> {
+        crate::interface::grpc::handlers::FileHandlers::get_file_history(self, request).await
     }
 
     #[instrument(skip_all)]
