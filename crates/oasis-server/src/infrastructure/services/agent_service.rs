@@ -60,7 +60,15 @@ impl AgentService {
     ) -> Vec<oasis_core::agent_types::AgentInfo> {
         let mut out = Vec::with_capacity(agent_ids.len());
         for id in agent_ids {
-            if let Some(info) = self.get_agent_info(id) {
+            if let Some(mut info) = self.get_agent_info(id) {
+                // Merge heartbeat-derived status (source of truth) via SelectorEngine
+                if let Some(hb_info) = self.engine.get_agent_heartbeat_info(id) {
+                    info.status = hb_info.status;
+                    info.last_heartbeat = hb_info.last_heartbeat;
+                } else {
+                    // No heartbeat entry: treat as Offline with last_heartbeat unchanged
+                    info.status = oasis_core::agent_types::AgentStatus::Offline;
+                }
                 out.push(info);
             }
         }

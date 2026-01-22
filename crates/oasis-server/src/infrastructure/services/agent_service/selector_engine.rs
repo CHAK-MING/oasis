@@ -502,11 +502,15 @@ impl SelectorEngine {
         let now = chrono::Utc::now().timestamp();
 
         if let Some(cached) = self.parse_cache.get(cache_key) {
-            if now - cached.cached_at < self.cache_config.ttl_seconds as i64 {
+            let is_valid = now - cached.cached_at < self.cache_config.ttl_seconds as i64;
+            if is_valid {
                 return Ok(Some(cached.bitmap.clone()));
-            } else {
-                self.parse_cache.remove(cache_key);
             }
+            // Drop the guard explicitly before calling remove to avoid deadlock.
+            // DashMap::get() holds a read guard; calling remove() while the guard
+            // is alive can cause a deadlock when remove() tries to acquire a write lock.
+            drop(cached);
+            self.parse_cache.remove(cache_key);
         }
 
         Ok(None)
@@ -587,6 +591,14 @@ impl SelectorEngine {
         }
 
         tracing::debug!(agent_id = %agent_id, affected_cache_entries = affected, "SelectorEngine: removed agent from cached bitmaps");
+    }
+
+    /// Get heartbeat info for an agent (status and last_heartbeat timestamp)
+    pub fn get_agent_heartbeat_info(
+        &self,
+        agent_id: &AgentId,
+    ) -> Option<crate::infrastructure::monitor::heartbeat_monitor::AgentHeartbeatInfo> {
+        self.heartbeat.get_agent_heartbeat_info(agent_id)
     }
 }
 
