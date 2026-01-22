@@ -197,5 +197,13 @@ pub fn map_core_error(error: CoreError) -> Status {
             format!("验证失败: {}", message),
             "检查输入参数格式与取值范围",
         )),
+        CoreError::Conflict {
+            message,
+            severity: _,
+        } => Status::already_exists(build_msg(
+            "E_CONFLICT",
+            format!("资源冲突: {}", message),
+            "等待其他操作完成后重试，或检查资源状态",
+        )),
     }
 }

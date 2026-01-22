@@ -285,6 +285,18 @@ message RollbackFileRequest {
   FileConfigMsg config = 1;
 }
 
+message GcFilesRequest {
+  optional string source_path = 1;
+  uint32 keep_versions = 2;
+  uint32 keep_days = 3;
+}
+
+message GcFilesResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 deleted_count = 3;
+}
+
 // ===== 灰度发布相关类型定义 =====
 
 message RolloutId {
@@ -463,6 +475,7 @@ service OasisService {
   rpc CommitFileUpload(CommitFileMsg) returns (FileOperationResult);
   rpc ApplyFile(FileApplyRequestMsg) returns (FileOperationResult);
   rpc GetFileHistory(GetFileHistoryRequest) returns (GetFileHistoryResponse);
+  rpc GcFiles(GcFilesRequest) returns (GcFilesResponse);
   rpc RollbackFile(RollbackFileRequest) returns (FileOperationResult);
   rpc ClearFiles(EmptyMsg) returns (FileOperationResult);
 

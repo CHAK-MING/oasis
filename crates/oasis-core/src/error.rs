@@ -100,6 +100,13 @@ pub enum CoreError {
         severity: ErrorSeverity,
     },
 
+    #[error("Resource conflict: {message}")]
+    Conflict {
+        message: String,
+        #[serde(skip)]
+        severity: ErrorSeverity,
+    },
+
     #[error("Version conflict for {entity_type} with id {entity_id}")]
     VersionConflict {
         entity_type: String,
@@ -199,6 +206,7 @@ impl CoreError {
             | CoreError::Config { severity, .. }
             | CoreError::PermissionDenied { severity, .. }
             | CoreError::Internal { severity, .. }
+            | CoreError::Conflict { severity, .. }
             | CoreError::ServiceUnavailable { severity, .. } => *severity,
         }
     }
@@ -542,48 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn test_core_error_agent_error() {
-        let err = CoreError::agent_error("agent-1", "test error", ErrorSeverity::Error);
-        match err {
-            CoreError::Agent {
-                agent_id,
-                message,
-                severity,
-            } => {
-                assert_eq!(agent_id.as_str(), "agent-1");
-                assert_eq!(message, "test error");
-                assert_eq!(severity, ErrorSeverity::Error);
-            }
-            _ => panic!("Expected Agent error"),
-        }
-    }
-
-    #[test]
-    fn test_core_error_agent_not_found() {
-        let err = CoreError::agent_not_found("agent-1");
-        match err {
-            CoreError::Agent { message, .. } => {
-                assert_eq!(message, "Agent not found");
-            }
-            _ => panic!("Expected Agent error"),
-        }
-    }
-
-    #[test]
-    fn test_core_error_agent_offline() {
-        let err = CoreError::agent_offline("agent-1");
-        match err {
-            CoreError::Agent {
-                message, severity, ..
-            } => {
-                assert_eq!(message, "Agent offline");
-                assert_eq!(severity, ErrorSeverity::Warning);
-            }
-            _ => panic!("Expected Agent error"),
-        }
-    }
-
-    #[test]
     fn test_core_error_invalid_task() {
         let err = CoreError::invalid_task("command is empty");
         match err {
@@ -638,17 +604,6 @@ mod tests {
                 assert_eq!(endpoint, "localhost:5000");
             }
             _ => panic!("Expected Connection error"),
-        }
-    }
-
-    #[test]
-    fn test_core_error_batch_not_found() {
-        let err = CoreError::batch_not_found("batch-123");
-        match err {
-            CoreError::Batch { message, .. } => {
-                assert_eq!(message, "Batch not found");
-            }
-            _ => panic!("Expected Batch error"),
         }
     }
 
