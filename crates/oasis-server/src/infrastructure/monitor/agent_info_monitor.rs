@@ -10,6 +10,7 @@ use oasis_core::{
 };
 use prost::Message;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -28,8 +29,10 @@ pub struct AgentInfoMonitor {
     index_system: Arc<DashMap<(String, String), roaring::RoaringBitmap>>, // (sys_k, v) -> bitmap
     index_groups: Arc<DashMap<String, roaring::RoaringBitmap>>,           // group -> bitmap
 
-    // ID 反向映射
+    // ID 双向映射
+    agent_id_to_id32: Arc<DashMap<AgentId, u32>>,
     id32_to_agent_id: Arc<DashMap<u32, AgentId>>,
+    next_id32: Arc<AtomicU32>,
 
     // 延迟清理机制 - 标记待清理的 agent ID，避免删除时全表扫描
     dirty_agents: Arc<RwLock<roaring::RoaringBitmap>>,
@@ -45,7 +48,9 @@ impl AgentInfoMonitor {
             index_labels: Arc::new(DashMap::new()),
             index_system: Arc::new(DashMap::new()),
             index_groups: Arc::new(DashMap::new()),
+            agent_id_to_id32: Arc::new(DashMap::new()),
             id32_to_agent_id: Arc::new(DashMap::new()),
+            next_id32: Arc::new(AtomicU32::new(1)), // Start from 1
             dirty_agents: Arc::new(RwLock::new(roaring::RoaringBitmap::new())),
             shutdown_token,
         }
@@ -62,7 +67,7 @@ impl AgentInfoMonitor {
     pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
         let monitor = self.clone();
         tokio::spawn(async move {
-            let _cleanup_handle = monitor.start_cache_cleanup();
+            let cleanup_handle = monitor.start_cache_cleanup();
 
             let monitor_handle = async {
                 if let Err(e) = monitor.start().await {
@@ -75,6 +80,7 @@ impl AgentInfoMonitor {
                 _ = monitor.shutdown_token.cancelled() => {
                     info!("AgentInfoMonitor shutdown requested");
                 }
+                _ = cleanup_handle => {}
                 _ = monitor_handle => {}
             }
         })
@@ -124,7 +130,9 @@ impl AgentInfoMonitor {
         let index_labels = self.index_labels.clone();
         let index_system = self.index_system.clone();
         let index_groups = self.index_groups.clone();
+        let agent_id_to_id32 = self.agent_id_to_id32.clone();
         let id32_to_agent_id = self.id32_to_agent_id.clone();
+        let next_id32 = self.next_id32.clone();
         let dirty_agents = self.dirty_agents.clone();
 
         tokio::spawn(async move {
@@ -168,7 +176,9 @@ impl AgentInfoMonitor {
                                                                 &index_labels,
                                                                 &index_system,
                                                                 &index_groups,
+                                                                &agent_id_to_id32,
                                                                 &id32_to_agent_id,
+                                                                &next_id32,
                                                                 &dirty_agents,
                                                                 agent_id,
                                                                 info,
@@ -182,6 +192,7 @@ impl AgentInfoMonitor {
                                                 async_nats::jetstream::kv::Operation::Delete => {
                                                     Self::remove_info_static(
                                                         &info_cache,
+                                                        &agent_id_to_id32,
                                                         &id32_to_agent_id,
                                                         &dirty_agents,
                                                         &agent_id,
@@ -229,7 +240,9 @@ impl AgentInfoMonitor {
             &self.index_labels,
             &self.index_system,
             &self.index_groups,
+            &self.agent_id_to_id32,
             &self.id32_to_agent_id,
+            &self.next_id32,
             &self.dirty_agents,
             agent_id,
             info,
@@ -237,17 +250,46 @@ impl AgentInfoMonitor {
         .await;
     }
 
+    fn get_or_assign_id32_static(
+        agent_id_to_id32: &Arc<DashMap<AgentId, u32>>,
+        id32_to_agent_id: &Arc<DashMap<u32, AgentId>>,
+        next_id32: &Arc<AtomicU32>,
+        agent_id: &AgentId,
+    ) -> u32 {
+        if let Some(id) = agent_id_to_id32.get(agent_id) {
+            return *id;
+        }
+
+        // Use entry API to avoid races
+        match agent_id_to_id32.entry(agent_id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let id = next_id32.fetch_add(1, Ordering::SeqCst);
+                entry.insert(id);
+                id32_to_agent_id.insert(id, agent_id.clone());
+                id
+            }
+        }
+    }
+
     async fn insert_info_static(
         info_cache: &Arc<DashMap<AgentId, Arc<AgentInfo>>>,
         index_labels: &Arc<DashMap<(String, String), roaring::RoaringBitmap>>,
         index_system: &Arc<DashMap<(String, String), roaring::RoaringBitmap>>,
         index_groups: &Arc<DashMap<String, roaring::RoaringBitmap>>,
+        agent_id_to_id32: &Arc<DashMap<AgentId, u32>>,
         id32_to_agent_id: &Arc<DashMap<u32, AgentId>>,
+        next_id32: &Arc<AtomicU32>,
         dirty_agents: &Arc<RwLock<roaring::RoaringBitmap>>,
         agent_id: AgentId,
         info: AgentInfo,
     ) {
-        let id32 = Self::to_bitmap_key(&agent_id);
+        let id32 = Self::get_or_assign_id32_static(
+            agent_id_to_id32,
+            id32_to_agent_id,
+            next_id32,
+            &agent_id,
+        );
 
         // 如果是更新操作，先将旧数据标记为脏（延迟清理）
         if info_cache.contains_key(&agent_id) {
@@ -255,9 +297,8 @@ impl AgentInfoMonitor {
             dirty.insert(id32);
         }
 
-        // 更新缓存和反向映射
+        // 更新缓存
         info_cache.insert(agent_id.clone(), Arc::new(info.clone()));
-        id32_to_agent_id.insert(id32, agent_id.clone());
 
         // 解析 info map：__groups, __system_* 与普通 labels
         let mut groups: HashSet<String> = HashSet::new();
@@ -284,19 +325,25 @@ impl AgentInfoMonitor {
     /// 延迟删除：不立即清理索引，只标记为脏，后台批量清理
     async fn remove_info_static(
         info_cache: &Arc<DashMap<AgentId, Arc<AgentInfo>>>,
+        agent_id_to_id32: &Arc<DashMap<AgentId, u32>>,
         id32_to_agent_id: &Arc<DashMap<u32, AgentId>>,
         dirty_agents: &Arc<RwLock<roaring::RoaringBitmap>>,
         agent_id: &AgentId,
     ) {
-        let id32 = Self::to_bitmap_key(agent_id);
+        // 从缓存中获取 id32
+        let id32_opt = agent_id_to_id32.get(agent_id).map(|v| *v);
 
         // 从缓存中移除
         info_cache.remove(agent_id);
-        id32_to_agent_id.remove(&id32);
 
-        // 标记为脏，等待后台清理 - O(1) 操作！
-        let mut dirty = dirty_agents.write().await;
-        dirty.insert(id32);
+        if let Some(id32) = id32_opt {
+            agent_id_to_id32.remove(agent_id);
+            id32_to_agent_id.remove(&id32);
+
+            // 标记为脏，等待后台清理 - O(1) 操作！
+            let mut dirty = dirty_agents.write().await;
+            dirty.insert(id32);
+        }
 
         debug!("Agent {} marked for lazy cleanup", agent_id);
     }
@@ -356,15 +403,8 @@ impl AgentInfoMonitor {
         self.index_groups.clone()
     }
 
-    fn to_bitmap_key(agent_id: &AgentId) -> u32 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        agent_id.hash(&mut hasher);
-        (hasher.finish() & 0xFFFF_FFFF) as u32
-    }
-
     pub fn get_id32(&self, agent_id: &AgentId) -> Option<u32> {
-        Some(Self::to_bitmap_key(agent_id))
+        self.agent_id_to_id32.get(agent_id).map(|v| *v)
     }
 
     pub fn get_agent_id_by_id32(&self, id32: u32) -> Option<AgentId> {
@@ -448,14 +488,15 @@ impl AgentInfoMonitor {
         }
     }
 
+    /// Returns bitmap of all known agent id32 values.
+    /// Iterates id32_to_agent_id only to avoid ABBA deadlock:
+    /// - watcher path locks agent_id_to_id32 then info_cache
+    /// - selector path must NOT lock agent_id_to_id32 while holding info_cache
     pub fn get_all_agents_bitmap(&self) -> roaring::RoaringBitmap {
         let mut bitmap = roaring::RoaringBitmap::new();
 
-        // 遍历所有在缓存中的 agent
-        for entry in self.info_cache.iter() {
-            let agent_id = entry.key();
-            let id32 = Self::to_bitmap_key(agent_id);
-            bitmap.insert(id32);
+        for entry in self.id32_to_agent_id.iter() {
+            bitmap.insert(*entry.key());
         }
 
         bitmap

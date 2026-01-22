@@ -68,16 +68,62 @@ impl HeartbeatMonitor {
         }
     }
 
+    async fn initial_load(&self) -> Result<()> {
+        let store = self
+            .jetstream
+            .get_key_value(JS_KV_AGENT_HEARTBEAT)
+            .await
+            .map_err(|e| oasis_core::error::CoreError::Nats {
+                message: format!("Failed to get heartbeat store: {}", e),
+                severity: oasis_core::error::ErrorSeverity::Error,
+            })?;
+
+        let mut keys = store.keys().await.map_err(|e| oasis_core::error::CoreError::Nats {
+            message: format!("Failed to list heartbeat keys: {}", e),
+            severity: oasis_core::error::ErrorSeverity::Error,
+        })?;
+
+        while let Some(key) = keys.next().await {
+            match key {
+                Ok(k) => {
+                    let agent_id = AgentId::from(k.clone());
+                    if let Ok(Some(bytes)) = store.get(&k).await {
+                        if let Ok(timestamp_str) = String::from_utf8(bytes.to_vec()) {
+                            if let Ok(last_heartbeat) = timestamp_str.parse::<i64>() {
+                                self.status_cache
+                                    .insert(agent_id.clone(), AgentHeartbeatInfo::online(last_heartbeat));
+                            } else {
+                                warn!(
+                                    "Invalid heartbeat timestamp for {}: {}",
+                                    agent_id, timestamp_str
+                                );
+                            }
+                        } else {
+                            warn!("Invalid heartbeat data for {}", agent_id);
+                        }
+                    }
+                }
+                Err(e) => warn!("Failed to get key from stream: {}", e),
+            }
+        }
+
+        info!("Loaded {} agent heartbeats", self.status_cache.len());
+        Ok(())
+    }
+
     /// 启动心跳监控器
     pub async fn start(&self) -> Result<()> {
         info!(
             "Starting HeartbeatMonitor (timeout: {}s)",
             self.heartbeat_timeout
         );
-        // 1. 启动定期扫描任务
+        // 1. 加载现有心跳数据
+        self.initial_load().await?;
+
+        // 2. 启动定期扫描任务
         self.start_periodic_scan().await?;
 
-        // 2. 启动心跳数据监听器
+        // 3. 启动心跳数据监听器
         self.start_heartbeat_watcher().await?;
 
         info!("HeartbeatMonitor started successfully");
@@ -278,5 +324,9 @@ impl HeartbeatMonitor {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    pub fn get_agent_heartbeat_info(&self, agent_id: &AgentId) -> Option<AgentHeartbeatInfo> {
+        self.status_cache.get(agent_id).map(|entry| entry.value().clone())
     }
 }

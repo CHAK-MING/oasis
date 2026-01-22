@@ -1,8 +1,15 @@
 use oasis_core::shutdown::GracefulShutdown;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
+
+#[derive(Debug)]
+struct ServiceCompletion {
+    name: String,
+    priority: ServicePriority,
+    result: std::result::Result<(), tokio::task::JoinError>,
+}
 
 /// 服务优先级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -20,15 +27,16 @@ pub enum ServicePriority {
 /// 负责统一管理所有服务的生命周期，包括：
 /// - 服务注册和启动
 /// - 优雅关闭处理
-/// - 服务依赖管理
 /// - 关闭超时处理
 pub struct LifecycleManager {
     /// 优雅关闭管理器
     shutdown: GracefulShutdown,
     /// 任务集合（使用 JoinSet 管理）
-    tasks: JoinSet<()>,
+    tasks: JoinSet<ServiceCompletion>,
     /// 服务元数据
     service_metadata: HashMap<String, ServicePriority>,
+    /// 仍在运行/等待退出的服务集合（用于超时排障）
+    remaining_services: HashSet<String>,
     /// 关闭超时时间（秒）
     shutdown_timeout_secs: u64,
 }
@@ -40,6 +48,7 @@ impl LifecycleManager {
             shutdown: GracefulShutdown::new(),
             tasks: JoinSet::new(),
             service_metadata: HashMap::new(),
+            remaining_services: HashSet::new(),
             shutdown_timeout_secs: 30,
         }
     }
@@ -63,9 +72,16 @@ impl LifecycleManager {
         handle: JoinHandle<()>,
     ) {
         info!("Registering service: {} (priority: {:?})", name, priority);
-        self.service_metadata.insert(name, priority);
+        self.service_metadata.insert(name.clone(), priority);
+        self.remaining_services.insert(name.clone());
+
         self.tasks.spawn(async move {
-            let _ = handle.await;
+            let result = handle.await;
+            ServiceCompletion {
+                name,
+                priority,
+                result,
+            }
         });
     }
 
@@ -116,24 +132,67 @@ impl LifecycleManager {
         let service_count = self.tasks.len();
         info!("Starting graceful shutdown of {} services", service_count);
 
+        // Safety: always notify all services to exit, even if caller invokes this
+        // directly (not via signal listener).
+        self.shutdown.token.cancel();
+
         let timeout = tokio::time::Duration::from_secs(self.shutdown_timeout_secs);
         let result = tokio::time::timeout(timeout, async {
-            while let Some(result) = self.tasks.join_next().await {
-                match result {
-                    Ok(_) => info!("Service completed successfully"),
-                    Err(e) if e.is_cancelled() => info!("Service was cancelled"),
-                    Err(e) => warn!("Service failed: {}", e),
+            while let Some(join_result) = self.tasks.join_next().await {
+                match join_result {
+                    Ok(completion) => {
+                        self.remaining_services.remove(&completion.name);
+
+                        match completion.result {
+                            Ok(()) => info!(
+                                service = %completion.name,
+                                priority = ?completion.priority,
+                                "Service completed successfully"
+                            ),
+                            Err(e) if e.is_cancelled() => info!(
+                                service = %completion.name,
+                                priority = ?completion.priority,
+                                "Service was cancelled"
+                            ),
+                            Err(e) if e.is_panic() => warn!(
+                                service = %completion.name,
+                                priority = ?completion.priority,
+                                error = %e,
+                                "Service panicked"
+                            ),
+                            Err(e) => warn!(
+                                service = %completion.name,
+                                priority = ?completion.priority,
+                                error = %e,
+                                "Service failed"
+                            ),
+                        }
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        info!(error = %e, "Lifecycle wrapper task was cancelled")
+                    }
+                    Err(e) => warn!(error = %e, "Lifecycle wrapper task failed"),
                 }
             }
         })
         .await;
 
         if result.is_err() {
-            warn!("Graceful shutdown timeout reached, aborting remaining tasks");
+            warn!(
+                remaining_services = ?self.remaining_services,
+                "Graceful shutdown timeout reached, aborting remaining tasks"
+            );
             self.tasks.abort_all();
         }
 
-        info!("All services shut down successfully");
+        if self.remaining_services.is_empty() {
+            info!("All services shut down successfully");
+        } else {
+            warn!(
+                remaining_services = ?self.remaining_services,
+                "Lifecycle manager completed with remaining services"
+            );
+        }
         Ok(())
     }
 

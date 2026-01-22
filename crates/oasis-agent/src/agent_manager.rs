@@ -1,13 +1,10 @@
-use crate::{
-    file_manager::FileManager, nats_client::NatsClient,
-    task_manager::TaskManager,
-};
+use crate::{file_manager::FileManager, nats_client::NatsClient, task_manager::TaskManager};
 use if_addrs::get_if_addrs;
 use oasis_core::{
     agent_types::{AgentInfo, AgentStatus},
+    constants::{JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, kv_key_facts, kv_key_heartbeat},
     core_types::AgentId,
     error::Result,
-    constants::{JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, kv_key_facts, kv_key_heartbeat},
 };
 use std::{collections::HashMap, net::UdpSocket};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -108,7 +105,7 @@ impl AgentManager {
                         error!("Failed to send heartbeat: {}", e);
                     }
                 }
-                
+
                 result = &mut task_handle, if !task_done => {
                     task_done = true;
                     match result {
@@ -131,7 +128,7 @@ impl AgentManager {
                         }
                     }
                 }
-                
+
                 result = &mut file_handle, if !file_done => {
                     file_done = true;
                     match result {
@@ -154,7 +151,7 @@ impl AgentManager {
                         }
                     }
                 }
-                
+
                 _ = self.shutdown_token.cancelled() => {
                     info!("Shutdown requested, stopping services...");
                     break;
@@ -177,10 +174,13 @@ impl AgentManager {
             .await?;
         let key = kv_key_heartbeat(self.agent_id.as_str());
         let timestamp = chrono::Utc::now().timestamp();
-        
-        let heartbeat_data = format!("{}|{:?}", timestamp, status);
+
+        let heartbeat_data = timestamp.to_string();
         kv.put(&key, heartbeat_data.into()).await?;
-        debug!("Sent heartbeat for agent: {} with status: {:?}", self.agent_id, status);
+        debug!(
+            "Sent heartbeat for agent: {} with status: {:?}",
+            self.agent_id, status
+        );
 
         Ok(())
     }
