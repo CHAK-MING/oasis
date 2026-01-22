@@ -31,6 +31,7 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
         name: JS_STREAM_TASKS.to_string(),
         subjects: vec![
             "tasks.exec.>".to_string(), // 执行任务 (tasks.exec.default, tasks.exec.agent.<id>)
+            "tasks.cancel.>".to_string(), // 取消任务 (tasks.cancel.agent.<id>.<task_id>)
         ],
         retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
         max_age: Duration::from_secs(tasks_max_age_sec),
@@ -86,7 +87,8 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
             s
         }
         Err(e) => {
-            warn!("Artifacts object store not found, creating: {:?}", e);
+            // Expected on first startup (fresh JetStream state).
+            info!("Artifacts object store not found, creating: {:?}", e);
             let cfg = async_nats::jetstream::object_store::Config {
                 bucket: JS_OBJ_ARTIFACTS.to_string(),
                 description: Some("File artifacts storage".to_string()),
@@ -247,7 +249,8 @@ async fn ensure_or_update_stream(
             Ok(())
         }
         Err(e) => {
-            warn!("Stream {} not found, creating: {:?}", name, e);
+            // Expected on first startup (fresh JetStream state).
+            info!("Stream {} not found, creating: {:?}", name, e);
             // 不存在则创建（带 backoff）
             let backoff = oasis_core::backoff::kv_operations_backoff().build();
             (|| {
