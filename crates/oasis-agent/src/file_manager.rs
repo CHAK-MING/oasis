@@ -260,11 +260,9 @@ impl FileManager {
         Ok(())
     }
 
-    /// 直接写入文件
     async fn direct_write(&self, dest_path: &Path, data: &[u8]) -> Result<()> {
-        debug!("Direct write to: {}", dest_path.display());
+        debug!("Atomic write to: {}", dest_path.display());
 
-        // 确保目标目录存在
         if let Some(parent_dir) = dest_path.parent() {
             fs::create_dir_all(parent_dir)
                 .await
@@ -274,12 +272,28 @@ impl FileManager {
                 })?;
         }
 
-        fs::write(dest_path, data)
-            .await
-            .map_err(|e| CoreError::Io {
-                message: format!("Failed to write file: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
+        use atomicwrites::{AtomicFile, OverwriteBehavior};
+        use std::io::Write;
+
+        let dest_path_buf = dest_path.to_path_buf();
+        let data_clone = data.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let atomic_file = AtomicFile::new(&dest_path_buf, OverwriteBehavior::AllowOverwrite);
+            atomic_file.write(|f| {
+                f.write_all(&data_clone)?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| CoreError::Io {
+            message: format!("Failed to spawn blocking task: {}", e),
+            severity: ErrorSeverity::Error,
+        })?
+        .map_err(|e: atomicwrites::Error<std::io::Error>| CoreError::Io {
+            message: format!("Failed to write file atomically: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
 
         Ok(())
     }

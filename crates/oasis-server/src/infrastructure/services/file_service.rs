@@ -7,23 +7,27 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+use crate::infrastructure::file_lock::FileLockManager;
 use backon::Retryable;
 use futures::StreamExt;
 use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{FILES_SUBJECT_PREFIX, file_types::*};
 
-/// 文件仓库 - 管理文件的上传、存储和分发
 pub struct FileService {
     jetstream: Arc<Context>,
+    lock_manager: FileLockManager,
 }
 
 impl FileService {
     pub async fn new(jetstream: Arc<Context>) -> Result<Self> {
-        // 确保对象存储存在
         Self::ensure_object_store(&jetstream).await?;
+        let lock_manager = FileLockManager::new(jetstream.clone()).await?;
 
-        Ok(Self { jetstream })
+        Ok(Self {
+            jetstream,
+            lock_manager,
+        })
     }
 
     /// 确保对象存储已创建
@@ -63,57 +67,62 @@ impl FileService {
     ) -> Result<FileOperationResult> {
         debug!("Uploading file: {} ({} bytes)", source_path, data.len());
 
-        // 生成路径hash和对象key
-        let mut path_hasher = Sha256::new();
-        path_hasher.update(source_path.as_bytes());
-        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-        let filename = std::path::Path::new(source_path)
-            .file_name()
-            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
-            .to_string_lossy();
-        let revision = chrono::Utc::now().timestamp() as u64;
-        let object_key = format!("{}/{}.v{}", path_hash, filename, revision);
+        let lock = self.lock_manager.acquire_lock(source_path).await?;
 
-        // 计算文件的 SHA256
-        let mut hasher = Sha256::new();
-        hasher.update(&data);
-        let checksum = format!("{:x}", hasher.finalize());
+        let result = async {
+            let mut path_hasher = Sha256::new();
+            path_hasher.update(source_path.as_bytes());
+            let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
+            let filename = std::path::Path::new(source_path)
+                .file_name()
+                .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
+                .to_string_lossy();
+            let revision = chrono::Utc::now().timestamp() as u64;
+            let object_key = format!("{}/{}.v{}", path_hash, filename, revision);
 
-        // 获取对象存储
-        let store = self.get_object_store().await?;
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let checksum = format!("{:x}", hasher.finalize());
 
-        let put_res = (|| async {
-            store
-                .put(object_key.as_str(), &mut data.as_slice())
-                .await
-                .map_err(|e| CoreError::Internal {
-                    message: format!("Failed to upload file: {}", e),
-                    severity: ErrorSeverity::Error,
-                })
-        })
-        .retry(&fast_backoff().build())
-        .await;
+            let store = self.get_object_store().await?;
 
-        match put_res {
-            Ok(info) => {
-                info!(
-                    "Successfully uploaded file: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
-                    source_path, object_key, info.nuid, info.size, checksum
-                );
+            let put_res = (|| async {
+                store
+                    .put(object_key.as_str(), &mut data.as_slice())
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to upload file: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })
+            })
+            .retry(&fast_backoff().build())
+            .await;
 
-                Ok(FileOperationResult::success(
-                    format!(
-                        "File uploaded successfully: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
+            match put_res {
+                Ok(info) => {
+                    info!(
+                        "Successfully uploaded file: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
                         source_path, object_key, info.nuid, info.size, checksum
-                    ),
-                    revision,
-                ))
-            }
-            Err(e) => {
-                error!("Failed to upload file {}: {}", source_path, e);
-                Err(e)
+                    );
+
+                    Ok(FileOperationResult::success(
+                        format!(
+                            "File uploaded successfully: {} -> {} (nuid: {}, {} bytes, SHA256: {})",
+                            source_path, object_key, info.nuid, info.size, checksum
+                        ),
+                        revision,
+                    ))
+                }
+                Err(e) => {
+                    error!("Failed to upload file {}: {}", source_path, e);
+                    Err(e)
+                }
             }
         }
+        .await;
+
+        lock.release().await.ok();
+        result
     }
 
     /// 应用到对应的 agents
@@ -495,5 +504,338 @@ impl FileService {
             ),
             config.revision,
         ))
+    }
+
+    pub async fn gc_old_versions(
+        &self,
+        source_path: Option<String>,
+        keep_versions: u32,
+        keep_days: u32,
+    ) -> Result<usize> {
+        debug!(
+            "GC: source_path={:?}, keep_versions={}, keep_days={}",
+            source_path, keep_versions, keep_days
+        );
+
+        let store = self.get_object_store().await?;
+        let mut list = store.list().await.map_err(|e| CoreError::Internal {
+            message: format!("Failed to list objects: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut deleted = 0;
+
+        use std::collections::HashMap;
+        
+        let mut file_groups: HashMap<
+            (String, String),
+            Vec<async_nats::jetstream::object_store::ObjectInfo>,
+        > = HashMap::new();
+        let mut pointer_objects: HashMap<(String, String), async_nats::jetstream::object_store::ObjectInfo> = HashMap::new();
+
+        while let Some(result) = list.next().await {
+            if let Ok(info) = result {
+                let parts: Vec<&str> = info.name.split('/').collect();
+                if parts.len() >= 2 {
+                    let path_hash = parts[0].to_string();
+                    let filename_part = parts[1];
+                    
+                    if filename_part.ends_with(".current") {
+                        let filename = filename_part.strip_suffix(".current").unwrap_or(filename_part).to_string();
+                        pointer_objects.insert((path_hash, filename), info);
+                    } else if let Some(base_name) = filename_part.split(".v").next() {
+                        let filename = base_name.to_string();
+                        file_groups
+                            .entry((path_hash, filename))
+                            .or_default()
+                            .push(info);
+                    }
+                }
+            }
+        }
+
+        for ((path_hash, filename), mut versions) in file_groups {
+            if let Some(ref sp) = source_path {
+                let mut path_hasher = Sha256::new();
+                path_hasher.update(sp.as_bytes());
+                let target_hash = &format!("{:x}", path_hasher.finalize())[..8];
+                if path_hash != target_hash {
+                    continue;
+                }
+            }
+
+            versions.sort_by_key(|v| std::cmp::Reverse(v.modified));
+
+            let pointer_key = (path_hash.clone(), filename.clone());
+            let mut active_revision: Option<u64> = None;
+            let mut needs_pointer_repair = false;
+
+            if let Some(pointer_info) = pointer_objects.get(&pointer_key) {
+                match store.get(&pointer_info.name).await {
+                    Ok(mut obj) => {
+                        let mut buf = Vec::new();
+                        use tokio::io::AsyncReadExt;
+                        if let Ok(_) = obj.read_to_end(&mut buf).await {
+                            let s = String::from_utf8_lossy(&buf);
+                            active_revision = s.trim().parse::<u64>().ok();
+                        }
+                    }
+                    Err(_) => {
+                        warn!("GC: Failed to read pointer {}", pointer_info.name);
+                    }
+                }
+            }
+
+            let protected_revision: u64;
+            if let Some(active) = active_revision {
+                let exists = versions.iter().any(|v| {
+                    v.name.rsplit(".v").next()
+                        .and_then(|r| r.parse::<u64>().ok())
+                        .map(|r| r == active)
+                        .unwrap_or(false)
+                });
+                
+                if exists {
+                    protected_revision = active;
+                } else {
+                    warn!("GC: Pointer for {}/{} points to non-existent revision {}", path_hash, filename, active);
+                    needs_pointer_repair = true;
+                    protected_revision = versions.first()
+                        .and_then(|v| v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()))
+                        .unwrap_or(0);
+                }
+            } else {
+                if !versions.is_empty() {
+                    needs_pointer_repair = true;
+                    protected_revision = versions.first()
+                        .and_then(|v| v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()))
+                        .unwrap_or(0);
+                } else {
+                    continue;
+                }
+            }
+
+            // Build revisions_sorted for the helper
+            let revisions_sorted: Vec<(u64, i64)> = versions.iter()
+                .filter_map(|v| {
+                    let rev = v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok())?;
+                    let modified_ts = v.modified.as_ref().map(|t| t.unix_timestamp()).unwrap_or(0);
+                    Some((rev, modified_ts))
+                })
+                .collect();
+
+            let keep_set = compute_gc_keep_set(
+                revisions_sorted,
+                protected_revision,
+                keep_versions,
+                keep_days,
+                now_ts,
+            );
+
+            for version in &versions {
+                if let Some(rev) = version.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()) {
+                    if !keep_set.contains(&rev) {
+                        match store.delete(&version.name).await {
+                            Ok(_) => {
+                                debug!("GC: deleted {}", version.name);
+                                deleted += 1;
+                            }
+                            Err(e) => {
+                                warn!("GC: failed to delete {}: {}", version.name, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if needs_pointer_repair {
+                let pointer_key_str = format!("{}/{}.current", path_hash, filename);
+                let content = protected_revision.to_string().into_bytes();
+                match store.put(pointer_key_str.as_str(), &mut content.as_slice()).await {
+                    Ok(_) => {
+                        info!("GC: repaired pointer {} -> {}", pointer_key_str, protected_revision);
+                    }
+                    Err(e) => {
+                        warn!("GC: failed to repair pointer {}: {}", pointer_key_str, e);
+                    }
+                }
+            }
+        }
+
+        info!("GC: deleted {} old file versions", deleted);
+        Ok(deleted)
+    }
+}
+
+/// Computes which revisions to keep during garbage collection.
+///
+/// # Arguments
+/// * `revisions_sorted` - List of (revision, modified_timestamp) tuples, sorted newest-first
+/// * `active_revision` - The currently active revision (must always be kept)
+/// * `keep_versions` - Number of newest revisions to keep (minimum 1)
+/// * `keep_days` - Number of days to keep revisions (0 = disabled)
+/// * `now_ts` - Current timestamp for calculating age threshold
+///
+/// # Returns
+/// A HashSet of revision numbers that should be kept (not deleted)
+fn compute_gc_keep_set(
+    revisions_sorted: Vec<(u64, i64)>,
+    active_revision: u64,
+    keep_versions: u32,
+    keep_days: u32,
+    now_ts: i64,
+) -> std::collections::HashSet<u64> {
+    use std::collections::HashSet;
+    let mut keep_set: HashSet<u64> = HashSet::new();
+    
+    // Always keep the active revision (protects against GC-after-rollback bug)
+    keep_set.insert(active_revision);
+
+    // Keep the newest revisions up to keep_versions count
+    let min_keep = std::cmp::max(1, keep_versions) as usize;
+    let mut kept_count = if keep_set.contains(&active_revision) { 1 } else { 0 };
+
+    for (rev, _modified_ts) in &revisions_sorted {
+        if kept_count >= min_keep {
+            break;
+        }
+        if keep_set.insert(*rev) {
+            kept_count += 1;
+        }
+    }
+
+    // Additionally keep any revisions within keep_days time window
+    if keep_days > 0 {
+        let cutoff_ts = now_ts - (keep_days as i64 * 86400);
+        for (rev, modified_ts) in &revisions_sorted {
+            if *modified_ts >= cutoff_ts {
+                keep_set.insert(*rev);
+            }
+        }
+    }
+
+    keep_set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gc_keep_set_active_old_revision_keep_versions_1() {
+        // Scenario: v1 is active (old), v2 is newest, keep_versions=1, keep_days=0
+        // Expected: keep only v1 (active must be preserved even though not newest)
+        let revisions = vec![
+            (2u64, 2000i64), // v2 newest
+            (1u64, 1000i64), // v1 older
+        ];
+        let active_revision = 1u64;
+        let keep_versions = 1u32;
+        let keep_days = 0u32;
+        let now_ts = 3000i64;
+
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        // Must keep v1 (active), even though it's not the newest
+        assert!(keep_set.contains(&1), "Active revision v1 must be kept");
+        assert_eq!(keep_set.len(), 1, "Should keep exactly 1 revision when keep_versions=1");
+    }
+
+    #[test]
+    fn test_gc_keep_set_active_old_revision_keep_versions_2() {
+        // Scenario: v1 is active (old), v2 is newest, keep_versions=2, keep_days=0
+        // Expected: keep both v1 and v2
+        let revisions = vec![
+            (2u64, 2000i64), // v2 newest
+            (1u64, 1000i64), // v1 older
+        ];
+        let active_revision = 1u64;
+        let keep_versions = 2u32;
+        let keep_days = 0u32;
+        let now_ts = 3000i64;
+
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(keep_set.contains(&1), "Active revision v1 must be kept");
+        assert!(keep_set.contains(&2), "Newest revision v2 should be kept");
+        assert_eq!(keep_set.len(), 2, "Should keep both revisions when keep_versions=2");
+    }
+
+    #[test]
+    fn test_gc_keep_set_keep_days_retains_recent() {
+        // Scenario: v1 is active (old, outside window), v2 is new (within window)
+        // keep_versions=1, keep_days=1 (86400 seconds)
+        // Expected: keep both v1 (active) and v2 (within time window)
+        let now_ts = 100000i64;
+        let revisions = vec![
+            (2u64, now_ts - 1000), // v2 very recent (within 1 day)
+            (1u64, now_ts - 90000), // v1 old (outside 1 day window)
+        ];
+        let active_revision = 1u64;
+        let keep_versions = 1u32;
+        let keep_days = 1u32; // 1 day = 86400 seconds
+        
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(keep_set.contains(&1), "Active revision v1 must be kept even if outside time window");
+        assert!(keep_set.contains(&2), "Recent revision v2 within time window must be kept");
+        assert_eq!(keep_set.len(), 2, "Should keep both active and recent revisions");
+    }
+
+    #[test]
+    fn test_gc_keep_set_multiple_revisions_active_newest() {
+        // Scenario: v3 is active (also newest), v2, v1 are older
+        // keep_versions=2, keep_days=0
+        // Expected: keep v3 (active/newest) and v2
+        let revisions = vec![
+            (3u64, 3000i64), // v3 newest and active
+            (2u64, 2000i64), // v2
+            (1u64, 1000i64), // v1
+        ];
+        let active_revision = 3u64;
+        let keep_versions = 2u32;
+        let keep_days = 0u32;
+        let now_ts = 4000i64;
+
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(keep_set.contains(&3), "Active revision v3 must be kept");
+        assert!(keep_set.contains(&2), "Second newest revision v2 should be kept");
+        assert!(!keep_set.contains(&1), "Oldest revision v1 should not be kept");
+        assert_eq!(keep_set.len(), 2);
+    }
+
+    #[test]
+    fn test_gc_keep_set_empty_revisions() {
+        // Edge case: no revisions
+        let revisions = vec![];
+        let active_revision = 1u64;
+        let keep_versions = 1u32;
+        let keep_days = 0u32;
+        let now_ts = 1000i64;
+
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(keep_set.contains(&1), "Active revision must always be in keep set");
+        assert_eq!(keep_set.len(), 1);
+    }
+
+    #[test]
+    fn test_gc_keep_set_keep_versions_zero_defaults_to_one() {
+        // keep_versions=0 should behave as keep_versions=1 (max(1, keep_versions))
+        let revisions = vec![
+            (2u64, 2000i64),
+            (1u64, 1000i64),
+        ];
+        let active_revision = 1u64;
+        let keep_versions = 0u32;
+        let keep_days = 0u32;
+        let now_ts = 3000i64;
+
+        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(keep_set.contains(&1), "Active revision must be kept");
+        assert_eq!(keep_set.len(), 1, "Should keep at least 1 revision even when keep_versions=0");
     }
 }

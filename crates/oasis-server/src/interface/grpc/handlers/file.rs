@@ -245,11 +245,6 @@ impl FileHandlers {
             return Err(Status::invalid_argument("文件大小必须大于 0"));
         }
 
-        if req.size > 100 * 1024 * 1024 {
-            // 100MB 限制
-            return Err(Status::invalid_argument("文件过大 (最大 100MB)"));
-        }
-
         // 生成上传 ID
         let upload_id = uuid::Uuid::now_v7().to_string();
 
@@ -444,7 +439,7 @@ impl FileHandlers {
 
         Ok(Response::new(oasis_core::proto::FileOperationResult {
             success: true,
-            message: format!("成功清理 {} 个文件", deleted_count),
+            message: format!("成功清理 {} 个对象", deleted_count),
             revision: 0,
         }))
     }
@@ -521,6 +516,28 @@ impl FileHandlers {
             success: result.success,
             message: result.message,
             revision: result.revision,
+        }))
+    }
+
+    /// GC 清理旧版本文件
+    #[instrument(skip_all)]
+    pub async fn gc_files(
+        srv: &OasisServer,
+        request: Request<oasis_core::proto::GcFilesRequest>,
+    ) -> std::result::Result<Response<oasis_core::proto::GcFilesResponse>, Status> {
+        let req = request.into_inner();
+
+        let deleted_count = srv
+            .context()
+            .file_service
+            .gc_old_versions(req.source_path, req.keep_versions, req.keep_days)
+            .await
+            .map_err(|e| Status::internal(format!("GC failed: {}", e)))?;
+
+        Ok(Response::new(oasis_core::proto::GcFilesResponse {
+            success: true,
+            message: format!("Successfully deleted {} old versions", deleted_count),
+            deleted_count: deleted_count as u64,
         }))
     }
 }

@@ -1,6 +1,6 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{confirm_action, print_header, print_info};
+use crate::ui::{confirm_action, print_header, print_info, print_warning};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
@@ -51,6 +51,8 @@ pub enum FileCmd {
     Rollback(RollbackArgs),
     /// 清空文件仓库
     Clear,
+    /// 清理旧版本文件
+    Gc(GcArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -115,6 +117,21 @@ pub struct RollbackArgs {
 #[derive(Parser, Debug)]
 pub struct ClearArgs {}
 
+#[derive(Parser, Debug)]
+pub struct GcArgs {
+    /// 保留最近 N 个版本
+    #[arg(long, default_value = "10")]
+    keep_versions: u32,
+
+    /// 保留最近 N 天的版本
+    #[arg(long, default_value = "30")]
+    keep_days: u32,
+
+    /// 源文件路径 (可选,不指定则清理所有文件)
+    #[arg(long)]
+    source_path: Option<String>,
+}
+
 /// 执行 `file` 子命令
 pub async fn run_file(
     mut client: OasisServiceClient<tonic::transport::Channel>,
@@ -125,6 +142,7 @@ pub async fn run_file(
         FileCmd::History(history) => run_file_history(&mut client, history).await,
         FileCmd::Rollback(rollback) => run_file_rollback(&mut client, rollback).await,
         FileCmd::Clear => run_file_clear(&mut client).await,
+        FileCmd::Gc(gc) => run_file_gc(&mut client, gc).await,
     }
 }
 
@@ -426,4 +444,52 @@ async fn run_file_rollback(
 fn human_readable_size(bytes: u64) -> String {
     use bytesize::ByteSize;
     ByteSize(bytes).to_string()
+}
+
+async fn run_file_gc(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: GcArgs,
+) -> Result<()> {
+    print_header("清理旧版本文件");
+
+    if let Some(ref path) = args.source_path {
+        print_info(&format!("文件: {}", style(path).cyan()));
+    } else {
+        print_info("清理所有文件的旧版本");
+    }
+
+    print_info(&format!("保留最近 {} 个版本", args.keep_versions));
+    print_info(&format!("保留最近 {} 天的版本", args.keep_days));
+
+    let source_path = if let Some(path) = args.source_path {
+        let abs_path = std::path::Path::new(&path)
+            .canonicalize()
+            .with_context(|| format!("无法解析源文件路径: {}", path))?;
+        Some(abs_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    let request = oasis_core::proto::GcFilesRequest {
+        source_path,
+        keep_versions: args.keep_versions,
+        keep_days: args.keep_days,
+    };
+
+    let pb = crate::ui::create_spinner("正在清理旧版本...");
+    let base_req = request.clone();
+    let response = grpc_retry!(client, gc_files(base_req.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("清理失败: {}", format_grpc_error(&e)))?
+        .into_inner();
+
+    if response.success {
+        pb.finish_with_message("清理完成");
+        crate::ui::print_success(&format!("已清理 {} 个旧版本文件", response.deleted_count));
+    } else {
+        pb.finish_with_message("清理失败");
+        return Err(anyhow::anyhow!("清理失败: {}", response.message));
+    }
+
+    Ok(())
 }
