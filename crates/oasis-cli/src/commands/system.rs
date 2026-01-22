@@ -478,7 +478,6 @@ async fn create_docker_compose(output_dir: &Path) -> Result<()> {
       --tlscert=/certs/nats-server.pem
       --tlskey=/certs/nats-server-key.pem
       --tlscacert=/certs/nats-ca.pem
-      --tlsverify
     restart: unless-stopped
     healthcheck:
       test:
