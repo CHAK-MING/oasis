@@ -1,24 +1,27 @@
 use crate::nats_client::NatsClient;
 use async_nats::jetstream;
 use base64::Engine;
+use dashmap::DashMap;
 use futures::StreamExt;
 use oasis_core::{
     constants::*,
-    core_types::AgentId,
+    core_types::{AgentId, TaskId},
     error::Result,
     shutdown::{ExecutionError, execute_process_with_cancellation},
     task_types::{Task, TaskExecution, TaskState},
 };
 use prost::Message;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct TaskManager {
     agent_id: AgentId,
     nats_client: NatsClient,
     shutdown_token: CancellationToken,
+    running_tasks: Arc<DashMap<TaskId, CancellationToken>>,
 }
 
 impl TaskManager {
@@ -31,6 +34,7 @@ impl TaskManager {
             agent_id,
             nats_client,
             shutdown_token,
+            running_tasks: Arc::new(DashMap::new()),
         }
     }
 
@@ -38,10 +42,12 @@ impl TaskManager {
         info!("Starting task manager");
 
         let unicast_consumer = self.create_unicast_task_consumer().await?;
+        let cancel_consumer = self.create_cancel_consumer().await?;
 
         let mut unicast_messages = unicast_consumer.messages().await?;
+        let mut cancel_messages = cancel_consumer.messages().await?;
 
-        info!("Task manager started with dual consumers");
+        info!("Task manager started with task and cancel consumers");
 
         loop {
             tokio::select! {
@@ -56,6 +62,20 @@ impl TaskManager {
                         }
                         Err(e) => {
                             error!("Error receiving unicast task message: {}", e);
+                        }
+                    }
+                }
+                // 处理取消消息
+                Some(msg_result) = cancel_messages.next() => {
+                    match msg_result {
+                        Ok(msg) => {
+                            debug!("Received cancel message");
+                            if let Err(e) = self.process_cancel_message(msg).await {
+                                error!("Failed to process cancel message: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error receiving cancel message: {}", e);
                         }
                     }
                 }
@@ -102,6 +122,73 @@ impl TaskManager {
         Ok(consumer)
     }
 
+    async fn create_cancel_consumer(
+        &self,
+    ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
+        let stream = self
+            .nats_client
+            .jetstream
+            .get_stream(JS_STREAM_TASKS)
+            .await?;
+
+        let consumer_name = format!("oasis-cancel-v1-{}", self.agent_id);
+        let subject = format!("tasks.cancel.agent.{}.>", self.agent_id);
+
+        let consumer = stream
+            .create_consumer(
+                oasis_core::nats::ConsumerConfigBuilder::new(
+                    consumer_name.clone(),
+                    subject.clone(),
+                )
+                .build(),
+            )
+            .await?;
+
+        info!(
+            "Created cancel consumer: {} for subject: {}",
+            consumer_name, subject
+        );
+
+        Ok(consumer)
+    }
+
+    async fn process_cancel_message(&self, msg: jetstream::Message) -> Result<()> {
+        let task_id = match Self::parse_task_id_from_cancel_subject(&msg.subject) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Failed to parse task_id from cancel subject: {}", e);
+                msg.ack()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+                return Ok(());
+            }
+        };
+
+        info!("Processing cancel request for task: {}", task_id);
+
+        if let Some((_task_id, cancel_token)) = self.running_tasks.remove(&task_id) {
+            cancel_token.cancel();
+            info!("Cancelled running task: {}", task_id);
+        } else {
+            debug!("Task {} not running, ignoring cancel", task_id);
+        }
+
+        msg.ack()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to ack cancel message: {}", e))?;
+
+        Ok(())
+    }
+
+    fn parse_task_id_from_cancel_subject(subject: &str) -> Result<TaskId> {
+        let parts: Vec<&str> = subject.split('.').collect();
+        if parts.len() >= 5 && parts[0] == "tasks" && parts[1] == "cancel" && parts[2] == "agent" {
+            Ok(TaskId::new(parts[4]))
+        } else {
+            Err(anyhow::anyhow!("Invalid cancel subject format: {}", subject).into())
+        }
+    }
+
     /// 处理任务消息
     async fn process_task_message(&self, msg: jetstream::Message, source: &str) -> Result<()> {
         // 解析任务(这里需要换成 proto)
@@ -118,6 +205,10 @@ impl TaskManager {
 
         info!("Processing {} task: {}", source, task.task_id);
 
+        let task_cancel_token = CancellationToken::new();
+        self.running_tasks
+            .insert(task.task_id.clone(), task_cancel_token.clone());
+
         // 发送一个任务正在执行的状态
         let running_execution = TaskExecution::running(task.task_id.clone(), self.agent_id.clone());
 
@@ -126,7 +217,9 @@ impl TaskManager {
         }
 
         // 执行任务
-        let execution = self.execute_task(&task).await;
+        let execution = self.execute_task(&task, task_cancel_token.clone()).await;
+
+        self.running_tasks.remove(&task.task_id);
 
         // 发布执行结果
         if let Err(e) = self.publish_task_result(&execution).await {
@@ -141,7 +234,7 @@ impl TaskManager {
         Ok(())
     }
 
-    async fn execute_task(&self, task: &Task) -> TaskExecution {
+    async fn execute_task(&self, task: &Task, task_cancel_token: CancellationToken) -> TaskExecution {
         let start_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -154,7 +247,7 @@ impl TaskManager {
                     .await
             }
             _ => {
-                self.execute_shell_command(task, start_time, start_instant)
+                self.execute_shell_command(task, start_time, start_instant, task_cancel_token)
                     .await
             }
         }
@@ -246,6 +339,7 @@ impl TaskManager {
         task: &Task,
         start_time: i64,
         start_instant: std::time::Instant,
+        task_cancel_token: CancellationToken,
     ) -> TaskExecution {
         info!(
             "Executing shell command: {} {} (timeout: {}s)",
@@ -290,9 +384,24 @@ impl TaskManager {
         };
 
         let timeout_duration = std::time::Duration::from_secs(task.timeout_seconds as u64);
+        
+        let combined_token = CancellationToken::new();
+        
+        tokio::spawn({
+            let combined = combined_token.clone();
+            let shutdown = self.shutdown_token.clone();
+            let task_cancel = task_cancel_token.clone();
+            async move {
+                tokio::select! {
+                    _ = shutdown.cancelled() => combined.cancel(),
+                    _ = task_cancel.cancelled() => combined.cancel(),
+                }
+            }
+        });
+        
         let result = execute_process_with_cancellation(
             child,
-            self.shutdown_token.clone(),
+            combined_token,
             timeout_duration,
             &full_command,
         )
@@ -330,7 +439,7 @@ impl TaskManager {
                 state: TaskState::Cancelled,
                 exit_code: Some(-1),
                 stdout: String::new(),
-                stderr: "Command cancelled by shutdown signal".to_string(),
+                stderr: "Task cancelled".to_string(),
                 started_at: start_time,
                 finished_at: Some(finish_time),
                 duration_ms: Some(start_instant.elapsed().as_millis() as f64),
@@ -646,6 +755,112 @@ mod tests {
             }
 
             assert_eq!(labels.get("key"), Some(&"".to_string()));
+        }
+    }
+
+    mod cancel_subject_parsing_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_valid_cancel_subject() {
+            let subject = "tasks.cancel.agent.agent-123.task-456";
+            let result = TaskManager::parse_task_id_from_cancel_subject(subject);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().as_str(), "task-456");
+        }
+
+        #[test]
+        fn test_parse_cancel_subject_with_uuid() {
+            let subject = "tasks.cancel.agent.my-agent.550e8400-e29b-41d4-a716-446655440000";
+            let result = TaskManager::parse_task_id_from_cancel_subject(subject);
+            assert!(result.is_ok());
+            assert_eq!(
+                result.unwrap().as_str(),
+                "550e8400-e29b-41d4-a716-446655440000"
+            );
+        }
+
+        #[test]
+        fn test_parse_invalid_cancel_subject_missing_parts() {
+            let subject = "tasks.cancel.agent";
+            let result = TaskManager::parse_task_id_from_cancel_subject(subject);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_invalid_cancel_subject_wrong_prefix() {
+            let subject = "tasks.exec.agent.agent-123.task-456";
+            let result = TaskManager::parse_task_id_from_cancel_subject(subject);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_parse_empty_cancel_subject() {
+            let subject = "";
+            let result = TaskManager::parse_task_id_from_cancel_subject(subject);
+            assert!(result.is_err());
+        }
+    }
+
+    mod running_tasks_map_tests {
+        use super::*;
+
+        #[test]
+        fn test_insert_and_remove_running_task() {
+            let running_tasks: Arc<DashMap<TaskId, CancellationToken>> = Arc::new(DashMap::new());
+            let task_id = TaskId::new("task-1");
+            let cancel_token = CancellationToken::new();
+
+            running_tasks.insert(task_id.clone(), cancel_token.clone());
+            assert_eq!(running_tasks.len(), 1);
+            assert!(running_tasks.contains_key(&task_id));
+
+            let removed = running_tasks.remove(&task_id);
+            assert!(removed.is_some());
+            assert_eq!(running_tasks.len(), 0);
+        }
+
+        #[test]
+        fn test_cancel_running_task() {
+            let running_tasks: Arc<DashMap<TaskId, CancellationToken>> = Arc::new(DashMap::new());
+            let task_id = TaskId::new("task-2");
+            let cancel_token = CancellationToken::new();
+
+            running_tasks.insert(task_id.clone(), cancel_token.clone());
+
+            if let Some((_id, token)) = running_tasks.remove(&task_id) {
+                token.cancel();
+                assert!(token.is_cancelled());
+            }
+        }
+
+        #[test]
+        fn test_cancel_nonexistent_task() {
+            let running_tasks: Arc<DashMap<TaskId, CancellationToken>> = Arc::new(DashMap::new());
+            let task_id = TaskId::new("nonexistent");
+
+            let removed = running_tasks.remove(&task_id);
+            assert!(removed.is_none());
+        }
+
+        #[test]
+        fn test_multiple_running_tasks() {
+            let running_tasks = Arc::new(DashMap::new());
+
+            for i in 0..5 {
+                let task_id = TaskId::new(&format!("task-{}", i));
+                let cancel_token = CancellationToken::new();
+                running_tasks.insert(task_id, cancel_token);
+            }
+
+            assert_eq!(running_tasks.len(), 5);
+
+            let task_to_cancel = TaskId::new("task-2");
+            if let Some((_id, token)) = running_tasks.remove(&task_to_cancel) {
+                token.cancel();
+            }
+
+            assert_eq!(running_tasks.len(), 4);
         }
     }
 }

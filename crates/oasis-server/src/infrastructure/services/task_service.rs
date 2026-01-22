@@ -7,6 +7,8 @@ use oasis_core::core_types::{AgentId, BatchId, TaskId};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::task_types::*;
 use prost::Message;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -19,6 +21,30 @@ pub struct TaskService {
 }
 
 impl TaskService {
+    fn task_publish_headers(task_id: &TaskId, payload: &[u8]) -> async_nats::HeaderMap {
+        let mut headers = async_nats::HeaderMap::new();
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let digest = hasher.finalize();
+
+        let mut digest_hex = String::with_capacity(64);
+        for b in digest.iter() {
+            let _ = write!(&mut digest_hex, "{:02x}", b);
+        }
+        let digest_prefix = &digest_hex[..12];
+        headers.insert(
+            "Nats-Msg-Id",
+            format!("task-{}-sha256-{}", task_id, digest_prefix),
+        );
+        headers
+    }
+
+    fn cancel_publish_headers(task_id: &TaskId) -> async_nats::HeaderMap {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Msg-Id", format!("task-cancel-{}", task_id));
+        headers
+    }
+
     /// 创建新的任务服务
     pub async fn new(jetstream: Arc<Context>, task_monitor: Arc<TaskMonitor>) -> Result<Self> {
         info!("Initializing TaskService");
@@ -84,10 +110,12 @@ impl TaskService {
             let proto_task = oasis_core::proto::TaskMsg::from(task);
             let payload = proto_task.encode_to_vec();
 
+            let headers = Self::task_publish_headers(&task.task_id, &payload);
+
             // 发布消息，获取 PublishAckFuture（此时消息已发送到 NATS）
             let ack_future = self
                 .jetstream
-                .publish(subject, payload.into())
+                .publish_with_headers(subject, headers, payload.into())
                 .await
                 .map_err(|e| CoreError::Nats {
                     message: format!("Failed to publish unicast task: {}", e),
@@ -296,7 +324,18 @@ impl TaskService {
 
     /// 发布取消消息
     async fn publish_cancel_message(&self, task_id: &TaskId) -> Result<()> {
-        let subject = format!("tasks.cancel.{}", task_id);
+        let task = self
+            .task_monitor
+            .task_cache
+            .get(task_id)
+            .ok_or_else(|| CoreError::NotFound {
+                entity_type: "task".to_string(),
+                entity_id: task_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let agent_id = &task.agent_id;
+        let subject = format!("tasks.cancel.agent.{}.{}", agent_id, task_id);
         let cancel_msg = oasis_core::proto::TaskMsg {
             task_id: Some(oasis_core::proto::TaskId {
                 value: task_id.to_string(),
@@ -307,9 +346,11 @@ impl TaskService {
 
         let payload = cancel_msg.encode_to_vec();
 
+        let headers = Self::cancel_publish_headers(task_id);
+
         let ack = self
             .jetstream
-            .publish(subject, payload.into())
+            .publish_with_headers(subject, headers, payload.into())
             .await
             .map_err(|e| CoreError::Nats {
                 message: format!("Failed to publish cancel: {}", e),
