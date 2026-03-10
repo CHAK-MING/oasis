@@ -217,7 +217,8 @@ message FileConfigMsg {
   uint64 revision = 3;
   string owner = 4;            // user:group 格式
   string mode = 5;             // 0644 格式
-  SelectorExpression target = 6;   
+  SelectorExpression target = 6;
+  string operation_id = 7;
 }
 
 message FileChunkMsg {
@@ -486,4 +487,3 @@ service OasisService {
   rpc AdvanceRollout(AdvanceRolloutRequest) returns (AdvanceRolloutResponse);
   rpc RollbackRollout(RollbackRolloutRequest) returns (RollbackRolloutResponse);
 }
-

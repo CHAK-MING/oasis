@@ -36,7 +36,6 @@ impl RolloutHandlers {
         let (target_agents, task_type) = stage_info;
 
         // 根据任务类型构建并执行
-        let mut batch_id = None;
         let mut version_snapshot = None;
         match &task_type {
             RolloutTaskType::Command {
@@ -55,14 +54,26 @@ impl RolloutHandlers {
                     timeout_seconds: *timeout_seconds,
                 };
 
-                batch_id = Some(
+                let batch_id = Some(
                     task_service
                         .submit_batch(batch_request, target_agents)
                         .await
                         .map_err(map_core_error)?,
                 );
+
+                rollout_service
+                    .mark_advance_next_stage(
+                        rollout_id,
+                        task_type.clone(),
+                        batch_id.clone(),
+                        version_snapshot.clone(),
+                    )
+                    .await
+                    .map_err(map_core_error)?;
+                return Ok(());
             }
             RolloutTaskType::FileDeployment { config } => {
+                let operation_id = uuid::Uuid::now_v7().to_string();
                 let file_config = proto::FileConfigMsg {
                     source_path: config.source_path.clone(),
                     destination_path: config.destination_path.clone(),
@@ -79,33 +90,37 @@ impl RolloutHandlers {
                                 .join(",")
                         ),
                     }),
+                    operation_id: operation_id.clone(),
                 };
-
-                // 文件部署（按约定默认成功）
-                file_service
-                    .apply(&file_config, target_agents.clone())
-                    .await
-                    .map_err(map_core_error)?;
 
                 // 保存文件版本快照
                 version_snapshot = Some(VersionSnapshot::new_file_snapshot(
                     config.clone(),
                     Some(config.revision),
                 ));
+
+                rollout_service
+                    .mark_advance_next_stage(
+                        rollout_id,
+                        task_type.clone(),
+                        None,
+                        version_snapshot.clone(),
+                    )
+                    .await
+                    .map_err(map_core_error)?;
+
+                let summary = file_service
+                    .apply_with_details(&file_config, target_agents.clone())
+                    .await
+                    .map_err(map_core_error)?;
+
+                rollout_service
+                    .mark_file_stage_result(rollout_id, &summary.failed_results)
+                    .await
+                    .map_err(map_core_error)?;
+                return Ok(());
             }
         };
-
-        rollout_service
-            .mark_advance_next_stage(
-                rollout_id,
-                task_type.clone(),
-                batch_id.clone(),
-                version_snapshot.clone(),
-            )
-            .await
-            .map_err(map_core_error)?;
-
-        Ok(())
     }
 
     /// 创建灰度发布
@@ -477,6 +492,7 @@ impl RolloutHandlers {
                                             .join(",")
                                     ),
                                 }),
+                                operation_id: uuid::Uuid::now_v7().to_string(),
                             };
                             // 执行回滚
                             srv.context()

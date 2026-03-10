@@ -129,7 +129,8 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
 /// 统一确保常用 KV buckets 存在
 pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()> {
     use oasis_core::{
-        JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS, JS_KV_ROLLOUTS,
+        JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS,
+        JS_KV_FILE_APPLY_RESULTS, JS_KV_ROLLOUTS,
     };
     let mut kv_specs: Vec<(String, async_nats::jetstream::kv::Config)> = Vec::new();
 
@@ -175,6 +176,19 @@ pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()
             bucket: JS_KV_AGENT_LABELS.to_string(),
             description: "Agent labels (versioned, no TTL)".to_string(),
             history: 50,
+            max_value_size: 65536,
+            ..Default::default()
+        };
+        kv_specs.push((cfg.bucket.clone(), cfg));
+    }
+
+    // 文件下发结果（短期保留）
+    {
+        let cfg = async_nats::jetstream::kv::Config {
+            bucket: JS_KV_FILE_APPLY_RESULTS.to_string(),
+            description: "Per-agent file apply results".to_string(),
+            history: 1,
+            max_age: std::time::Duration::from_secs(3600),
             max_value_size: 65536,
             ..Default::default()
         };

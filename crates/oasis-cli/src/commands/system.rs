@@ -1,7 +1,7 @@
 use crate::certificate::CertificateGenerator;
 use crate::ui::{print_header, print_info, print_next_step, print_status, print_warning};
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, command};
+use clap::{Parser, Subcommand};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 

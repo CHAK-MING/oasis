@@ -134,6 +134,7 @@ fn bench_file_messages_encode_decode(c: &mut Criterion) {
             target: Some(SelectorExpression {
                 expression: "all".to_string(),
             }),
+            operation_id: String::new(),
         }),
     };
 

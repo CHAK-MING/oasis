@@ -1,4 +1,5 @@
 use crate::{core_types::SelectorExpression, error::CoreError};
+use crate::core_types::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// 统一的文件规格类型
@@ -31,6 +32,20 @@ pub struct FileConfig {
     pub mode: Option<String>,
     /// 目标选择器
     pub target: Option<SelectorExpression>,
+    /// 单次文件下发操作 ID，用于关联 agent 回执
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileApplyExecution {
+    pub agent_id: AgentId,
+    pub operation_id: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub revision: u64,
+    pub success: bool,
+    pub message: String,
+    pub finished_at: i64,
 }
 
 /// 文件版本信息
@@ -96,6 +111,17 @@ impl FileConfig {
             });
         }
 
+        if self
+            .operation_id
+            .as_ref()
+            .is_some_and(|operation_id| operation_id.trim().is_empty())
+        {
+            return Err(CoreError::InvalidTask {
+                reason: "operation_id cannot be empty".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
+        }
+
         // 验证权限模式
         if let Some(mode) = self.mode.as_ref() {
             if !mode.starts_with('0')
@@ -143,6 +169,48 @@ impl FileConfig {
                 }
             }
             None => (None, None),
+        }
+    }
+}
+
+impl FileApplyExecution {
+    pub fn success(
+        agent_id: AgentId,
+        operation_id: String,
+        source_path: String,
+        destination_path: String,
+        revision: u64,
+        message: String,
+    ) -> Self {
+        Self {
+            agent_id,
+            operation_id,
+            source_path,
+            destination_path,
+            revision,
+            success: true,
+            message,
+            finished_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    pub fn failure(
+        agent_id: AgentId,
+        operation_id: String,
+        source_path: String,
+        destination_path: String,
+        revision: u64,
+        message: String,
+    ) -> Self {
+        Self {
+            agent_id,
+            operation_id,
+            source_path,
+            destination_path,
+            revision,
+            success: false,
+            message,
+            finished_at: chrono::Utc::now().timestamp(),
         }
     }
 }
@@ -229,6 +297,7 @@ mod tests {
             owner: None,
             mode: None,
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -242,6 +311,7 @@ mod tests {
             owner: None,
             mode: None,
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -255,6 +325,7 @@ mod tests {
             owner: None,
             mode: None,
             target: None,
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -268,6 +339,7 @@ mod tests {
             owner: None,
             mode: Some("644".to_string()), // missing leading 0
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -281,6 +353,7 @@ mod tests {
             owner: None,
             mode: Some("0999".to_string()), // invalid octal
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -294,6 +367,7 @@ mod tests {
             owner: None,
             mode: Some("0644".to_string()),
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -307,6 +381,7 @@ mod tests {
             owner: Some(":group".to_string()), // empty user
             mode: None,
             target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: None,
         };
         assert!(config.validate().is_err());
     }
@@ -320,6 +395,7 @@ mod tests {
             owner: None,
             mode: Some("0755".to_string()),
             target: None,
+            operation_id: None,
         };
         assert_eq!(config.parsed_mode(), 0o755);
     }
@@ -333,6 +409,7 @@ mod tests {
             owner: None,
             mode: None,
             target: None,
+            operation_id: None,
         };
         assert_eq!(config.parsed_mode(), 0o644);
     }
@@ -346,6 +423,7 @@ mod tests {
             owner: Some("root:wheel".to_string()),
             mode: None,
             target: None,
+            operation_id: None,
         };
         let (user, group) = config.parsed_owner();
         assert_eq!(user, Some("root".to_string()));
@@ -361,6 +439,7 @@ mod tests {
             owner: Some("root".to_string()),
             mode: None,
             target: None,
+            operation_id: None,
         };
         let (user, group) = config.parsed_owner();
         assert_eq!(user, Some("root".to_string()));

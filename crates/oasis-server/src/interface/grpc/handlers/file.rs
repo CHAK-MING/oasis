@@ -383,7 +383,7 @@ impl FileHandlers {
 
         let config = req
             .config
-            .as_ref()
+            .clone()
             .ok_or_else(|| Status::invalid_argument("config is required for file apply"))?;
 
         if config.source_path.is_empty() {
@@ -408,18 +408,22 @@ impl FileHandlers {
         }
 
         // 下载文件数据
-        let _ = srv
+        let mut config = config;
+        if config.operation_id.trim().is_empty() {
+            config.operation_id = uuid::Uuid::now_v7().to_string();
+        }
+
+        let result = srv
             .context()
             .file_service
-            .apply(config, agent_ids)
+            .apply(&config, agent_ids)
             .await
             .map_err(|e| Status::internal(format!("Failed to download file: {}", e)))?;
 
-        // 返回完整的FileOperationResult
         Ok(Response::new(oasis_core::proto::FileOperationResult {
-            success: true,
-            message: "File apply task created successfully".to_string(),
-            revision: 0,
+            success: result.success,
+            message: result.message,
+            revision: result.revision,
         }))
     }
 

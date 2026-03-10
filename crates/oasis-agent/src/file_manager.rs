@@ -5,7 +5,7 @@ use oasis_core::{
     constants::*,
     core_types::AgentId,
     error::{CoreError, ErrorSeverity, Result},
-    file_types::FileConfig,
+    file_types::{FileApplyExecution, FileConfig},
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -151,6 +151,29 @@ impl FileManager {
         // 执行文件部署
         let result = self.apply_file(&file_config).await;
 
+        let apply_execution = match &result {
+            Ok(_) => FileApplyExecution::success(
+                self.agent_id.clone(),
+                file_config.operation_id.clone().unwrap_or_default(),
+                file_config.source_path.clone(),
+                file_config.destination_path.clone(),
+                file_config.revision,
+                "File applied successfully".to_string(),
+            ),
+            Err(e) => FileApplyExecution::failure(
+                self.agent_id.clone(),
+                file_config.operation_id.clone().unwrap_or_default(),
+                file_config.source_path.clone(),
+                file_config.destination_path.clone(),
+                file_config.revision,
+                e.to_string(),
+            ),
+        };
+
+        if let Err(e) = self.publish_file_apply_result(&apply_execution).await {
+            error!("Failed to publish file apply result: {}", e);
+        }
+
         match &result {
             Ok(_) => {
                 info!(
@@ -171,6 +194,40 @@ impl FileManager {
         }
 
         result
+    }
+
+    async fn publish_file_apply_result(&self, execution: &FileApplyExecution) -> Result<()> {
+        if execution.operation_id.trim().is_empty() {
+            return Err(CoreError::Validation {
+                message: "Missing file apply operation_id".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        }
+
+        let kv = self
+            .nats_client
+            .current()
+            .await
+            .jetstream
+            .get_key_value(JS_KV_FILE_APPLY_RESULTS)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get file apply results KV: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let key = kv_key_file_apply_result(&execution.operation_id, self.agent_id.as_str());
+        let payload = serde_json::to_vec(execution).map_err(|e| CoreError::Serialization {
+            message: format!("Failed to serialize file apply result: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        kv.put(&key, payload.into()).await.map_err(|e| CoreError::Nats {
+            message: format!("Failed to publish file apply result: {}", e),
+            severity: ErrorSeverity::Error,
+        })?;
+
+        Ok(())
     }
 
     /// 应用文件到本地系统

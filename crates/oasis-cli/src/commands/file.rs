@@ -1,6 +1,6 @@
 use crate::client::format_grpc_error;
 use crate::grpc_retry;
-use crate::ui::{confirm_action, print_header, print_info, print_warning};
+use crate::ui::{confirm_action, print_header, print_info};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
@@ -267,6 +267,7 @@ async fn run_file_apply(
             owner: args.owner.unwrap_or_default(),
             mode: args.mode.unwrap_or_default(),
             target: Some(SelectorExpression::new(args.target).into()),
+            operation_id: String::new(),
         }),
     };
 
@@ -419,6 +420,7 @@ async fn run_file_rollback(
             owner: args.owner.unwrap_or_default(),
             mode: args.mode.unwrap_or_default(),
             target: Some(SelectorExpression::new(args.target).into()),
+            operation_id: String::new(),
         }),
     };
 

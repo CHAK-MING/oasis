@@ -36,6 +36,7 @@ impl NatsClient {
         let _ = self.jetstream.get_key_value(JS_KV_AGENT_INFOS).await;
         let _ = self.jetstream.get_key_value(JS_KV_AGENT_HEARTBEAT).await;
         let _ = self.jetstream.get_key_value(JS_KV_AGENT_LABELS).await;
+        let _ = self.jetstream.get_key_value(JS_KV_FILE_APPLY_RESULTS).await;
 
         Ok(())
     }

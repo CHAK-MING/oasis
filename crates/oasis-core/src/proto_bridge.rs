@@ -602,6 +602,7 @@ impl From<&FileConfig> for crate::proto::FileConfigMsg {
             owner: config.owner.clone().unwrap_or_default(),
             mode: config.mode.clone().unwrap_or_default(),
             target: config.target.as_ref().map(|t| t.into()),
+            operation_id: config.operation_id.clone().unwrap_or_default(),
         }
     }
 }
@@ -615,6 +616,7 @@ impl From<FileConfig> for crate::proto::FileConfigMsg {
             owner: config.owner.unwrap_or_default(),
             mode: config.mode.unwrap_or_default(),
             target: config.target.map(|t| t.into()),
+            operation_id: config.operation_id.unwrap_or_default(),
         }
     }
 }
@@ -638,6 +640,11 @@ impl TryFrom<crate::proto::FileConfigMsg> for FileConfig {
                 Some(proto.mode)
             },
             target: proto.target.map(SelectorExpression::from),
+            operation_id: if proto.operation_id.is_empty() {
+                None
+            } else {
+                Some(proto.operation_id)
+            },
         })
     }
 }
@@ -661,6 +668,11 @@ impl TryFrom<&crate::proto::FileConfigMsg> for FileConfig {
                 Some(proto.mode.clone())
             },
             target: proto.target.as_ref().map(SelectorExpression::from),
+            operation_id: if proto.operation_id.is_empty() {
+                None
+            } else {
+                Some(proto.operation_id.clone())
+            },
         })
     }
 }
@@ -838,6 +850,7 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             owner: None,
             mode: None,
             target: None,
+            operation_id: None,
         };
 
         let task_type = match cfg.task_type.and_then(|t| t.task_type) {

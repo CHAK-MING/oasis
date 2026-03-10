@@ -4,7 +4,7 @@ use crate::ui::{
     log_operation, print_header, print_info, print_next_step, print_status, print_warning,
 };
 use anyhow::Result;
-use clap::{Parser, Subcommand, arg, command};
+use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;

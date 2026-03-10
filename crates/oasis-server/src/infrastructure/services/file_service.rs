@@ -4,7 +4,7 @@
 use async_nats::jetstream::{Context, object_store::ObjectStore};
 use oasis_core::core_types::AgentId;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::infrastructure::file_lock::FileLockManager;
@@ -12,7 +12,73 @@ use backon::Retryable;
 use futures::StreamExt;
 use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
-use oasis_core::{FILES_SUBJECT_PREFIX, file_types::*};
+use oasis_core::{
+    FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS, file_types::*, kv_key_file_apply_result,
+};
+
+const FILE_APPLY_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const FILE_APPLY_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone)]
+pub struct FileApplySummary {
+    pub success: bool,
+    #[allow(dead_code)]
+    pub completed_agents: Vec<AgentId>,
+    pub failed_results: Vec<FileApplyExecution>,
+    pub revision: u64,
+    pub message: String,
+}
+
+fn summarize_apply_results(
+    operation_id: &str,
+    source_path: &str,
+    revision: u64,
+    target_agents: &[AgentId],
+    results: HashMap<AgentId, FileApplyExecution>,
+) -> FileApplySummary {
+    let mut completed_agents = Vec::new();
+    let mut failed_results = Vec::new();
+
+    for agent_id in target_agents {
+        match results.get(agent_id) {
+            Some(result) if result.success => completed_agents.push(agent_id.clone()),
+            Some(result) => failed_results.push(result.clone()),
+            None => failed_results.push(FileApplyExecution::failure(
+                agent_id.clone(),
+                operation_id.to_string(),
+                source_path.to_string(),
+                String::new(),
+                revision,
+                "Timed out waiting for file apply result".to_string(),
+            )),
+        }
+    }
+
+    let success = failed_results.is_empty();
+    let message = if success {
+        format!(
+            "File {} applied successfully on {} agents",
+            source_path,
+            completed_agents.len()
+        )
+    } else {
+        format!(
+            "File {} applied on {}/{} agents (failed: {})",
+            source_path,
+            completed_agents.len(),
+            target_agents.len(),
+            failed_results.len()
+        )
+    };
+
+    FileApplySummary {
+        success,
+        completed_agents,
+        failed_results,
+        revision,
+        message,
+    }
+}
 
 pub struct FileService {
     jetstream: Arc<Context>,
@@ -130,33 +196,49 @@ impl FileService {
         &self,
         config: &oasis_core::proto::FileConfigMsg,
         agent_ids: Vec<AgentId>,
-    ) -> Result<FileOperationResult> {
+    ) -> Result<FileApplySummary> {
+        let target_agents = agent_ids;
+        let operation_id = config.operation_id.trim();
+        if operation_id.is_empty() {
+            return Err(CoreError::Validation {
+                message: "Missing file apply operation_id".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        }
+
         info!(
             "Applying file {} to {} agents: {:?}",
             config.source_path,
-            agent_ids.len(),
-            agent_ids
+            target_agents.len(),
+            target_agents
         );
 
         // 并行向每个 Agent 发送文件应用任务
         let concurrency_limit = 32usize;
-        let futs = agent_ids.into_iter().map(|aid| async move {
+        let futs = target_agents.iter().cloned().map(|aid| async move {
             let res = self.send_file_apply_task(config, &aid).await;
             (aid, res)
         });
 
         use futures::stream;
-        let mut applied_agents = Vec::new();
-        let mut failed_agents = Vec::new();
+        let mut dispatched_agents = Vec::new();
+        let mut dispatch_failures = Vec::new();
 
         stream::iter(futs)
             .buffer_unordered(concurrency_limit)
             .for_each(|(agent_id, res)| {
                 if res.is_ok() {
-                    applied_agents.push(agent_id.clone());
+                    dispatched_agents.push(agent_id.clone());
                     info!("Sent file apply task to agent: {}", agent_id);
                 } else if let Err(e) = res {
-                    failed_agents.push(agent_id.clone());
+                    dispatch_failures.push(FileApplyExecution::failure(
+                        agent_id.clone(),
+                        operation_id.to_string(),
+                        config.source_path.clone(),
+                        config.destination_path.clone(),
+                        config.revision,
+                        format!("Failed to dispatch file apply task: {}", e),
+                    ));
                     error!(
                         "Failed to send file apply task to agent {}: {}",
                         agent_id, e
@@ -166,26 +248,24 @@ impl FileService {
             })
             .await;
 
-        let message = if failed_agents.is_empty() {
-            format!(
-                "File {} sent to {} agents successfully",
-                config.source_path,
-                applied_agents.len()
-            )
+        let mut results = if dispatched_agents.is_empty() {
+            HashMap::new()
         } else {
-            format!(
-                "File {} sent to {}/{} agents (failed: {})",
-                config.source_path,
-                applied_agents.len(),
-                applied_agents.len() + failed_agents.len(),
-                failed_agents.len()
-            )
+            self.wait_for_file_apply_results(config, &dispatched_agents).await?
         };
-
-        let success = failed_agents.is_empty();
+        for failure in dispatch_failures {
+            results.insert(failure.agent_id.clone(), failure);
+        }
+        let summary = summarize_apply_results(
+            operation_id,
+            &config.source_path,
+            config.revision,
+            &target_agents,
+            results,
+        );
 
         // 成功后更新当前版本指针
-        if success {
+        if summary.success {
             if let Err(e) = self
                 .set_active_revision(&config.source_path, config.revision)
                 .await
@@ -194,11 +274,67 @@ impl FileService {
             }
         }
 
-        Ok(FileOperationResult {
-            success,
-            message,
-            revision: config.revision,
-        })
+        Ok(summary)
+    }
+
+    async fn wait_for_file_apply_results(
+        &self,
+        config: &oasis_core::proto::FileConfigMsg,
+        agent_ids: &[AgentId],
+    ) -> Result<HashMap<AgentId, FileApplyExecution>> {
+        let kv = self
+            .jetstream
+            .get_key_value(JS_KV_FILE_APPLY_RESULTS)
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to get file apply results KV: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let deadline = tokio::time::Instant::now() + FILE_APPLY_WAIT_TIMEOUT;
+        let mut results = HashMap::new();
+
+        while tokio::time::Instant::now() < deadline && results.len() < agent_ids.len() {
+            for agent_id in agent_ids {
+                if results.contains_key(agent_id) {
+                    continue;
+                }
+
+                let key = kv_key_file_apply_result(&config.operation_id, agent_id.as_str());
+                match kv.get(&key).await {
+                    Ok(Some(bytes)) => {
+                        let execution: FileApplyExecution =
+                            serde_json::from_slice(bytes.as_ref()).map_err(|e| {
+                                CoreError::Serialization {
+                                    message: format!(
+                                        "Failed to decode file apply result for {}: {}",
+                                        agent_id, e
+                                    ),
+                                    severity: ErrorSeverity::Error,
+                                }
+                            })?;
+                        if execution.operation_id == config.operation_id
+                            && execution.revision == config.revision
+                        {
+                            results.insert(agent_id.clone(), execution);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(CoreError::Nats {
+                            message: format!("Failed to read file apply result: {}", e),
+                            severity: ErrorSeverity::Error,
+                        });
+                    }
+                }
+            }
+
+            if results.len() < agent_ids.len() {
+                tokio::time::sleep(FILE_APPLY_POLL_INTERVAL).await;
+            }
+        }
+
+        Ok(results)
     }
 
     async fn send_file_apply_task(
@@ -365,6 +501,19 @@ impl FileService {
         config: &oasis_core::proto::FileConfigMsg,
         agent_ids: Vec<AgentId>,
     ) -> Result<FileOperationResult> {
+        let summary = self.apply_internal(config, agent_ids).await?;
+        Ok(FileOperationResult {
+            success: summary.success,
+            message: summary.message,
+            revision: summary.revision,
+        })
+    }
+
+    pub async fn apply_with_details(
+        &self,
+        config: &oasis_core::proto::FileConfigMsg,
+        agent_ids: Vec<AgentId>,
+    ) -> Result<FileApplySummary> {
         self.apply_internal(config, agent_ids).await
     }
 
@@ -474,7 +623,7 @@ impl FileService {
         );
 
         // 下发到对应的 Agent
-        self.apply_internal(config, agent_ids).await?;
+        let summary = self.apply_internal(config, agent_ids).await?;
 
         // 更新当前版本指针为回滚到的版本
         if let Err(e) = self
@@ -491,19 +640,11 @@ impl FileService {
             "Successfully rolled back file {} to revision {}",
             config.source_path, config.revision
         );
-        Ok(FileOperationResult::success(
-            format!(
-                "File {} rolled back to revision {} and redeployed to target: {}",
-                config.source_path,
-                config.revision,
-                config
-                    .target
-                    .as_ref()
-                    .map(|t| t.expression.as_str())
-                    .unwrap_or("")
-            ),
-            config.revision,
-        ))
+        Ok(FileOperationResult {
+            success: summary.success,
+            message: summary.message,
+            revision: config.revision,
+        })
     }
 
     pub async fn gc_old_versions(
@@ -721,6 +862,46 @@ fn compute_gc_keep_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oasis_core::core_types::AgentId;
+    use oasis_core::file_types::FileApplyExecution;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_summarize_apply_results_marks_missing_agents_as_failures() {
+        let agent_a = AgentId::new("agent-a");
+        let agent_b = AgentId::new("agent-b");
+        let mut results = HashMap::new();
+        results.insert(
+            agent_a.clone(),
+            FileApplyExecution::success(
+                agent_a.clone(),
+                "op-1".to_string(),
+                "/tmp/app.conf".to_string(),
+                "/etc/app.conf".to_string(),
+                42,
+                "ok".to_string(),
+            ),
+        );
+
+        let summary = summarize_apply_results(
+            "op-1",
+            "/tmp/app.conf",
+            42,
+            &[agent_a.clone(), agent_b.clone()],
+            results,
+        );
+
+        assert!(!summary.success);
+        assert_eq!(summary.completed_agents, vec![agent_a]);
+        assert_eq!(summary.failed_results.len(), 1);
+        assert_eq!(summary.failed_results[0].agent_id, agent_b);
+        assert!(!summary.failed_results[0].success);
+        assert!(
+            summary.failed_results[0]
+                .message
+                .contains("Timed out waiting for file apply result")
+        );
+    }
 
     #[test]
     fn test_gc_keep_set_active_old_revision_keep_versions_1() {

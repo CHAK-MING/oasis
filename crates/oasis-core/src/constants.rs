@@ -7,6 +7,7 @@ pub const JS_STREAM_FILES: &str = "OASIS-FILES"; // subjects: files.>
 pub const JS_KV_AGENT_INFOS: &str = "OASIS-AGENT-INFOS"; // facts (版本化，非TTL)
 pub const JS_KV_AGENT_HEARTBEAT: &str = "OASIS-AGENT-HB"; // heartbeat (TTL=2x心跳)
 pub const JS_KV_AGENT_LABELS: &str = "OASIS-AGENT-LABELS"; // labels (Server/CLI可变更)
+pub const JS_KV_FILE_APPLY_RESULTS: &str = "OASIS-FILE-APPLY-RESULTS"; // per-agent file apply ack
 
 // Object Store（文件分发）
 // 使用下划线命名以避免某些部署对连字符的限制
@@ -213,6 +214,15 @@ pub fn kv_key_heartbeat(agent_id: &str) -> String {
 /// 生成 Agent labels 键名（单层，避免通配符问题）
 pub fn kv_key_labels(agent_id: &str) -> String {
     normalize_agent_id_for_kv(agent_id)
+}
+
+/// 生成文件下发结果键名：<operation_id>-<agent_id>
+pub fn kv_key_file_apply_result(operation_id: &str, agent_id: &str) -> String {
+    format!(
+        "{}-{}",
+        normalize_agent_id_for_kv(operation_id),
+        normalize_agent_id_for_kv(agent_id)
+    )
 }
 
 /// 生成任务状态 KV 键：task:state:<agentId>:<taskId>

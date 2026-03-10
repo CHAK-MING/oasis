@@ -490,6 +490,7 @@ fn create_file_task_type(
         owner: owner.unwrap_or_default(),
         mode: mode.unwrap_or("0644".to_string()),
         target: Some(SelectorExpression { expression: target }),
+        operation_id: String::new(),
     };
 
     Ok(RolloutTaskTypeMsg {

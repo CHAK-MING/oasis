@@ -286,6 +286,7 @@ mod tests {
                 target: Some(SelectorExpression {
                     expression: "all".to_string(),
                 }),
+                operation_id: String::new(),
             }),
         };
         assert!(request.config.is_some());
