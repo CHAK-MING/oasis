@@ -22,20 +22,26 @@ pub enum RolloutState {
 impl RolloutState {
     /// 检查是否为终端状态
     pub fn is_terminal(&self) -> bool {
-        matches!(self, RolloutState::Completed | RolloutState::Failed)
+        matches!(
+            self,
+            RolloutState::Completed
+                | RolloutState::Failed
+                | RolloutState::RollbackFailed
+                | RolloutState::RolledBack
+        )
     }
 
     /// 检查是否可以推进
     pub fn can_advance(&self) -> bool {
-        matches!(
-            self,
-            RolloutState::Created | RolloutState::Running | RolloutState::RolledBack
-        )
+        matches!(self, RolloutState::Created | RolloutState::Running)
     }
 
     /// 检查是否可以回滚
     pub fn can_rollback(&self) -> bool {
-        matches!(self, RolloutState::Running | RolloutState::Failed)
+        matches!(
+            self,
+            RolloutState::Running | RolloutState::Failed | RolloutState::Completed
+        )
     }
 
     pub fn is_busy(&self) -> bool {
@@ -69,6 +75,19 @@ impl Default for RolloutStrategy {
         RolloutStrategy::Percentage {
             stages: vec![10, 30, 60, 100],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RolloutState;
+
+    #[test]
+    fn test_rollback_terminal_states_are_not_advanceable() {
+        assert!(RolloutState::RolledBack.is_terminal());
+        assert!(RolloutState::RollbackFailed.is_terminal());
+        assert!(!RolloutState::RolledBack.can_advance());
+        assert!(!RolloutState::RollbackFailed.can_advance());
     }
 }
 
@@ -355,12 +374,16 @@ impl RolloutStatus {
 
     /// 获取上一阶段状态
     pub fn previous_stage_status(&self) -> Option<&RolloutStageStatus> {
-        self.stages.get(self.current_stage_idx as usize - 1)
+        self.current_stage_idx
+            .checked_sub(1)
+            .and_then(|idx| self.stages.get(idx as usize))
     }
 
     /// 获取上一阶段状态（可变）
     pub fn previous_stage_status_mut(&mut self) -> Option<&mut RolloutStageStatus> {
-        self.stages.get_mut(self.current_stage_idx as usize - 1)
+        self.current_stage_idx
+            .checked_sub(1)
+            .and_then(|idx| self.stages.get_mut(idx as usize))
     }
 
     /// 检查是否可以推进到下一阶段

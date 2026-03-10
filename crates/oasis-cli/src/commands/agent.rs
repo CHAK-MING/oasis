@@ -8,7 +8,9 @@ use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
-use oasis_core::proto::{RemoveAgentRequest, SetInfoAgentRequest};
+use oasis_core::proto::{
+    AgentStatusEnum, CreateEnrollmentSecretRequest, RemoveAgentRequest, SetInfoAgentRequest,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -201,6 +203,25 @@ async fn run_agent_deploy(
     }
 
     let bootstrap_token = response.token;
+    let enrollment_secret_response = grpc_retry!(
+        client,
+        create_enrollment_secret(CreateEnrollmentSecretRequest {
+            agent_id: Some(oasis_core::proto::AgentId {
+                value: args.agent_id.clone(),
+            }),
+        })
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("创建 enrollment secret 失败: {}", format_grpc_error(&e)))?
+    .into_inner();
+
+    if !enrollment_secret_response.success {
+        return Err(anyhow::anyhow!(
+            "创建 enrollment secret 失败: {}",
+            enrollment_secret_response.message
+        ));
+    }
+
     print_status(
         &format!("创建 Bootstrap Token (有效期 {}小时)", args.token_ttl_hours),
         true,
@@ -210,6 +231,7 @@ async fn run_agent_deploy(
         &bootstrap_token[..16.min(bootstrap_token.len())]
     ));
     print_info("Agent 首次启动时将使用此 token 自动请求证书");
+    print_status("生成 Enrollment Secret", true);
 
     // 复制 Agent 二进制文件（如果提供）
     if let Some(binary_path) = &args.agent_binary {
@@ -227,6 +249,12 @@ async fn run_agent_deploy(
     )?;
     std::fs::write(deploy_dir.join("agent.env"), env_file)?;
     print_status("生成环境变量文件", true);
+
+    std::fs::write(
+        deploy_dir.join("enrollment-secret"),
+        format!("{}\n", enrollment_secret_response.enrollment_secret),
+    )?;
+    print_status("生成 Enrollment Secret 文件", true);
 
     // 生成 systemd 服务文件
     let service_file = generate_systemd_service()?;
@@ -334,12 +362,8 @@ async fn run_agent_list(
                 .unwrap_or_default();
 
             // 状态处理
-            let is_online = match agent.status {
-                0 => true,  // ONLINE
-                1 => false, // OFFLINE
-                2 => true,  // BUSY
-                _ => false,
-            };
+            let status =
+                AgentStatusEnum::try_from(agent.status).unwrap_or(AgentStatusEnum::AgentUnknown);
 
             // 解析 labels：分离 groups、系统信息、普通标签
             let mut groups: Vec<String> = Vec::new();
@@ -367,8 +391,7 @@ async fn run_agent_list(
 
             print_header(&format!("Agent ID: {}", agent_id));
 
-            let status_msg = if is_online { "在线" } else { "离线" };
-            print_info(&format!("状态: {}", status_msg));
+            print_info(&format!("状态: {}", agent_status_text(status)));
 
             if !user_labels_kv.is_empty() {
                 let labels_str = user_labels_kv
@@ -452,12 +475,9 @@ async fn run_agent_list(
                 .unwrap_or_default();
 
             // 状态处理
-            let status_cell = match agent.status {
-                0 => Cell::new("在线").fg(Color::Green),  // AGENT_ONLINE
-                1 => Cell::new("离线").fg(Color::Red),    // AGENT_OFFLINE
-                2 => Cell::new("繁忙").fg(Color::Yellow), // AGENT_BUSY
-                _ => Cell::new("未知").fg(Color::Grey),
-            };
+            let status =
+                AgentStatusEnum::try_from(agent.status).unwrap_or(AgentStatusEnum::AgentUnknown);
+            let status_cell = agent_status_cell(status);
             // 解析 labels：分离 groups 与普通标签
             let mut groups: Vec<String> = Vec::new();
             let mut user_labels_kv: Vec<(String, String)> = Vec::new();
@@ -627,7 +647,17 @@ async fn run_agent_set(
         }
     }
     for group in args.groups.unwrap_or_default() {
-        info.insert("__groups".to_string(), group);
+        match info.get_mut("__groups") {
+            Some(existing) => {
+                if !existing.is_empty() {
+                    existing.push(',');
+                }
+                existing.push_str(&group);
+            }
+            None => {
+                info.insert("__groups".to_string(), group);
+            }
+        }
     }
 
     // 调用 agent_service 的 set_info_agent 方法
@@ -697,7 +727,8 @@ async fn run_agent_auto_deploy(
     rsync_cmd.arg("-avz").arg("--progress");
 
     if let Some(key_path) = key {
-        rsync_cmd.arg(format!("-e ssh -i {}", key_path.display()));
+        rsync_cmd.arg("-e");
+        rsync_cmd.arg(format!("ssh -i {}", key_path.display()));
     }
 
     rsync_cmd
@@ -717,7 +748,7 @@ async fn run_agent_auto_deploy(
         scp_cmd
             .args(&ssh_key_args)
             .arg("-r")
-            .arg(format!("{}/*", deploy_dir.display()))
+            .arg(format!("{}/.", deploy_dir.display()))
             .arg(format!("{}:/tmp/oasis-deploy-{}/", target, agent_id));
 
         let output = scp_cmd.output().await?;
@@ -868,6 +899,12 @@ else
     exit 1
 fi
 
+if [ -f "enrollment-secret" ]; then
+    cp enrollment-secret /opt/oasis/certs/enrollment-secret
+    chmod 600 /opt/oasis/certs/enrollment-secret
+    echo "  ✔ Enrollment Secret 已安装"
+fi
+
 echo "► 安装 systemd 服务..."
 cp oasis-agent.service /etc/systemd/system/
 systemctl daemon-reload
@@ -961,6 +998,26 @@ OASIS__TELEMETRY__LOG_NO_ANSI=false{labels_str}{groups_str}{token_str}
     );
 
     Ok(env)
+}
+
+fn agent_status_text(status: AgentStatusEnum) -> &'static str {
+    match status {
+        AgentStatusEnum::AgentOnline => "在线",
+        AgentStatusEnum::AgentOffline => "离线",
+        AgentStatusEnum::AgentRemoved => "已移除",
+        AgentStatusEnum::AgentUnknown => "未知",
+        AgentStatusEnum::AgentDegraded => "降级",
+    }
+}
+
+fn agent_status_cell(status: AgentStatusEnum) -> Cell {
+    match status {
+        AgentStatusEnum::AgentOnline => Cell::new("在线").fg(Color::Green),
+        AgentStatusEnum::AgentOffline => Cell::new("离线").fg(Color::Red),
+        AgentStatusEnum::AgentRemoved => Cell::new("已移除").fg(Color::Blue),
+        AgentStatusEnum::AgentUnknown => Cell::new("未知").fg(Color::Grey),
+        AgentStatusEnum::AgentDegraded => Cell::new("降级").fg(Color::Yellow),
+    }
 }
 
 /// 生成 systemd 服务文件
@@ -1058,6 +1115,14 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_status_text_and_cell_support_degraded_and_removed() {
+        assert_eq!(agent_status_text(AgentStatusEnum::AgentDegraded), "降级");
+        assert_eq!(agent_status_text(AgentStatusEnum::AgentRemoved), "已移除");
+        assert_eq!(agent_status_cell(AgentStatusEnum::AgentDegraded).content(), "降级");
+        assert_eq!(agent_status_cell(AgentStatusEnum::AgentRemoved).content(), "已移除");
+    }
+
+    #[test]
     fn test_generate_install_script() {
         let script = generate_install_script("root@192.168.1.100", "my-agent").unwrap();
 
@@ -1065,6 +1130,7 @@ mod tests {
         assert!(script.contains("my-agent"));
         assert!(script.contains("mkdir -p /opt/oasis/agent"));
         assert!(script.contains("systemctl"));
+        assert!(script.contains("Enrollment Secret"));
     }
 
     #[test]
@@ -1123,6 +1189,26 @@ mod tests {
         assert_eq!(args.agent_id, "agent-001");
         assert!(args.labels.is_some());
         assert!(args.groups.is_some());
+    }
+
+    #[test]
+    fn test_groups_are_serialized_as_comma_separated_value() {
+        let mut info: HashMap<String, String> = HashMap::new();
+        for group in ["group1", "group2"] {
+            match info.get_mut("__groups") {
+                Some(existing) => {
+                    if !existing.is_empty() {
+                        existing.push(',');
+                    }
+                    existing.push_str(group);
+                }
+                None => {
+                    info.insert("__groups".to_string(), group.to_string());
+                }
+            }
+        }
+
+        assert_eq!(info.get("__groups"), Some(&"group1,group2".to_string()));
     }
 
     #[test]

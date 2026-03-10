@@ -21,6 +21,14 @@ pub struct TaskService {
 }
 
 impl TaskService {
+    fn mark_task_cancelled(task: &mut Task) -> bool {
+        if !task.state.is_cancellable() {
+            return false;
+        }
+
+        task.transition_to(TaskState::Cancelled).is_ok()
+    }
+
     fn task_publish_headers(task_id: &TaskId, payload: &[u8]) -> async_nats::HeaderMap {
         let mut headers = async_nats::HeaderMap::new();
         let mut hasher = Sha256::new();
@@ -294,23 +302,29 @@ impl TaskService {
 
         // 批量取消所有任务
         for task_id in task_ids {
+            let can_cancel = self
+                .task_monitor
+                .task_cache
+                .get(&task_id)
+                .map(|task| task.state.is_cancellable())
+                .unwrap_or(false);
+
+            if !can_cancel {
+                continue;
+            }
+
+            if let Err(e) = self.publish_cancel_message(&task_id).await {
+                warn!(
+                    "Failed to publish cancel message for task {}: {}",
+                    task_id, e
+                );
+                continue;
+            }
+
             if let Some(mut cached_task) = self.task_monitor.task_cache.get_mut(&task_id) {
                 let task = Arc::make_mut(&mut cached_task);
-
-                // 检查是否可以取消
-                if task.state.is_cancellable() {
-                    // 转换状态
-                    if task.transition_to(TaskState::Cancelled).is_ok() {
-                        // 发布取消消息
-                        if let Err(e) = self.publish_cancel_message(&task_id).await {
-                            warn!(
-                                "Failed to publish cancel message for task {}: {}",
-                                task_id, e
-                            );
-                        } else {
-                            cancelled_count += 1;
-                        }
-                    }
+                if Self::mark_task_cancelled(task) {
+                    cancelled_count += 1;
                 }
             }
         }
@@ -363,5 +377,35 @@ impl TaskService {
         })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oasis_core::core_types::{AgentId, BatchId};
+
+    #[test]
+    fn test_mark_task_cancelled_only_changes_cancellable_tasks() {
+        let batch_id = BatchId::generate();
+        let agent_id = AgentId::new("agent-1");
+
+        let mut cancellable = Task::new("echo".to_string(), Vec::new(), 30)
+            .with_batch_id(batch_id.clone())
+            .with_agent_id(agent_id.clone());
+        cancellable.transition_to(TaskState::Pending).unwrap();
+
+        assert!(TaskService::mark_task_cancelled(&mut cancellable));
+        assert_eq!(cancellable.state, TaskState::Cancelled);
+
+        let mut terminal = Task::new("echo".to_string(), Vec::new(), 30)
+            .with_batch_id(batch_id)
+            .with_agent_id(agent_id);
+        terminal.transition_to(TaskState::Pending).unwrap();
+        terminal.transition_to(TaskState::Running).unwrap();
+        terminal.transition_to(TaskState::Success).unwrap();
+
+        assert!(!TaskService::mark_task_cancelled(&mut terminal));
+        assert_eq!(terminal.state, TaskState::Success);
     }
 }

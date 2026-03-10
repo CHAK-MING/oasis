@@ -154,6 +154,14 @@ pub struct SelectorEngine {
 }
 
 impl SelectorEngine {
+    async fn invalidate_cached_queries(
+        parse_cache: &DashMap<String, CachedQuery>,
+        all_agents_cache: &AsyncRwLock<Option<(RoaringBitmap, Instant)>>,
+    ) {
+        parse_cache.clear();
+        *all_agents_cache.write().await = None;
+    }
+
     pub fn new(
         heartbeat: Arc<HeartbeatMonitor>,
         agent_info: Arc<AgentInfoMonitor>,
@@ -564,6 +572,7 @@ impl SelectorEngine {
 
     pub async fn update_agent_info(&self, agent_id: AgentId, info: AgentInfo) {
         self.agent_info.update_agent_info(agent_id, info).await;
+        Self::invalidate_cached_queries(&self.parse_cache, &self.all_agents_cache).await;
     }
 
     pub fn remove_agent(&self, agent_id: &AgentId) {
@@ -609,6 +618,7 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     mod unquote_tests {
         use super::*;
@@ -844,6 +854,28 @@ mod tests {
             } else {
                 panic!("Clone failed");
             }
+        }
+    }
+
+    mod cache_invalidation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_invalidate_cached_queries_clears_query_and_all_agents_cache() {
+            let parse_cache = DashMap::new();
+            parse_cache.insert(
+                "query|labels[\"env\"]==\"prod\"".to_string(),
+                CachedQuery {
+                    bitmap: RoaringBitmap::from_iter([1, 2]),
+                    cached_at: chrono::Utc::now().timestamp(),
+                },
+            );
+            let all_agents_cache = AsyncRwLock::new(Some((RoaringBitmap::from_iter([1]), Instant::now())));
+
+            SelectorEngine::invalidate_cached_queries(&parse_cache, &all_agents_cache).await;
+
+            assert!(parse_cache.is_empty());
+            assert!(all_agents_cache.read().await.is_none());
         }
     }
 }

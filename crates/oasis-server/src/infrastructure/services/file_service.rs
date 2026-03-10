@@ -24,6 +24,8 @@ pub struct FileApplySummary {
     pub success: bool,
     #[allow(dead_code)]
     pub completed_agents: Vec<AgentId>,
+    pub all_results: Vec<FileApplyExecution>,
+    #[allow(dead_code)]
     pub failed_results: Vec<FileApplyExecution>,
     pub revision: u64,
     pub message: String,
@@ -37,21 +39,29 @@ fn summarize_apply_results(
     results: HashMap<AgentId, FileApplyExecution>,
 ) -> FileApplySummary {
     let mut completed_agents = Vec::new();
+    let mut all_results = Vec::new();
     let mut failed_results = Vec::new();
 
     for agent_id in target_agents {
-        match results.get(agent_id) {
-            Some(result) if result.success => completed_agents.push(agent_id.clone()),
-            Some(result) => failed_results.push(result.clone()),
-            None => failed_results.push(FileApplyExecution::failure(
+        let execution = match results.get(agent_id) {
+            Some(result) => result.clone(),
+            None => FileApplyExecution::failure(
                 agent_id.clone(),
                 operation_id.to_string(),
                 source_path.to_string(),
                 String::new(),
                 revision,
                 "Timed out waiting for file apply result".to_string(),
-            )),
+            ),
+        };
+
+        if execution.success {
+            completed_agents.push(agent_id.clone());
+        } else {
+            failed_results.push(execution.clone());
         }
+
+        all_results.push(execution);
     }
 
     let success = failed_results.is_empty();
@@ -74,9 +84,37 @@ fn summarize_apply_results(
     FileApplySummary {
         success,
         completed_agents,
+        all_results,
         failed_results,
         revision,
         message,
+    }
+}
+
+fn should_update_active_revision_after_rollback(success: bool) -> bool {
+    success
+}
+
+fn apply_active_revision_to_versions(
+    versions: &mut [FileVersion],
+    active_revision: Option<u64>,
+) -> Option<u64> {
+    if let Some(active) = active_revision {
+        let mut matched = false;
+        for version in versions.iter_mut() {
+            version.is_current = version.revision == active;
+            matched |= version.is_current;
+        }
+        if matched {
+            return Some(active);
+        }
+    }
+
+    if let Some(latest_version) = versions.first_mut() {
+        latest_version.is_current = true;
+        Some(latest_version.revision)
+    } else {
+        None
     }
 }
 
@@ -517,6 +555,37 @@ impl FileService {
         self.apply_internal(config, agent_ids).await
     }
 
+    pub async fn current_active_revision(&self, source_path: &str) -> Result<Option<u64>> {
+        self.get_active_revision(source_path).await
+    }
+
+    pub async fn rollback_file_with_details(
+        &self,
+        config: &oasis_core::proto::FileConfigMsg,
+        agent_ids: Vec<AgentId>,
+    ) -> Result<FileApplySummary> {
+        debug!(
+            "Rolling back file {} to revision {}",
+            config.source_path, config.revision
+        );
+
+        let summary = self.apply_internal(config, agent_ids).await?;
+
+        if should_update_active_revision_after_rollback(summary.success) {
+            if let Err(e) = self
+                .set_active_revision(&config.source_path, config.revision)
+                .await
+            {
+                warn!(
+                    "Failed to update active revision pointer after rollback: {}",
+                    e
+                );
+            }
+        }
+
+        Ok(summary)
+    }
+
     /// 清空所有文件
     pub async fn clear_all(&self) -> Result<usize> {
         self.clear_all_internal().await
@@ -544,8 +613,6 @@ impl FileService {
         })?;
 
         let mut versions = Vec::new();
-        let mut current_version = None;
-
         // 构建匹配模式：{path_hash}/{filename}.v*
         let pattern_prefix = format!("{}/{}.v", path_hash, filename);
 
@@ -592,15 +659,7 @@ impl FileService {
 
         // 读取当前指针；若不存在则默认最新为当前
         let active_revision = self.get_active_revision(source_path).await?;
-        if let Some(active) = active_revision {
-            for v in &mut versions {
-                v.is_current = v.revision == active;
-            }
-            current_version = Some(active);
-        } else if let Some(latest_version) = versions.first_mut() {
-            latest_version.is_current = true;
-            current_version = Some(latest_version.revision);
-        }
+        let current_version = apply_active_revision_to_versions(&mut versions, active_revision);
 
         let file_history = FileHistory {
             name: filename.to_string(),
@@ -617,24 +676,7 @@ impl FileService {
         config: &oasis_core::proto::FileConfigMsg,
         agent_ids: Vec<AgentId>,
     ) -> Result<FileOperationResult> {
-        debug!(
-            "Rolling back file {} to revision {}",
-            config.source_path, config.revision
-        );
-
-        // 下发到对应的 Agent
-        let summary = self.apply_internal(config, agent_ids).await?;
-
-        // 更新当前版本指针为回滚到的版本
-        if let Err(e) = self
-            .set_active_revision(&config.source_path, config.revision)
-            .await
-        {
-            warn!(
-                "Failed to update active revision pointer after rollback: {}",
-                e
-            );
-        }
+        let summary = self.rollback_file_with_details(config, agent_ids).await?;
 
         info!(
             "Successfully rolled back file {} to revision {}",
@@ -904,6 +946,47 @@ mod tests {
     }
 
     #[test]
+    fn test_rollback_pointer_updates_only_when_summary_is_successful() {
+        assert!(should_update_active_revision_after_rollback(true));
+        assert!(!should_update_active_revision_after_rollback(false));
+    }
+
+    #[test]
+    fn test_summarize_apply_results_includes_timeout_agents_in_all_results() {
+        let agent_a = AgentId::new("agent-a");
+        let agent_b = AgentId::new("agent-b");
+        let mut results = HashMap::new();
+        results.insert(
+            agent_a.clone(),
+            FileApplyExecution::success(
+                agent_a.clone(),
+                "op-1".to_string(),
+                "/tmp/app.conf".to_string(),
+                "/etc/app.conf".to_string(),
+                42,
+                "ok".to_string(),
+            ),
+        );
+
+        let summary = summarize_apply_results(
+            "op-1",
+            "/tmp/app.conf",
+            42,
+            &[agent_a, agent_b.clone()],
+            results,
+        );
+
+        assert_eq!(summary.all_results.len(), 2);
+        let timeout = summary
+            .all_results
+            .iter()
+            .find(|result| result.agent_id == agent_b)
+            .expect("missing timeout result");
+        assert!(!timeout.success);
+        assert!(timeout.message.contains("Timed out waiting for file apply result"));
+    }
+
+    #[test]
     fn test_gc_keep_set_active_old_revision_keep_versions_1() {
         // Scenario: v1 is active (old), v2 is newest, keep_versions=1, keep_days=0
         // Expected: keep only v1 (active must be preserved even though not newest)
@@ -1018,5 +1101,33 @@ mod tests {
 
         assert!(keep_set.contains(&1), "Active revision must be kept");
         assert_eq!(keep_set.len(), 1, "Should keep at least 1 revision even when keep_versions=0");
+    }
+
+    #[test]
+    fn test_apply_active_revision_to_versions_falls_back_when_pointer_is_stale() {
+        let mut versions = vec![
+            FileVersion {
+                name: "app.conf".to_string(),
+                revision: 2,
+                size: 10,
+                checksum: "abc".to_string(),
+                created_at: 20,
+                is_current: false,
+            },
+            FileVersion {
+                name: "app.conf".to_string(),
+                revision: 1,
+                size: 9,
+                checksum: "def".to_string(),
+                created_at: 10,
+                is_current: false,
+            },
+        ];
+
+        let current = apply_active_revision_to_versions(&mut versions, Some(99));
+
+        assert_eq!(current, Some(2));
+        assert!(versions[0].is_current);
+        assert!(!versions[1].is_current);
     }
 }

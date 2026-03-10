@@ -26,6 +26,7 @@ mod tests {
     use super::*;
     use oasis_core::core_types::AgentId;
     use oasis_core::file_types::FileApplyExecution;
+    use oasis_core::task_types::TaskExecution;
 
     #[test]
     fn test_apply_file_stage_result_uses_actual_failures() {
@@ -84,6 +85,263 @@ mod tests {
         assert_eq!(stage.failed_executions.len(), 1);
         assert_eq!(stage.failed_executions[0].agent_id, agent_b);
         assert_eq!(status.state, RolloutState::Failed);
+    }
+
+    #[test]
+    fn test_command_stage_success_advances_without_completing_rollout() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "command rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1, 1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.state = RolloutState::Running;
+
+        apply_command_stage_result(&mut status, false, 1, 0, Vec::<TaskExecution>::new());
+
+        assert_eq!(status.current_stage_idx, 1);
+        assert_eq!(status.state, RolloutState::Running);
+        assert!(status.can_advance());
+    }
+
+    #[test]
+    fn test_file_rollback_result_marks_rollout_as_rolled_back() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "file rollback".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::FileDeployment {
+                config: oasis_core::file_types::FileConfig {
+                    source_path: "/tmp/app.conf".to_string(),
+                    destination_path: "/etc/app.conf".to_string(),
+                    revision: 9,
+                    owner: None,
+                    mode: None,
+                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    operation_id: Some("op-1".to_string()),
+                },
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let agent = AgentId::new("agent-a");
+        let mut status = RolloutStatus::new(config, vec![agent.clone()]);
+        status.current_stage_idx = 1;
+        status.state = RolloutState::RollingBack;
+        status.current_action = "部署文件回滚: app.conf".to_string();
+
+        apply_file_stage_result(
+            &mut status,
+            &[FileApplyExecution::success(
+                agent,
+                "op-rollback".to_string(),
+                "/tmp/app.conf".to_string(),
+                "/etc/app.conf".to_string(),
+                8,
+                "rollback ok".to_string(),
+            )],
+        );
+
+        assert_eq!(status.state, RolloutState::RolledBack);
+    }
+
+    #[test]
+    fn test_file_rollback_result_marks_rollout_as_rollback_failed() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "file rollback".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::FileDeployment {
+                config: oasis_core::file_types::FileConfig {
+                    source_path: "/tmp/app.conf".to_string(),
+                    destination_path: "/etc/app.conf".to_string(),
+                    revision: 9,
+                    owner: None,
+                    mode: None,
+                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    operation_id: Some("op-1".to_string()),
+                },
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let agent = AgentId::new("agent-a");
+        let mut status = RolloutStatus::new(config, vec![agent.clone()]);
+        status.current_stage_idx = 1;
+        status.state = RolloutState::RollingBack;
+        status.current_action = "部署文件回滚: app.conf".to_string();
+
+        apply_file_stage_result(
+            &mut status,
+            &[FileApplyExecution::failure(
+                agent,
+                "op-rollback".to_string(),
+                "/tmp/app.conf".to_string(),
+                "/etc/app.conf".to_string(),
+                8,
+                "rollback denied".to_string(),
+            )],
+        );
+
+        assert_eq!(status.state, RolloutState::RollbackFailed);
+    }
+
+    #[test]
+    fn test_build_file_version_snapshot_uses_previous_revision() {
+        let file_config = oasis_core::file_types::FileConfig {
+            source_path: "/tmp/app.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 20,
+            owner: None,
+            mode: None,
+            target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+            operation_id: Some("op-1".to_string()),
+        };
+
+        let snapshot = build_file_version_snapshot(file_config, Some(12));
+        let SnapshotData::FileSnapshot {
+            previous_revision, ..
+        } = snapshot.snapshot_data else {
+            panic!("expected file snapshot");
+        };
+        assert_eq!(previous_revision, Some(12));
+    }
+
+    #[test]
+    fn test_rollback_stage_index_uses_current_stage_when_rollout_failed() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "rollback".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1, 1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec![],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.current_stage_idx = 0;
+        status.state = RolloutState::Failed;
+
+        assert_eq!(rollback_stage_index(&status), Some(0));
+    }
+
+    #[test]
+    fn test_completed_rollout_can_rollback_previous_stage() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "completed rollback".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::FileDeployment {
+                config: oasis_core::file_types::FileConfig {
+                    source_path: "/tmp/app.conf".to_string(),
+                    destination_path: "/etc/app.conf".to_string(),
+                    revision: 9,
+                    owner: None,
+                    mode: None,
+                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    operation_id: Some("op-1".to_string()),
+                },
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
+        status.current_stage_idx = 1;
+        status.state = RolloutState::Completed;
+
+        assert!(status.can_rollback());
+        assert_eq!(rollback_stage_index(&status), Some(0));
+    }
+
+    #[test]
+    fn test_two_agent_rollout_keeps_explicit_two_stage_strategy() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "two-agent canary".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1, 1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let status = RolloutService::create_rollout_status_with_smart_stages(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+
+        assert_eq!(status.stages.len(), 2);
+        assert_eq!(status.stages[0].target_agents.len(), 1);
+        assert_eq!(status.stages[1].target_agents.len(), 1);
+    }
+
+    #[test]
+    fn test_mark_stage_operation_error_sets_file_rollout_failed() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "file rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::FileDeployment {
+                config: oasis_core::file_types::FileConfig {
+                    source_path: "/tmp/app.conf".to_string(),
+                    destination_path: "/etc/app.conf".to_string(),
+                    revision: 7,
+                    owner: None,
+                    mode: None,
+                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    operation_id: Some("op-1".to_string()),
+                },
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
+        status.state = RolloutState::Running;
+        status.current_action = "部署文件: app.conf".to_string();
+
+        mark_stage_operation_error(&mut status, false, "dispatch failed");
+
+        let stage = status.stages.first().expect("stage");
+        assert_eq!(status.state, RolloutState::Failed);
+        assert_eq!(stage.failed_count, 1);
+        assert_eq!(status.error_message.as_deref(), Some("dispatch failed"));
     }
 }
 
@@ -232,53 +490,7 @@ impl RolloutService {
         config: RolloutConfig,
         all_target_agents: Vec<AgentId>,
     ) -> RolloutStatus {
-        let total_agents = all_target_agents.len();
-
-        // 检查是否需要合并阶段（Agent数量过少）
-        let should_merge_stages = match &config.strategy {
-            RolloutStrategy::Percentage { stages } => {
-                total_agents <= 2 || stages.len() > total_agents
-            }
-            RolloutStrategy::Count { stages } => total_agents <= 2 || stages.len() > total_agents,
-        };
-
-        if should_merge_stages {
-            info!("Agent number is less than 2, merge to single stage");
-            Self::create_single_stage_rollout(config, all_target_agents)
-        } else {
-            // 使用原有的阶段划分逻辑
-            RolloutStatus::new(config, all_target_agents)
-        }
-    }
-
-    /// 创建单阶段发布（用于Agent数量少的情况）
-    fn create_single_stage_rollout(
-        config: RolloutConfig,
-        all_target_agents: Vec<AgentId>,
-    ) -> RolloutStatus {
-        let stage = RolloutStageStatus {
-            stage_name: "全部节点".to_string(),
-            target_agents: all_target_agents.clone(),
-            batch_id: None,
-            started_count: 0,
-            completed_count: 0,
-            failed_count: 0,
-            started_at: None,
-            completed_at: None,
-            failed_executions: Vec::new(),
-            version_snapshot: None,
-        };
-
-        RolloutStatus {
-            config,
-            state: RolloutState::Created,
-            current_stage_idx: 0,
-            stages: vec![stage],
-            all_target_agents,
-            updated_at: chrono::Utc::now().timestamp(),
-            error_message: None,
-            current_action: "".to_string(),
-        }
+        RolloutStatus::new(config, all_target_agents)
     }
 
     /// 获取灰度发布状态 - 优先内存缓存，后JetStream
@@ -487,9 +699,11 @@ impl RolloutService {
                 }
             }
 
-            // 回滚时，将 batch_id 设置到前一个阶段
-            if let Some(previous_stage) = status_val.previous_stage_status_mut() {
-                previous_stage.batch_id = batch_id;
+            if let Some(stage_idx) = rollback_stage_index(status_val) {
+                status_val.current_stage_idx = stage_idx as u64;
+                if let Some(stage) = status_val.current_stage_status_mut() {
+                    stage.batch_id = batch_id;
+                }
             }
 
             if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
@@ -527,6 +741,29 @@ impl RolloutService {
         }
     }
 
+    pub async fn mark_stage_operation_error(
+        &self,
+        rollout_id: &RolloutId,
+        is_rolling_back: bool,
+        error_message: impl Into<String>,
+    ) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status_val = status.value_mut();
+            mark_stage_operation_error(status_val, is_rolling_back, error_message);
+            status_val.updated_at = chrono::Utc::now().timestamp();
+            if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
+                warn!("Failed to persist rollout operation error: {}", e);
+            }
+            Ok(())
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
+
     /// 获取需要回滚的阶段信息（返回阶段索引、目标 agents、任务类型、版本快照）
     pub async fn get_rollback_stage_info(
         &self,
@@ -539,8 +776,11 @@ impl RolloutService {
                     severity: ErrorSeverity::Error,
                 });
             }
-            // 取上次执行的阶段
-            if let Some(stage) = status.previous_stage_status() {
+            if let Some(stage_idx) = rollback_stage_index(&status) {
+                let stage = status.stages.get(stage_idx).ok_or_else(|| CoreError::Internal {
+                    message: format!("Missing rollback stage for rollout {}", rollout_id),
+                    severity: ErrorSeverity::Error,
+                })?;
                 return Ok(Some((
                     stage.target_agents.clone(),
                     status.config.task_type.clone(),
@@ -573,13 +813,14 @@ impl RolloutService {
 
             // 先确定要更新的阶段
             let is_rolling_back = status.state == RolloutState::RollingBack;
-            if is_rolling_back && status.current_stage_idx > 0 {
-                // 回滚时更新前一个阶段
-                status.current_stage_idx -= 1;
-            }
 
             // 获取阶段并更新统计信息
-            if let Some(stage) = status.current_stage_status_mut() {
+            let stage_idx = match result_stage_index(status, is_rolling_back) {
+                Some(idx) => idx,
+                None => return,
+            };
+
+            if let Some(stage) = status.stages.get_mut(stage_idx) {
                 if let Some(batch_id) = &stage.batch_id {
                     if let Some(task_ids) = self.task_monitor.get_batch_task_ids(batch_id) {
                         // 统计各种状态的任务数量并收集失败详情
@@ -604,10 +845,6 @@ impl RolloutService {
                         }
 
                         stage.started_count = started_count + completed_count + failed_count;
-                        stage.completed_count = completed_count;
-                        stage.failed_count = failed_count;
-                        stage.failed_executions = failed_executions;
-                        stage.completed_at = Some(chrono::Utc::now().timestamp());
                     }
                 } else {
                     return;
@@ -617,31 +854,20 @@ impl RolloutService {
             }
 
             // 检查是否所有任务都已完成
-            let total_targets = if let Some(stage) = status.current_stage_status() {
+            let total_targets = if let Some(stage) = status.stages.get(stage_idx) {
                 stage.target_agents.len() as u32
             } else {
                 return;
             };
 
             if completed_count + failed_count >= total_targets {
-                if failed_count > 0 {
-                    // 有失败任务
-                    if is_rolling_back {
-                        status.state = RolloutState::RollbackFailed;
-                    } else {
-                        status.state = RolloutState::Failed;
-                        status.current_stage_idx += 1;
-                    }
-                } else {
-                    // 全部成功
-                    if is_rolling_back {
-                        status.state = RolloutState::RolledBack;
-                    } else {
-                        status.state = RolloutState::Completed;
-                        // 正常完成时，推进到下一阶段
-                        status.current_stage_idx += 1;
-                    }
-                }
+                apply_command_stage_result(
+                    status,
+                    is_rolling_back,
+                    completed_count,
+                    failed_count,
+                    failed_executions,
+                );
             }
 
             status.updated_at = chrono::Utc::now().timestamp();
@@ -662,14 +888,88 @@ impl RolloutService {
     }
 }
 
-fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecution]) {
-    let is_rolling_back = status.state == RolloutState::RollingBack;
-    let stage_idx = if is_rolling_back && status.current_stage_idx > 0 {
-        status.current_stage_idx as usize - 1
-    } else {
-        status.current_stage_idx as usize
+pub(crate) fn mark_stage_operation_error(
+    status: &mut RolloutStatus,
+    is_rolling_back: bool,
+    error_message: impl Into<String>,
+) {
+    let error_message = error_message.into();
+    let stage_idx = match result_stage_index(status, is_rolling_back) {
+        Some(idx) => idx,
+        None => return,
     };
 
+    let Some(stage) = status.stages.get_mut(stage_idx) else {
+        return;
+    };
+
+    stage.started_count = stage.target_agents.len() as u32;
+    stage.failed_count = stage.target_agents.len() as u32;
+    stage.completed_at = Some(chrono::Utc::now().timestamp());
+    status.error_message = Some(error_message);
+    status.state = if is_rolling_back {
+        RolloutState::RollbackFailed
+    } else {
+        RolloutState::Failed
+    };
+}
+
+fn apply_command_stage_result(
+    status: &mut RolloutStatus,
+    is_rolling_back: bool,
+    completed_count: u32,
+    failed_count: u32,
+    failed_executions: Vec<oasis_core::task_types::TaskExecution>,
+) {
+    let stage_idx = result_stage_index(status, is_rolling_back);
+
+    let Some(stage_idx) = stage_idx else {
+        return;
+    };
+    let Some(stage) = status.stages.get_mut(stage_idx) else {
+        return;
+    };
+    stage.completed_count = completed_count;
+    stage.failed_count = failed_count;
+    stage.failed_executions = failed_executions;
+    stage.completed_at = Some(chrono::Utc::now().timestamp());
+
+    if failed_count > 0 {
+        if is_rolling_back {
+            status.state = RolloutState::RollbackFailed;
+        } else {
+            status.state = RolloutState::Failed;
+        }
+        return;
+    }
+
+    if is_rolling_back {
+        status.state = RolloutState::RolledBack;
+        return;
+    }
+
+    status.current_stage_idx += 1;
+    if status.current_stage_idx >= status.stages.len() as u64 {
+        status.state = RolloutState::Completed;
+    } else {
+        status.state = RolloutState::Running;
+    }
+}
+
+pub(crate) fn build_file_version_snapshot(
+    file_config: oasis_core::file_types::FileConfig,
+    previous_revision: Option<u64>,
+) -> VersionSnapshot {
+    VersionSnapshot::new_file_snapshot(file_config, previous_revision)
+}
+
+fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecution]) {
+    let is_rolling_back = status.state == RolloutState::RollingBack;
+    let stage_idx = result_stage_index(status, is_rolling_back);
+
+    let Some(stage_idx) = stage_idx else {
+        return;
+    };
     let Some(stage) = status.stages.get_mut(stage_idx) else {
         return;
     };
@@ -726,4 +1026,35 @@ fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecu
     } else {
         status.state = RolloutState::Running;
     }
+}
+
+fn rollback_stage_index(status: &RolloutStatus) -> Option<usize> {
+    match status.state {
+        RolloutState::Failed | RolloutState::RollingBack | RolloutState::RollbackFailed => {
+            status.stages.get(status.current_stage_idx as usize)?;
+            Some(status.current_stage_idx as usize)
+        }
+        RolloutState::Running | RolloutState::Completed => status
+            .current_stage_idx
+            .checked_sub(1)
+            .map(|idx| idx as usize),
+        _ => None,
+    }
+}
+
+fn result_stage_index(status: &RolloutStatus, is_rolling_back: bool) -> Option<usize> {
+    let current_idx = status.current_stage_idx as usize;
+    if status.stages.get(current_idx).is_some() {
+        return Some(current_idx);
+    }
+
+    if is_rolling_back {
+        return status
+            .current_stage_idx
+            .checked_sub(1)
+            .map(|idx| idx as usize)
+            .filter(|idx| status.stages.get(*idx).is_some());
+    }
+
+    None
 }

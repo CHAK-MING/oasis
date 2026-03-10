@@ -50,6 +50,34 @@ pub struct TaskMonitor {
 }
 
 impl TaskMonitor {
+    fn task_state_for_batch_listing(
+        task_id: &TaskId,
+        task_cache: &DashMap<TaskId, Arc<Task>>,
+        execution_cache: &DashMap<TaskId, Vec<CachedExecution>>,
+    ) -> Option<TaskState> {
+        execution_cache
+            .get(task_id)
+            .and_then(|v| v.last().map(|e| e.execution.state))
+            .or_else(|| task_cache.get(task_id).map(|task| task.state))
+    }
+
+    fn batch_matches_filter(
+        task_ids: &[TaskId],
+        task_cache: &DashMap<TaskId, Arc<Task>>,
+        execution_cache: &DashMap<TaskId, Vec<CachedExecution>>,
+        state_filter: Option<&[TaskState]>,
+    ) -> bool {
+        let Some(states) = state_filter else {
+            return true;
+        };
+
+        task_ids.iter().any(|task_id| {
+            Self::task_state_for_batch_listing(task_id, task_cache, execution_cache)
+                .map(|state| states.contains(&state))
+                .unwrap_or(false)
+        })
+    }
+
     pub fn new(jetstream: Arc<Context>, shutdown_token: CancellationToken) -> Self {
         Self {
             jetstream,
@@ -227,11 +255,24 @@ impl TaskMonitor {
     pub fn list_batches_from_cache(
         &self,
         limit: u32,
-        _state_filter: Option<&[TaskState]>,
+        state_filter: Option<&[TaskState]>,
     ) -> (Vec<Batch>, u32) {
         let mut batches: Vec<Batch> = self
             .batch_cache
             .iter()
+            .filter(|entry| {
+                self.batch_tasks_cache
+                    .get(entry.key())
+                    .map(|task_ids| {
+                        Self::batch_matches_filter(
+                            task_ids.value(),
+                            &self.task_cache,
+                            &self.execution_cache,
+                            state_filter,
+                        )
+                    })
+                    .unwrap_or(false)
+            })
             .map(|entry| (**entry.value()).clone())
             .collect();
 
@@ -330,5 +371,78 @@ impl TaskMonitor {
                 cleaned_batches, cleaned_tasks
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oasis_core::core_types::{AgentId, BatchId};
+
+    fn make_task(batch_id: &BatchId, agent_id: &AgentId, state: TaskState) -> Task {
+        let mut task = Task::new("echo".to_string(), Vec::new(), 30)
+            .with_batch_id(batch_id.clone())
+            .with_agent_id(agent_id.clone());
+
+        match state {
+            TaskState::Created => {}
+            TaskState::Pending => {
+                task.transition_to(TaskState::Pending).unwrap();
+            }
+            TaskState::Running => {
+                task.transition_to(TaskState::Pending).unwrap();
+                task.transition_to(TaskState::Running).unwrap();
+            }
+            TaskState::Success | TaskState::Failed | TaskState::Timeout => {
+                task.transition_to(TaskState::Pending).unwrap();
+                task.transition_to(TaskState::Running).unwrap();
+                task.transition_to(state).unwrap();
+            }
+            TaskState::Cancelled => {
+                task.transition_to(TaskState::Cancelled).unwrap();
+            }
+        }
+
+        task
+    }
+
+    #[test]
+    fn test_batch_matches_filter_uses_task_and_execution_state() {
+        let batch_id = BatchId::generate();
+        let agent_id = AgentId::new("agent-1");
+        let task = make_task(&batch_id, &agent_id, TaskState::Pending);
+        let task_id = task.task_id.clone();
+
+        let task_cache = DashMap::new();
+        task_cache.insert(task_id.clone(), Arc::new(task));
+
+        let execution_cache = DashMap::new();
+        execution_cache.insert(
+            task_id.clone(),
+            vec![CachedExecution {
+                execution: Arc::new(TaskExecution::success(
+                    task_id.clone(),
+                    agent_id,
+                    0,
+                    String::new(),
+                    String::new(),
+                    1.0,
+                )),
+                cached_at: chrono::Utc::now().timestamp(),
+            }],
+        );
+
+        assert!(TaskMonitor::batch_matches_filter(
+            std::slice::from_ref(&task_id),
+            &task_cache,
+            &execution_cache,
+            Some(&[TaskState::Success]),
+        ));
+        assert!(!TaskMonitor::batch_matches_filter(
+            std::slice::from_ref(&task_id),
+            &task_cache,
+            &execution_cache,
+            Some(&[TaskState::Pending]),
+        ));
     }
 }

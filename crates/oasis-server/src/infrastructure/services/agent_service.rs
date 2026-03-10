@@ -20,6 +20,32 @@ pub struct AgentService {
 }
 
 impl AgentService {
+    fn merge_agent_info_status(
+        mut info: AgentInfo,
+        heartbeat: Option<
+            crate::infrastructure::monitor::heartbeat_monitor::AgentHeartbeatInfo,
+        >,
+    ) -> AgentInfo {
+        match heartbeat {
+            Some(hb_info) => {
+                info.last_heartbeat = hb_info.last_heartbeat;
+                info.status = match hb_info.status {
+                    oasis_core::agent_types::AgentStatus::Online
+                        if info.status == oasis_core::agent_types::AgentStatus::Degraded =>
+                    {
+                        oasis_core::agent_types::AgentStatus::Degraded
+                    }
+                    status => status,
+                };
+            }
+            None => {
+                info.status = oasis_core::agent_types::AgentStatus::Offline;
+            }
+        }
+
+        info
+    }
+
     pub fn new(
         jetstream: Arc<Context>,
         heartbeat: Arc<HeartbeatMonitor>,
@@ -60,16 +86,11 @@ impl AgentService {
     ) -> Vec<oasis_core::agent_types::AgentInfo> {
         let mut out = Vec::with_capacity(agent_ids.len());
         for id in agent_ids {
-            if let Some(mut info) = self.get_agent_info(id) {
-                // Merge heartbeat-derived status (source of truth) via SelectorEngine
-                if let Some(hb_info) = self.engine.get_agent_heartbeat_info(id) {
-                    info.status = hb_info.status;
-                    info.last_heartbeat = hb_info.last_heartbeat;
-                } else {
-                    // No heartbeat entry: treat as Offline with last_heartbeat unchanged
-                    info.status = oasis_core::agent_types::AgentStatus::Offline;
-                }
-                out.push(info);
+            if let Some(info) = self.get_agent_info(id) {
+                out.push(Self::merge_agent_info_status(
+                    info,
+                    self.engine.get_agent_heartbeat_info(id),
+                ));
             }
         }
         out
@@ -228,5 +249,31 @@ impl AgentService {
             })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::monitor::heartbeat_monitor::AgentHeartbeatInfo;
+    use oasis_core::agent_types::AgentStatus;
+
+    #[test]
+    fn test_merge_agent_info_status_preserves_degraded_when_heartbeat_is_online() {
+        let mut info = AgentInfo::new(AgentId::new("agent-1"));
+        info.status = AgentStatus::Degraded;
+
+        let merged = AgentService::merge_agent_info_status(info, Some(AgentHeartbeatInfo::online(42)));
+        assert_eq!(merged.status, AgentStatus::Degraded);
+        assert_eq!(merged.last_heartbeat, 42);
+    }
+
+    #[test]
+    fn test_merge_agent_info_status_marks_missing_heartbeat_offline() {
+        let mut info = AgentInfo::new(AgentId::new("agent-1"));
+        info.status = AgentStatus::Online;
+
+        let merged = AgentService::merge_agent_info_status(info, None);
+        assert_eq!(merged.status, AgentStatus::Offline);
     }
 }

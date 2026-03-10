@@ -7,7 +7,8 @@ use tracing::instrument;
 
 use oasis_core::proto::{
     AdvanceRolloutRequest, AdvanceRolloutResponse, CancelBatchRequest, CancelBatchResponse,
-    CommitFileMsg, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, CreateRolloutRequest,
+    CommitFileMsg, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
+    CreateEnrollmentSecretRequest, CreateEnrollmentSecretResponse, CreateRolloutRequest,
     CreateRolloutResponse, EmptyMsg, FileApplyRequestMsg, FileChunkMsg, FileChunkResponse,
     FileOperationResult, FileSpecMsg, FileUploadSession, GcFilesResponse, GetBatchDetailsRequest,
     GetBatchDetailsResponse, GetFileHistoryRequest, GetFileHistoryResponse,
@@ -171,6 +172,15 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<CreateBootstrapTokenRequest>,
     ) -> std::result::Result<Response<CreateBootstrapTokenResponse>, Status> {
         crate::interface::grpc::handlers::AgentHandlers::create_bootstrap_token(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn create_enrollment_secret(
+        &self,
+        request: Request<CreateEnrollmentSecretRequest>,
+    ) -> std::result::Result<Response<CreateEnrollmentSecretResponse>, Status> {
+        crate::interface::grpc::handlers::AgentHandlers::create_enrollment_secret(self, request)
+            .await
     }
 
     #[instrument(skip_all)]

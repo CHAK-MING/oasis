@@ -15,6 +15,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use x509_parser::prelude::*;
 
+const ENROLLMENT_REQUEST_MAX_SKEW_SECS: i64 = 600;
+
 pub struct CaService {
     ca_issuer: Issuer<'static, KeyPair>,
     ca_cert_pem: String,
@@ -145,8 +147,16 @@ impl CaService {
         Ok(token)
     }
 
+    pub fn create_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
+        self.derive_enrollment_secret(agent_id)
+    }
+
     pub async fn handle_csr_request(&self, request: CsrRequest) -> CsrResponse {
         if let Some(token_str) = &request.bootstrap_token {
+            if let Err(e) = self.validate_request_timestamp(request.timestamp) {
+                error!(error = %e, "Invalid bootstrap request timestamp");
+                return CsrResponse::error(format!("Invalid request timestamp: {e}"));
+            }
             let maybe_agent_id = match self.consume_bootstrap_token(token_str).await {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
@@ -172,6 +182,10 @@ impl CaService {
                 }
             }
         } else if let Some(enrollment_secret) = &request.enrollment_secret {
+            if let Err(e) = self.validate_request_timestamp(request.timestamp) {
+                error!(error = %e, "Invalid enrollment request timestamp");
+                return CsrResponse::error(format!("Invalid request timestamp: {e}"));
+            }
             if let Err(e) = self.validate_enrollment_secret(&request.agent_id, enrollment_secret) {
                 error!(error = %e, "Invalid enrollment secret");
                 return CsrResponse::error(format!("Invalid enrollment secret: {e}"));
@@ -403,6 +417,25 @@ impl CaService {
             })
         }
     }
+
+    fn validate_request_timestamp(&self, timestamp: i64) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let skew = (now - timestamp).abs();
+        if skew <= ENROLLMENT_REQUEST_MAX_SKEW_SECS {
+            Ok(())
+        } else {
+            Err(CoreError::Validation {
+                message: format!(
+                    "request timestamp is outside the allowed skew window ({}s)",
+                    ENROLLMENT_REQUEST_MAX_SKEW_SECS
+                ),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
 }
 
 fn build_dn_from_x509_subject(cert: &X509Certificate<'_>) -> (DistinguishedName, bool) {
@@ -531,6 +564,13 @@ mod tests {
     use tempfile::tempdir;
     use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, IsCa, BasicConstraints, KeyUsagePurpose};
 
+    fn now_timestamp() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
     async fn create_test_ca() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let temp_dir = tempdir().unwrap();
         
@@ -575,6 +615,22 @@ mod tests {
         assert_eq!(token.agent_id, agent_id);
         assert!(token.is_valid());
         assert!(!token.used);
+    }
+
+    #[tokio::test]
+    async fn test_create_enrollment_secret() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let secret = ca_service
+            .create_enrollment_secret(&AgentId::new("deploy-agent"))
+            .unwrap();
+
+        assert!(!secret.is_empty());
     }
 
     #[tokio::test]
@@ -732,7 +788,7 @@ mod tests {
             bootstrap_token: Some(token.token),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: 123,
+            timestamp: now_timestamp(),
         };
 
         let response = second.handle_csr_request(request).await;
@@ -760,11 +816,45 @@ mod tests {
             bootstrap_token: None,
             current_cert_pem: None,
             enrollment_secret: Some(enrollment_secret),
-            timestamp: 123,
+            timestamp: now_timestamp(),
         };
 
         let response = ca_service.handle_csr_request(request).await;
         assert!(response.success, "valid enrollment secret should issue certificate");
+    }
+
+    #[tokio::test]
+    async fn test_handle_csr_request_with_stale_enrollment_secret_timestamp_fails() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let agent_id = AgentId::new("stale-reenroll-agent");
+        let generator = CsrGenerator::new().unwrap();
+        let enrollment_secret = ca_service
+            .derive_enrollment_secret(&agent_id)
+            .unwrap();
+
+        let request = CsrRequest {
+            agent_id,
+            csr_pem: generator
+                .generate_csr(&AgentId::new("stale-reenroll-agent"))
+                .unwrap(),
+            bootstrap_token: None,
+            current_cert_pem: None,
+            enrollment_secret: Some(enrollment_secret),
+            timestamp: 123,
+        };
+
+        let response = ca_service.handle_csr_request(request).await;
+        assert!(!response.success, "stale enrollment request should be rejected");
+        assert!(response
+            .error_message
+            .unwrap()
+            .contains("timestamp"));
     }
 
     #[tokio::test]

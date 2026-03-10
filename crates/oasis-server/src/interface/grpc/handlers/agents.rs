@@ -1,8 +1,8 @@
 use oasis_core::core_types::AgentId;
 use oasis_core::proto::{
-    CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, ListAgentsRequest,
-    ListAgentsResponse, RemoveAgentRequest, RemoveAgentResponse, SetInfoAgentRequest,
-    SetInfoAgentResponse,
+    CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, CreateEnrollmentSecretRequest,
+    CreateEnrollmentSecretResponse, ListAgentsRequest, ListAgentsResponse, RemoveAgentRequest,
+    RemoveAgentResponse, SetInfoAgentRequest, SetInfoAgentResponse,
 };
 use std::time::Duration;
 use tonic::{Request, Response, Status};
@@ -54,6 +54,41 @@ impl AgentHandlers {
                     success: false,
                     token: String::new(),
                     expires_at: 0,
+                    message: error_msg,
+                }))
+            }
+        }
+    }
+
+    pub async fn create_enrollment_secret(
+        srv: &OasisServer,
+        request: Request<CreateEnrollmentSecretRequest>,
+    ) -> std::result::Result<Response<CreateEnrollmentSecretResponse>, Status> {
+        let req = request.into_inner();
+
+        let agent_id = req
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("agent_id is required"))?;
+
+        if agent_id.value.is_empty() {
+            return Err(Status::invalid_argument("agent_id cannot be empty"));
+        }
+
+        let agent_id = AgentId::from(agent_id.value.clone());
+
+        match srv.context().ca_service.create_enrollment_secret(&agent_id) {
+            Ok(secret) => Ok(Response::new(CreateEnrollmentSecretResponse {
+                success: true,
+                enrollment_secret: secret,
+                message: String::new(),
+            })),
+            Err(e) => {
+                let error_msg = format!("Failed to create enrollment secret: {}", e);
+                tracing::error!("{}", error_msg);
+                Ok(Response::new(CreateEnrollmentSecretResponse {
+                    success: false,
+                    enrollment_secret: String::new(),
                     message: error_msg,
                 }))
             }
@@ -225,6 +260,12 @@ mod tests {
         };
         let ttl = Duration::from_secs(req.ttl_hours.max(1) * 3600);
         assert_eq!(ttl, Duration::from_secs(168 * 3600));
+    }
+
+    #[test]
+    fn test_create_enrollment_secret_request_validation_missing_agent_id() {
+        let req = CreateEnrollmentSecretRequest { agent_id: None };
+        assert!(req.agent_id.is_none());
     }
 
     #[test]

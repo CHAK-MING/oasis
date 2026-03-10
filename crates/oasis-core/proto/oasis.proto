@@ -202,6 +202,16 @@ message CreateBootstrapTokenResponse {
   string message = 4;     // 错误信息（如果有）
 }
 
+message CreateEnrollmentSecretRequest {
+  AgentId agent_id = 1;
+}
+
+message CreateEnrollmentSecretResponse {
+  bool success = 1;
+  string enrollment_secret = 2;
+  string message = 3;
+}
+
 message FileSpecMsg {
   // 文件基本信息
   string source_path = 1;
@@ -469,6 +479,7 @@ service OasisService {
   rpc RemoveAgent(RemoveAgentRequest) returns (RemoveAgentResponse);
   rpc SetInfoAgent(SetInfoAgentRequest) returns (SetInfoAgentResponse);
   rpc CreateBootstrapToken(CreateBootstrapTokenRequest) returns (CreateBootstrapTokenResponse);
+  rpc CreateEnrollmentSecret(CreateEnrollmentSecretRequest) returns (CreateEnrollmentSecretResponse);
   
   // 文件管理
   rpc BeginFileUpload(FileSpecMsg) returns (FileUploadSession);

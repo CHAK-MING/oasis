@@ -93,10 +93,15 @@ impl RolloutHandlers {
                     operation_id: operation_id.clone(),
                 };
 
+                let previous_revision = file_service
+                    .current_active_revision(&config.source_path)
+                    .await
+                    .map_err(map_core_error)?;
+
                 // 保存文件版本快照
-                version_snapshot = Some(VersionSnapshot::new_file_snapshot(
+                version_snapshot = Some(crate::infrastructure::services::rollout_service::build_file_version_snapshot(
                     config.clone(),
-                    Some(config.revision),
+                    previous_revision,
                 ));
 
                 rollout_service
@@ -109,13 +114,21 @@ impl RolloutHandlers {
                     .await
                     .map_err(map_core_error)?;
 
-                let summary = file_service
+                let summary = match file_service
                     .apply_with_details(&file_config, target_agents.clone())
                     .await
-                    .map_err(map_core_error)?;
+                {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        let _ = rollout_service
+                            .mark_stage_operation_error(rollout_id, false, error.to_string())
+                            .await;
+                        return Err(map_core_error(error));
+                    }
+                };
 
                 rollout_service
-                    .mark_file_stage_result(rollout_id, &summary.failed_results)
+                    .mark_file_stage_result(rollout_id, &summary.all_results)
                     .await
                     .map_err(map_core_error)?;
                 return Ok(());
@@ -436,7 +449,7 @@ impl RolloutHandlers {
 
         // 按类型执行回滚
         let mut batch_id = None;
-        let message = match &task_type {
+        let (success, message) = match &task_type {
             RolloutTaskType::Command { .. } => {
                 // 提交批次
                 let batch_request = oasis_core::task_types::BatchRequest {
@@ -461,10 +474,13 @@ impl RolloutHandlers {
                         .map_err(map_core_error)?,
                 );
 
-                format!(
-                    "回滚命令已提交，影响 {} 个Agent，命令: {}",
-                    target_agents.len(),
-                    proto_request.rollback_command.clone().unwrap_or_default()
+                (
+                    true,
+                    format!(
+                        "回滚命令已提交，影响 {} 个Agent，命令: {}",
+                        target_agents.len(),
+                        proto_request.rollback_command.clone().unwrap_or_default()
+                    ),
                 )
             }
             RolloutTaskType::FileDeployment { .. } => {
@@ -494,18 +510,65 @@ impl RolloutHandlers {
                                 }),
                                 operation_id: uuid::Uuid::now_v7().to_string(),
                             };
-                            // 执行回滚
+
                             srv.context()
-                                .file_service
-                                .rollback_file(&cfg, target_agents.clone())
+                                .rollout_service
+                                .mark_rollback_stage(
+                                    &rollout_id,
+                                    task_type.clone(),
+                                    proto_request.rollback_command.clone(),
+                                    None,
+                                )
                                 .await
                                 .map_err(map_core_error)?;
 
-                            format!(
-                                "文件回滚成功，影响 {} 个Agent，版本 {}",
-                                target_agents.len(),
-                                prev
-                            )
+                            // 执行回滚
+                            let summary = match srv.context()
+                                .file_service
+                                .rollback_file_with_details(&cfg, target_agents.clone())
+                                .await
+                            {
+                                Ok(summary) => summary,
+                                Err(error) => {
+                                    let _ = srv
+                                        .context()
+                                        .rollout_service
+                                        .mark_stage_operation_error(
+                                            &rollout_id,
+                                            true,
+                                            error.to_string(),
+                                        )
+                                        .await;
+                                    return Err(map_core_error(error));
+                                }
+                            };
+
+                            srv.context()
+                                .rollout_service
+                                .mark_file_stage_result(&rollout_id, &summary.all_results)
+                                .await
+                                .map_err(map_core_error)?;
+
+                            if summary.success {
+                                (
+                                    true,
+                                    format!(
+                                        "文件回滚成功，影响 {} 个Agent，版本 {}",
+                                        target_agents.len(),
+                                        prev
+                                    ),
+                                )
+                            } else {
+                                (
+                                    false,
+                                    format!(
+                                        "文件回滚失败，影响 {} 个Agent，版本 {}，{}",
+                                        target_agents.len(),
+                                        prev,
+                                        summary.message
+                                    ),
+                                )
+                            }
                         } else {
                             return Err(Status::failed_precondition(
                                 "缺少 previous_revision，无法回滚",
@@ -524,19 +587,21 @@ impl RolloutHandlers {
             }
         };
 
-        srv.context()
-            .rollout_service
-            .mark_rollback_stage(
-                &rollout_id,
-                task_type,
-                proto_request.rollback_command.clone(),
-                batch_id,
-            )
-            .await
-            .map_err(map_core_error)?;
+        if matches!(task_type, RolloutTaskType::Command { .. }) {
+            srv.context()
+                .rollout_service
+                .mark_rollback_stage(
+                    &rollout_id,
+                    task_type,
+                    proto_request.rollback_command.clone(),
+                    batch_id,
+                )
+                .await
+                .map_err(map_core_error)?;
+        }
 
         Ok(Response::new(proto::RollbackRolloutResponse {
-            success: true,
+            success,
             message,
         }))
     }
