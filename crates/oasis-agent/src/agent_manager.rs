@@ -1,4 +1,4 @@
-use crate::{file_manager::FileManager, nats_client::NatsClient, task_manager::TaskManager};
+use crate::{file_manager::FileManager, nats_client::ManagedNatsClient, task_manager::TaskManager};
 use if_addrs::get_if_addrs;
 use oasis_core::{
     agent_types::{AgentInfo, AgentStatus},
@@ -44,7 +44,7 @@ impl SubServiceHealth {
 #[derive(Clone)]
 pub struct AgentManager {
     agent_id: AgentId,
-    nats_client: NatsClient,
+    nats_client: ManagedNatsClient,
     info: HashMap<String, String>,
     shutdown_token: CancellationToken,
 }
@@ -52,7 +52,7 @@ pub struct AgentManager {
 impl AgentManager {
     pub fn new(
         agent_id: AgentId,
-        nats_client: NatsClient,
+        nats_client: ManagedNatsClient,
         info: HashMap<String, String>,
         shutdown_token: CancellationToken,
     ) -> Self {
@@ -169,6 +169,8 @@ impl AgentManager {
     async fn send_heartbeat_with_status(&self, status: AgentStatus) -> Result<()> {
         let kv = self
             .nats_client
+            .current()
+            .await
             .jetstream
             .get_key_value(JS_KV_AGENT_HEARTBEAT)
             .await?;
@@ -260,6 +262,8 @@ impl AgentManager {
 
         let kv = self
             .nats_client
+            .current()
+            .await
             .jetstream
             .get_key_value(JS_KV_AGENT_INFOS)
             .await?;

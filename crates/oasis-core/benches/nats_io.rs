@@ -54,6 +54,8 @@ fn build_cfg() -> (NatsConfig, TlsConfig) {
         TlsConfig {
             certs_dir: certs_dir.into(),
             require_tls: true,
+            renew_before_days: 30,
+            renew_check_interval_sec: 6 * 3600,
         },
     )
 }

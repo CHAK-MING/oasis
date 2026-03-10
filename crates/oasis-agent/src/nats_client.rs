@@ -5,6 +5,8 @@ use oasis_core::{
     error::Result,
     nats::NatsClientFactory,
 };
+use std::sync::Arc;
+use tokio::sync::{RwLock, watch};
 
 #[derive(Clone)]
 pub struct NatsClient {
@@ -36,5 +38,87 @@ impl NatsClient {
         let _ = self.jetstream.get_key_value(JS_KV_AGENT_LABELS).await;
 
         Ok(())
+    }
+}
+
+pub struct ManagedClientState<T: Clone> {
+    current: RwLock<T>,
+    generation_tx: watch::Sender<u64>,
+}
+
+impl<T: Clone> ManagedClientState<T> {
+    fn new(initial: T, generation: u64) -> Self {
+        let (generation_tx, _) = watch::channel(generation);
+        Self {
+            current: RwLock::new(initial),
+            generation_tx,
+        }
+    }
+
+    async fn current(&self) -> T {
+        self.current.read().await.clone()
+    }
+
+    async fn replace(&self, next: T) {
+        *self.current.write().await = next;
+        let next_generation = self.generation_tx.borrow().saturating_add(1);
+        let _ = self.generation_tx.send(next_generation);
+    }
+
+    pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.generation_tx.subscribe()
+    }
+}
+
+#[derive(Clone)]
+pub struct ManagedNatsClient {
+    nats: NatsConfig,
+    tls: TlsConfig,
+    state: Arc<ManagedClientState<Arc<NatsClient>>>,
+}
+
+impl ManagedNatsClient {
+    pub async fn connect_with_oasis_config(nats: &NatsConfig, tls: &TlsConfig) -> Result<Self> {
+        let client = Arc::new(NatsClient::connect_with_oasis_config(nats, tls).await?);
+        Ok(Self {
+            nats: nats.clone(),
+            tls: tls.clone(),
+            state: Arc::new(ManagedClientState::new(client, 0)),
+        })
+    }
+
+    pub async fn current(&self) -> Arc<NatsClient> {
+        self.state.current().await
+    }
+
+    pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.state.subscribe_generation()
+    }
+
+    pub async fn reconnect(&self) -> Result<()> {
+        let next = Arc::new(NatsClient::connect_with_oasis_config(&self.nats, &self.tls).await?);
+        self.state.replace(next).await;
+        Ok(())
+    }
+
+    pub async fn ensure_resources(&self) -> Result<()> {
+        self.current().await.ensure_resources().await
+    }
+}
+
+#[cfg(test)]
+mod managed_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn managed_state_notifies_generation_updates() {
+        let state = ManagedClientState::new(Arc::new(1_u64), 0);
+        let mut rx = state.subscribe_generation();
+
+        state.replace(Arc::new(2_u64)).await;
+
+        rx.changed().await.expect("generation update");
+        assert_eq!(*rx.borrow(), 1);
+        assert_eq!(*state.current().await, 2);
     }
 }

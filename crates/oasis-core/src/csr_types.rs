@@ -65,6 +65,7 @@ pub struct CsrRequest {
     pub csr_pem: String,
     pub bootstrap_token: Option<String>,
     pub current_cert_pem: Option<String>,
+    pub enrollment_secret: Option<String>,
     pub timestamp: i64,
 }
 

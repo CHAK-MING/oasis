@@ -1,4 +1,4 @@
-use crate::nats_client::NatsClient;
+use crate::nats_client::{ManagedNatsClient, NatsClient};
 use async_nats::jetstream;
 use base64::Engine;
 use dashmap::DashMap;
@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone)]
 pub struct TaskManager {
     agent_id: AgentId,
-    nats_client: NatsClient,
+    nats_client: ManagedNatsClient,
     shutdown_token: CancellationToken,
     running_tasks: Arc<DashMap<TaskId, CancellationToken>>,
 }
@@ -27,7 +27,7 @@ pub struct TaskManager {
 impl TaskManager {
     pub fn new(
         agent_id: AgentId,
-        nats_client: NatsClient,
+        nats_client: ManagedNatsClient,
         shutdown_token: CancellationToken,
     ) -> Self {
         Self {
@@ -40,62 +40,73 @@ impl TaskManager {
 
     pub async fn run(&self) -> Result<()> {
         info!("Starting task manager");
-
-        let unicast_consumer = self.create_unicast_task_consumer().await?;
-        let cancel_consumer = self.create_cancel_consumer().await?;
-
-        let mut unicast_messages = unicast_consumer.messages().await?;
-        let mut cancel_messages = cancel_consumer.messages().await?;
-
-        info!("Task manager started with task and cancel consumers");
+        let mut generation_rx = self.nats_client.subscribe_generation();
 
         loop {
-            tokio::select! {
-                // 处理单播任务（独占消费）
-                Some(msg_result) = unicast_messages.next() => {
-                    match msg_result {
-                        Ok(msg) => {
-                            debug!("Received unicast task message");
-                            if let Err(e) = self.process_task_message(msg, "unicast").await {
-                                error!("Failed to process unicast task message: {}", e);
+            let client = self.nats_client.current().await;
+            let unicast_consumer = self.create_unicast_task_consumer(&client).await?;
+            let cancel_consumer = self.create_cancel_consumer(&client).await?;
+
+            let mut unicast_messages = unicast_consumer.messages().await?;
+            let mut cancel_messages = cancel_consumer.messages().await?;
+
+            info!("Task manager started with task and cancel consumers");
+
+            loop {
+                tokio::select! {
+                    Some(msg_result) = unicast_messages.next() => {
+                        match msg_result {
+                            Ok(msg) => {
+                                debug!("Received unicast task message");
+                                if let Err(e) = self.process_task_message(msg, "unicast").await {
+                                    error!("Failed to process unicast task message: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error receiving unicast task message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("Error receiving unicast task message: {}", e);
-                        }
                     }
-                }
-                // 处理取消消息
-                Some(msg_result) = cancel_messages.next() => {
-                    match msg_result {
-                        Ok(msg) => {
-                            debug!("Received cancel message");
-                            if let Err(e) = self.process_cancel_message(msg).await {
-                                error!("Failed to process cancel message: {}", e);
+                    Some(msg_result) = cancel_messages.next() => {
+                        match msg_result {
+                            Ok(msg) => {
+                                debug!("Received cancel message");
+                                if let Err(e) = self.process_cancel_message(msg).await {
+                                    error!("Failed to process cancel message: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error receiving cancel message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("Error receiving cancel message: {}", e);
+                    }
+                    changed = generation_rx.changed() => {
+                        match changed {
+                            Ok(()) => {
+                                info!("NATS generation changed, rebuilding task consumers");
+                                break;
+                            }
+                            Err(_) => {
+                                info!("Task manager generation channel closed");
+                                return Ok(());
+                            }
                         }
                     }
-                }
-                // 接收关闭信号
-                _ = self.shutdown_token.cancelled() => {
-                    info!("Task manager shutting down");
-                    break;
+                    _ = self.shutdown_token.cancelled() => {
+                        info!("Task manager shutting down");
+                        return Ok(());
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 
     /// 创建单播任务消费者（独占消费，仅此Agent接收）
     async fn create_unicast_task_consumer(
         &self,
+        nats_client: &NatsClient,
     ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
-        let stream = self
-            .nats_client
+        let stream = nats_client
             .jetstream
             .get_stream(JS_STREAM_TASKS)
             .await?;
@@ -124,9 +135,9 @@ impl TaskManager {
 
     async fn create_cancel_consumer(
         &self,
+        nats_client: &NatsClient,
     ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
-        let stream = self
-            .nats_client
+        let stream = nats_client
             .jetstream
             .get_stream(JS_STREAM_TASKS)
             .await?;
@@ -316,6 +327,8 @@ impl TaskManager {
 
         let kv = self
             .nats_client
+            .current()
+            .await
             .jetstream
             .get_key_value(JS_KV_AGENT_LABELS)
             .await?;
@@ -502,6 +515,8 @@ impl TaskManager {
 
         let ack = self
             .nats_client
+            .current()
+            .await
             .jetstream
             .publish_with_headers(subject.clone(), headers, data.into())
             .await?;

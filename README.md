@@ -11,7 +11,7 @@ Oasis 是一个大规模集群节点管理工具，支持 Linux 操作系统。�
 - 📦 **文件分发**: 支持版本化文件管理和部署，原子性替换保证安全，支持回滚和版本清理
 - 🔄 **灰度发布**: 支持百分比、计数策略的渐进式发布
 - ⚡ **实时监控**: 任务执行状态实时反馈和超时控制
-- 🔒 **安全可靠**: 基于 mTLS 的安全通信和自动证书管理
+- 🔒 **安全可靠**: 基于 mTLS 的安全通信，支持首次证书引导、自动续签和连接内重连
 - 🐳 **容器化**: 支持 Docker Compose 快速部署
 
 ## 🚀 快速开始
@@ -75,7 +75,7 @@ sudo ./install.sh
 sudo systemctl status oasis-agent
 ```
 
-> **注意**：部署包仅包含 `certs/nats-ca.pem`。Agent 首次启动时会使用 `OASIS_BOOTSTRAP_TOKEN` 通过 CSR 请求生成客户端证书 `nats-client.pem` 和 `nats-client-key.pem`。建议在证书生成后从环境变量中移除该 token。
+> **注意**：部署包默认包含 `certs/nats-ca.pem`，用于 Agent 首次通过 TLS 向 CA 发起 CSR 请求。首次启动时 Agent 会优先使用 `OASIS_BOOTSTRAP_TOKEN` 申请客户端证书；如果 token 已失效，也可以通过环境变量 `OASIS_ENROLLMENT_SECRET` 或 `certs/enrollment-secret` 文件完成补发式入网。证书拿到后，Agent 会在到期前自动续签，并在进程内重建 NATS 连接，无需依赖 supervisor 重启。
 
 ### 6. 验证部署
 
@@ -398,6 +398,10 @@ url = "tls://127.0.0.1:4222"
 [tls]
 # TLS证书目录
 certs_dir = "./certs"
+# 证书到期前多少天开始续签
+renew_before_days = 30
+# 后台检查续签的间隔（秒）
+renew_check_interval_sec = 21600
 
 [telemetry]
 # 遥测日志配置
@@ -412,17 +416,20 @@ log_no_ansi = false
 # Agent 连接配置
 OASIS__NATS__URL=tls://127.0.0.1:4222
 OASIS__TLS__CERTS_DIR=/opt/oasis/certs
+OASIS__TLS__RENEW_BEFORE_DAYS=30
+OASIS__TLS__RENEW_CHECK_INTERVAL_SEC=21600
 
 # 首次启动证书引导（仅首次需要，成功后建议移除）
 OASIS_BOOTSTRAP_TOKEN=your-bootstrap-token
+
+# 当 bootstrap token 过期后，可选的补发式入网凭据
+# 也可以写入 /opt/oasis/certs/enrollment-secret 文件
+OASIS_ENROLLMENT_SECRET=your-enrollment-secret
 
 # Agent 标识
 OASIS__AGENT_ID=agent123456
 OASIS__AGENT_LABELS=env=prod,role=web
 OASIS__AGENT_GROUPS=production,web-servers
-
-# 证书引导（仅首次启动需要）
-OASIS_BOOTSTRAP_TOKEN=<从服务端获取的 bootstrap token>
 
 # 心跳配置
 OASIS__AGENT__HEARTBEAT_INTERVAL_SEC=30

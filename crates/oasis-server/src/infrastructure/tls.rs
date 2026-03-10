@@ -30,6 +30,8 @@ impl TlsService {
         let config = TlsConfig {
             certs_dir: cert_path.to_path_buf(),
             require_tls: true,
+            renew_before_days: 30,
+            renew_check_interval_sec: 6 * 3600,
         };
 
         let (reload_tx, _) = broadcast::channel(1);

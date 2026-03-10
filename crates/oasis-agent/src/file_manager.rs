@@ -1,4 +1,4 @@
-use crate::nats_client::NatsClient;
+use crate::nats_client::{ManagedNatsClient, NatsClient};
 use async_nats::jetstream;
 use futures::StreamExt;
 use oasis_core::{
@@ -17,14 +17,14 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone)]
 pub struct FileManager {
     agent_id: AgentId,
-    nats_client: NatsClient,
+    nats_client: ManagedNatsClient,
     shutdown_token: CancellationToken,
 }
 
 impl FileManager {
     pub fn new(
         agent_id: AgentId,
-        nats_client: NatsClient,
+        nats_client: ManagedNatsClient,
         shutdown_token: CancellationToken,
     ) -> Self {
         Self {
@@ -36,41 +36,51 @@ impl FileManager {
 
     pub async fn run(&self) -> Result<()> {
         info!("Starting file manager");
-
-        // 创建文件任务消费者
-        let consumer = self.create_file_consumer().await?;
-        let mut messages = consumer.messages().await?;
+        let mut generation_rx = self.nats_client.subscribe_generation();
 
         loop {
-            tokio::select! {
-                Some(msg_result) = messages.next() => {
-                    match msg_result {
-                        Ok(msg) => {
-                            if let Err(e) = self.process_file_message(msg).await {
-                                error!("Failed to process file message: {}", e);
+            let client = self.nats_client.current().await;
+            let consumer = self.create_file_consumer(&client).await?;
+            let mut messages = consumer.messages().await?;
+
+            loop {
+                tokio::select! {
+                    Some(msg_result) = messages.next() => {
+                        match msg_result {
+                            Ok(msg) => {
+                                if let Err(e) = self.process_file_message(msg).await {
+                                    error!("Failed to process file message: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error receiving file message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("Error receiving file message: {}", e);
+                    }
+                    changed = generation_rx.changed() => {
+                        match changed {
+                            Ok(()) => {
+                                info!("NATS generation changed, rebuilding file consumer");
+                                break;
+                            }
+                            Err(_) => return Ok(()),
                         }
                     }
-                }
-                _ = self.shutdown_token.cancelled() => {
-                    info!("File manager shutting down");
-                    break;
+                    _ = self.shutdown_token.cancelled() => {
+                        info!("File manager shutting down");
+                        return Ok(());
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 
     /// 创建文件任务消费者
     async fn create_file_consumer(
         &self,
+        nats_client: &NatsClient,
     ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
-        let stream = self
-            .nats_client
+        let stream = nats_client
             .jetstream
             .get_stream(JS_STREAM_FILES)
             .await
@@ -186,6 +196,8 @@ impl FileManager {
 
         let object_store = self
             .nats_client
+            .current()
+            .await
             .jetstream
             .get_object_store(JS_OBJ_ARTIFACTS)
             .await

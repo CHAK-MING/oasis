@@ -141,6 +141,12 @@ pub struct TlsConfig {
     /// 设置为 false 时，证书缺失仅警告并继续（仅限内网自用场景）
     #[serde(default = "default_require_tls")]
     pub require_tls: bool,
+    /// 证书剩余有效期小于该值时触发续签
+    #[serde(default = "default_renew_before_days")]
+    pub renew_before_days: u32,
+    /// 后台检查证书续签的周期
+    #[serde(default = "default_renew_check_interval_sec")]
+    pub renew_check_interval_sec: u64,
 }
 
 impl Default for TlsConfig {
@@ -148,12 +154,22 @@ impl Default for TlsConfig {
         Self {
             certs_dir: default_certs_dir(),
             require_tls: default_require_tls(),
+            renew_before_days: default_renew_before_days(),
+            renew_check_interval_sec: default_renew_check_interval_sec(),
         }
     }
 }
 
 fn default_require_tls() -> bool {
     true
+}
+
+fn default_renew_before_days() -> u32 {
+    30
+}
+
+fn default_renew_check_interval_sec() -> u64 {
+    6 * 3600
 }
 
 impl TlsConfig {
@@ -345,6 +361,8 @@ mod tests {
             let config = TlsConfig::default();
             assert_eq!(config.certs_dir, PathBuf::from("certs"));
             assert!(config.require_tls);
+            assert_eq!(config.renew_before_days, 30);
+            assert_eq!(config.renew_check_interval_sec, 6 * 3600);
         }
 
         #[test]
@@ -352,6 +370,8 @@ mod tests {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/etc/oasis/certs"),
                 require_tls: true,
+                renew_before_days: 30,
+                renew_check_interval_sec: 6 * 3600,
             };
             assert_eq!(
                 config.nats_ca_path(),
@@ -372,6 +392,8 @@ mod tests {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/certs"),
                 require_tls: true,
+                renew_before_days: 30,
+                renew_check_interval_sec: 6 * 3600,
             };
             assert_eq!(config.grpc_ca_path(), Path::new("/certs/grpc-ca.pem"));
             assert_eq!(
@@ -389,6 +411,8 @@ mod tests {
             let config = TlsConfig {
                 certs_dir: PathBuf::from("/certs"),
                 require_tls: true,
+                renew_before_days: 30,
+                renew_check_interval_sec: 6 * 3600,
             };
             assert_eq!(
                 config.grpc_client_cert_path(),

@@ -181,14 +181,19 @@ impl AgentConfigStrategy {
         }
 
         // Certificate bootstrap flow: on first startup, Agent may only have the CA certificate.
-        // If a bootstrap token is provided, allow missing client cert/key so the bootstrap logic
-        // can run and persist them.
+        // If a bootstrap credential is provided, allow missing client cert/key so the bootstrap
+        // logic can run and persist them.
         let has_bootstrap_token = std::env::var("OASIS_BOOTSTRAP_TOKEN")
             .ok()
             .is_some_and(|s| !s.trim().is_empty());
+        let has_enrollment_secret = std::env::var("OASIS_ENROLLMENT_SECRET")
+            .ok()
+            .is_some_and(|s| !s.trim().is_empty())
+            || config.tls.certs_dir.join("enrollment-secret").exists();
+        let has_bootstrap_credential = has_bootstrap_token || has_enrollment_secret;
 
         if !config.tls.nats_client_cert_path().exists() {
-            if has_bootstrap_token {
+            if has_bootstrap_credential {
                 return Ok(());
             }
             return Err(CoreError::File {
@@ -199,7 +204,7 @@ impl AgentConfigStrategy {
         }
 
         if !config.tls.nats_client_key_path().exists() {
-            if has_bootstrap_token {
+            if has_bootstrap_credential {
                 return Ok(());
             }
             return Err(CoreError::File {

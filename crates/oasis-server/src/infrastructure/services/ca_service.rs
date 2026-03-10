@@ -7,6 +7,7 @@ use rcgen::{
     CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType, DnValue,
     ExtendedKeyUsagePurpose, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
@@ -19,9 +20,12 @@ pub struct CaService {
     ca_cert_pem: String,
     ca_cert_der: Vec<u8>,
     token_store: Arc<RwLock<TokenStore>>,
+    token_store_path: std::path::PathBuf,
+    enrollment_master_secret: Option<String>,
     cert_validity_hours: u64,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct TokenStore {
     tokens: std::collections::HashMap<String, BootstrapToken>,
 }
@@ -63,6 +67,13 @@ impl CaService {
         ca_key_path: impl AsRef<Path>,
         cert_validity_hours: u64,
     ) -> Result<Self> {
+        let ca_dir = ca_cert_path
+            .as_ref()
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let token_store_path = ca_dir.join("bootstrap-tokens.json");
+        let enrollment_secret_path = ca_dir.join("enrollment-secret");
+
         let ca_key_pem = tokio::fs::read_to_string(ca_key_path.as_ref())
             .await
             .map_err(|e| CoreError::Io {
@@ -110,7 +121,10 @@ impl CaService {
             ca_issuer,
             ca_cert_pem,
             ca_cert_der,
-            token_store: Arc::new(RwLock::new(TokenStore::new())),
+            token_store: Arc::new(RwLock::new(Self::load_token_store(&token_store_path).await?)),
+            token_store_path,
+            enrollment_master_secret: Self::load_enrollment_master_secret(&enrollment_secret_path)
+                .await?,
             cert_validity_hours,
         })
     }
@@ -121,18 +135,25 @@ impl CaService {
         ttl: StdDuration,
     ) -> Result<BootstrapToken> {
         let token = BootstrapToken::new(agent_id.clone(), ttl)?;
-        self.token_store.write().await.add(token.clone());
+        let snapshot = {
+            let mut store = self.token_store.write().await;
+            store.add(token.clone());
+            store.clone()
+        };
+        self.persist_token_store(&snapshot).await?;
         info!(agent_id = %agent_id.as_str(), "Created bootstrap token");
         Ok(token)
     }
 
     pub async fn handle_csr_request(&self, request: CsrRequest) -> CsrResponse {
         if let Some(token_str) = &request.bootstrap_token {
-            let maybe_agent_id = self
-                .token_store
-                .write()
-                .await
-                .validate_and_consume(token_str);
+            let maybe_agent_id = match self.consume_bootstrap_token(token_str).await {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    error!(error = %e, "Failed to consume bootstrap token");
+                    return CsrResponse::error(format!("Failed to consume bootstrap token: {e}"));
+                }
+            };
 
             match maybe_agent_id {
                 Some(agent_id) => {
@@ -150,12 +171,19 @@ impl CaService {
                     return CsrResponse::error("Invalid or expired bootstrap token");
                 }
             }
+        } else if let Some(enrollment_secret) = &request.enrollment_secret {
+            if let Err(e) = self.validate_enrollment_secret(&request.agent_id, enrollment_secret) {
+                error!(error = %e, "Invalid enrollment secret");
+                return CsrResponse::error(format!("Invalid enrollment secret: {e}"));
+            }
         } else {
             let current_cert_pem = match &request.current_cert_pem {
                 Some(pem) => pem,
                 None => {
-                    warn!("Renewal request missing current certificate");
-                    return CsrResponse::error("Renewal requires current certificate");
+                    warn!("Request missing renewal certificate or enrollment credential");
+                    return CsrResponse::error(
+                        "Request requires bootstrap token, enrollment secret, or current certificate",
+                    );
                 }
             };
 
@@ -273,7 +301,107 @@ impl CaService {
     }
 
     pub async fn cleanup_expired_tokens(&self) {
-        self.token_store.write().await.cleanup_expired();
+        let snapshot = {
+            let mut store = self.token_store.write().await;
+            store.cleanup_expired();
+            store.clone()
+        };
+        if let Err(e) = self.persist_token_store(&snapshot).await {
+            error!(error = %e, "Failed to persist token cleanup");
+        }
+    }
+
+    fn derive_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
+        let Some(master_secret) = self.enrollment_master_secret.as_deref() else {
+            return Err(CoreError::Config {
+                message: "Enrollment secret is not configured on the server".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        };
+
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(master_secret.as_bytes());
+        hasher.update([0xff]);
+        hasher.update(agent_id.as_str().as_bytes());
+        let digest = hasher.finalize();
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+    }
+
+    async fn load_token_store(path: &Path) -> Result<TokenStore> {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => serde_json::from_str(&contents).map_err(|e| CoreError::Config {
+                message: format!("Failed to parse bootstrap token store: {e}"),
+                severity: ErrorSeverity::Critical,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TokenStore::new()),
+            Err(e) => Err(CoreError::Io {
+                message: format!("Failed to read bootstrap token store: {e}"),
+                severity: ErrorSeverity::Critical,
+            }),
+        }
+    }
+
+    async fn persist_token_store(&self, store: &TokenStore) -> Result<()> {
+        if let Some(parent) = self.token_store_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| CoreError::Io {
+                message: format!("Failed to create bootstrap token store directory: {e}"),
+                severity: ErrorSeverity::Critical,
+            })?;
+        }
+
+        let bytes = serde_json::to_vec_pretty(store).map_err(|e| CoreError::Internal {
+            message: format!("Failed to serialize bootstrap token store: {e}"),
+            severity: ErrorSeverity::Error,
+        })?;
+        tokio::fs::write(&self.token_store_path, bytes)
+            .await
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to persist bootstrap token store: {e}"),
+                severity: ErrorSeverity::Critical,
+            })
+    }
+
+    async fn consume_bootstrap_token(&self, token: &str) -> Result<Option<AgentId>> {
+        let (agent_id, snapshot) = {
+            let mut store = self.token_store.write().await;
+            let agent_id = store.validate_and_consume(token);
+            (agent_id, store.clone())
+        };
+        self.persist_token_store(&snapshot).await?;
+        Ok(agent_id)
+    }
+
+    async fn load_enrollment_master_secret(path: &Path) -> Result<Option<String>> {
+        match tokio::fs::read_to_string(path).await {
+            Ok(secret) => {
+                let trimmed = secret.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::Io {
+                message: format!("Failed to read enrollment secret file: {e}"),
+                severity: ErrorSeverity::Critical,
+            }),
+        }
+    }
+
+    fn validate_enrollment_secret(&self, agent_id: &AgentId, provided: &str) -> Result<()> {
+        let expected = self.derive_enrollment_secret(agent_id)?;
+        if expected == provided {
+            Ok(())
+        } else {
+            Err(CoreError::Validation {
+                message: "Enrollment secret mismatch".to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
     }
 }
 
@@ -465,6 +593,7 @@ mod tests {
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -491,6 +620,7 @@ mod tests {
             csr_pem,
             bootstrap_token: Some("invalid-token-12345".to_string()),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -519,6 +649,7 @@ mod tests {
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -544,6 +675,7 @@ mod tests {
             csr_pem: csr_pem.clone(),
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -555,6 +687,7 @@ mod tests {
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -581,6 +714,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bootstrap_tokens_survive_service_restart() {
+        let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let agent_id = AgentId::new("persisted-agent");
+
+        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let token = first
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
+        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+
+        let request = CsrRequest {
+            agent_id,
+            csr_pem: CsrGenerator::new().unwrap().generate_csr(&AgentId::new("persisted-agent")).unwrap(),
+            bootstrap_token: Some(token.token),
+            current_cert_pem: None,
+            enrollment_secret: None,
+            timestamp: 123,
+        };
+
+        let response = second.handle_csr_request(request).await;
+        assert!(response.success, "persisted bootstrap token should remain valid after restart");
+    }
+
+    #[tokio::test]
+    async fn test_handle_csr_request_with_valid_enrollment_secret() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let agent_id = AgentId::new("reenroll-agent");
+        let generator = CsrGenerator::new().unwrap();
+        let enrollment_secret = ca_service
+            .derive_enrollment_secret(&agent_id)
+            .unwrap();
+
+        let request = CsrRequest {
+            agent_id,
+            csr_pem: generator.generate_csr(&AgentId::new("reenroll-agent")).unwrap(),
+            bootstrap_token: None,
+            current_cert_pem: None,
+            enrollment_secret: Some(enrollment_secret),
+            timestamp: 123,
+        };
+
+        let response = ca_service.handle_csr_request(request).await;
+        assert!(response.success, "valid enrollment secret should issue certificate");
+    }
+
+    #[tokio::test]
     async fn test_issued_certificate_has_correct_properties() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
         let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
@@ -596,6 +783,7 @@ mod tests {
             csr_pem,
             bootstrap_token: Some(token.token),
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         
@@ -629,6 +817,7 @@ mod tests {
             csr_pem,
             bootstrap_token: None,
             current_cert_pem: None,
+            enrollment_secret: None,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         

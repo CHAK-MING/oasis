@@ -6,13 +6,14 @@ use oasis_core::csr_types::{cert_needs_renewal, CsrGenerator, CsrRequest, CsrRes
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct CertBootstrap {
     agent_id: AgentId,
     certs_dir: std::path::PathBuf,
     nats_url: String,
     bootstrap_token: Option<String>,
+    enrollment_secret: Option<String>,
     renew_before_days: u32,
 }
 
@@ -22,12 +23,14 @@ impl CertBootstrap {
         certs_dir: impl AsRef<Path>,
         nats_url: String,
         bootstrap_token: Option<String>,
+        enrollment_secret: Option<String>,
     ) -> Self {
         Self {
             agent_id,
             certs_dir: certs_dir.as_ref().to_path_buf(),
             nats_url,
             bootstrap_token,
+            enrollment_secret,
             renew_before_days: 30,
         }
     }
@@ -50,14 +53,27 @@ impl CertBootstrap {
             return Ok(false);
         }
 
-        let token = self.bootstrap_token.as_ref().ok_or_else(|| CoreError::Config {
-            message: "No certificates found and no bootstrap token provided. Set OASIS_BOOTSTRAP_TOKEN environment variable.".to_string(),
-            severity: ErrorSeverity::Critical,
-        })?;
-
         info!("Certificates not found, starting bootstrap process");
-        self.request_certificate_with_token(token).await?;
-        Ok(true)
+
+        if let Some(token) = self.bootstrap_token.as_deref() {
+            match self.request_certificate_with_token(token).await {
+                Ok(()) => return Ok(true),
+                Err(err) if self.enrollment_secret.is_some() => {
+                    warn!("Bootstrap token flow failed, falling back to enrollment secret: {}", err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        if let Some(secret) = self.enrollment_secret.as_deref() {
+            self.request_certificate_with_enrollment_secret(secret).await?;
+            return Ok(true);
+        }
+
+        Err(CoreError::Config {
+            message: "No certificates found and no bootstrap credential provided. Set OASIS_BOOTSTRAP_TOKEN or OASIS_ENROLLMENT_SECRET.".to_string(),
+            severity: ErrorSeverity::Critical,
+        })
     }
 
     pub async fn renew_if_needed(&self) -> Result<bool> {
@@ -87,7 +103,23 @@ impl CertBootstrap {
         let csr_pem = generator.generate_csr(&self.agent_id)?;
         let private_key_pem = generator.private_key_pem();
 
-        let request = self.build_csr_request(csr_pem, Some(bootstrap_token.to_string()), None);
+        let request =
+            self.build_csr_request(csr_pem, Some(bootstrap_token.to_string()), None, None);
+        let response = self.send_csr_request(request).await?;
+        self.save_response(&private_key_pem, response).await
+    }
+
+    async fn request_certificate_with_enrollment_secret(&self, enrollment_secret: &str) -> Result<()> {
+        let generator = CsrGenerator::new()?;
+        let csr_pem = generator.generate_csr(&self.agent_id)?;
+        let private_key_pem = generator.private_key_pem();
+
+        let request = self.build_csr_request(
+            csr_pem,
+            None,
+            None,
+            Some(enrollment_secret.to_string()),
+        );
         let response = self.send_csr_request(request).await?;
         self.save_response(&private_key_pem, response).await
     }
@@ -111,7 +143,7 @@ impl CertBootstrap {
             }
         })?;
 
-        let request = self.build_csr_request(csr_pem, None, Some(current_cert_pem));
+        let request = self.build_csr_request(csr_pem, None, Some(current_cert_pem), None);
         let response = self.send_csr_request(request).await?;
         self.save_response(&existing_key, response).await
     }
@@ -121,6 +153,7 @@ impl CertBootstrap {
         csr_pem: String,
         bootstrap_token: Option<String>,
         current_cert_pem: Option<String>,
+        enrollment_secret: Option<String>,
     ) -> CsrRequest {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -132,6 +165,7 @@ impl CertBootstrap {
             csr_pem,
             bootstrap_token,
             current_cert_pem,
+            enrollment_secret,
             timestamp: now,
         }
     }
@@ -234,6 +268,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         assert!(!bootstrap.certs_exist());
@@ -253,6 +288,7 @@ mod tests {
             agent_id,
             dir.path(),
             "nats://localhost:4222".to_string(),
+            None,
             None,
         );
 
@@ -274,6 +310,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         let result = bootstrap.renew_if_needed().await;
@@ -289,6 +326,7 @@ mod tests {
             agent_id,
             dir.path(),
             "nats://localhost:4222".to_string(),
+            None,
             None,
         );
 
@@ -313,6 +351,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             Some("token".to_string()),
+            None,
         );
 
         let result = bootstrap.bootstrap_if_needed().await;
@@ -329,11 +368,13 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         let request = bootstrap.build_csr_request(
             "csr_content".to_string(),
             Some("token123".to_string()),
+            None,
             None,
         );
         
@@ -352,6 +393,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         let current_cert = "current_cert_pem".to_string();
@@ -359,6 +401,7 @@ mod tests {
             "new_csr_pem".to_string(),
             None,
             Some(current_cert.clone()),
+            None,
         );
         
         assert_eq!(request.agent_id, agent_id);
@@ -369,6 +412,31 @@ mod tests {
     }
 
     #[test]
+    fn test_build_csr_request_with_enrollment_secret() {
+        let dir = tempdir().unwrap();
+        let agent_id = AgentId::new("test-agent");
+        let bootstrap = CertBootstrap::new(
+            agent_id.clone(),
+            dir.path(),
+            "nats://localhost:4222".to_string(),
+            None,
+            Some("enroll-secret".to_string()),
+        );
+
+        let request = bootstrap.build_csr_request(
+            "csr_with_enroll".to_string(),
+            None,
+            None,
+            Some("enroll-secret".to_string()),
+        );
+
+        assert_eq!(request.agent_id, agent_id);
+        assert_eq!(request.enrollment_secret, Some("enroll-secret".to_string()));
+        assert!(request.bootstrap_token.is_none());
+        assert!(request.current_cert_pem.is_none());
+    }
+
+    #[test]
     fn test_with_renew_before_days() {
         let dir = tempdir().unwrap();
         let agent_id = AgentId::new("test-agent");
@@ -376,6 +444,7 @@ mod tests {
             agent_id,
             dir.path(),
             "nats://localhost:4222".to_string(),
+            None,
             None,
         ).with_renew_before_days(7);
 
@@ -391,6 +460,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             Some("token".to_string()),
+            None,
         )
         .with_renew_before_days(14);
 
@@ -410,6 +480,7 @@ mod tests {
             dir.path(),
             nats_url.clone(),
             token.clone(),
+            None,
         );
 
         assert_eq!(bootstrap.agent_id, agent_id);
@@ -432,12 +503,14 @@ mod tests {
             dir1.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         let bootstrap2 = CertBootstrap::new(
             agent_id2,
             dir2.path(),
             "nats://localhost:4222".to_string(),
+            None,
             None,
         );
 
@@ -454,6 +527,7 @@ mod tests {
             dir.path(),
             "nats://localhost:4222".to_string(),
             None,
+            None,
         );
 
         let before = SystemTime::now()
@@ -463,6 +537,7 @@ mod tests {
 
         let request = bootstrap.build_csr_request(
             "csr".to_string(),
+            None,
             None,
             None,
         );

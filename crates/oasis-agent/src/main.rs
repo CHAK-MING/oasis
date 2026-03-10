@@ -1,4 +1,7 @@
-use oasis_agent::{agent_manager::AgentManager, cert_bootstrap::CertBootstrap, nats_client::NatsClient};
+use oasis_agent::{
+    agent_manager::AgentManager, cert_bootstrap::CertBootstrap,
+    cert_rotation::CertRotationManager, nats_client::ManagedNatsClient,
+};
 use oasis_core::{
     config::{NatsConfig, TlsConfig},
     config_strategies::AgentConfigStrategy,
@@ -9,6 +12,7 @@ use oasis_core::{
     telemetry::init_tracing_with,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use tracing::{error, info};
 
 /// 解析环境变量标签
@@ -48,6 +52,21 @@ fn build_agent_info(
     info
 }
 
+fn load_enrollment_secret(certs_dir: &Path) -> Option<String> {
+    if let Ok(secret) = std::env::var("OASIS_ENROLLMENT_SECRET") {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let secret_path = certs_dir.join("enrollment-secret");
+    std::fs::read_to_string(secret_path)
+        .ok()
+        .map(|secret| secret.trim().to_string())
+        .filter(|secret| !secret.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 从环境变量读取 Agent ID
@@ -79,6 +98,7 @@ async fn main() -> Result<()> {
 
     // 读取 bootstrap token（用于首次证书请求）
     let bootstrap_token = std::env::var("OASIS_BOOTSTRAP_TOKEN").ok();
+    let enrollment_secret = load_enrollment_secret(&cfg.tls.certs_dir);
 
     // 证书引导流程：如果证书不存在且有 bootstrap token，则请求证书
     let cert_bootstrap = CertBootstrap::new(
@@ -86,20 +106,27 @@ async fn main() -> Result<()> {
         &cfg.tls.certs_dir,
         cfg.nats.url.clone(),
         bootstrap_token,
-    );
+        enrollment_secret,
+    )
+    .with_renew_before_days(cfg.tls.renew_before_days);
 
     if cert_bootstrap.bootstrap_if_needed().await? {
         info!("Certificate bootstrap completed, proceeding with TLS connection");
     }
+    if cert_bootstrap.renew_if_needed().await? {
+        info!("Certificate renewed during startup before establishing TLS connections");
+    }
 
     // 连接到 NATS
-    let nats_client = NatsClient::connect_with_oasis_config(
+    let nats_client = ManagedNatsClient::connect_with_oasis_config(
         &NatsConfig {
             url: cfg.nats.url.clone(),
         },
         &TlsConfig {
             certs_dir: cfg.tls.certs_dir.clone(),
             require_tls: cfg.tls.require_tls,
+            renew_before_days: cfg.tls.renew_before_days,
+            renew_check_interval_sec: cfg.tls.renew_check_interval_sec,
         },
     )
     .await?;
@@ -107,6 +134,13 @@ async fn main() -> Result<()> {
 
     // 创建全局关闭信号
     let shutdown = GracefulShutdown::new();
+    let rotation_handle = CertRotationManager::new(
+        cert_bootstrap,
+        nats_client.clone(),
+        std::time::Duration::from_secs(cfg.tls.renew_check_interval_sec),
+        shutdown.token.clone(),
+    )
+    .spawn();
 
     // 创建并启动 Agent 管理器
     let agent_manager = AgentManager::new(
@@ -128,12 +162,18 @@ async fn main() -> Result<()> {
 
     info!("Agent started successfully");
 
-    // 等待全局关闭信号
-    shutdown.wait_for_signal().await;
+    // 等待全局关闭信号或证书轮换触发的内部重启
+    tokio::select! {
+        _ = shutdown.wait_for_signal() => {}
+        _ = shutdown.cancelled() => {
+            info!("Internal shutdown requested");
+        }
+    }
     info!("Shutdown signal received, stopping agent...");
 
     // 等待 Agent 优雅关闭
     let _ = agent_handle.await;
+    let _ = rotation_handle.await;
     info!("Agent shut down gracefully");
 
     Ok(())

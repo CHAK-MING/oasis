@@ -1,5 +1,6 @@
 pub mod agent_manager;
 pub mod cert_bootstrap;
+pub mod cert_rotation;
 pub mod file_manager;
 pub mod heartbeat_service;
 pub mod nats_client;
