@@ -34,7 +34,7 @@ logical_or = { logical_and ~ ("or" ~ logical_and)* }
 logical_and = { logical_not ~ ("and" ~ logical_not)* }
 
 // 逻辑非（高优先级）
-logical_not = { ("not" ~ primary) | primary }
+logical_not = { (kw_not ~ primary) | primary }
 
 // 基础表达式（最高优先级）
 primary = { 
@@ -59,9 +59,15 @@ sys_eq = { "system" ~ "[" ~ string ~ "]" ~ "==" ~ string }
 label_eq = { "labels" ~ "[" ~ string ~ "]" ~ "==" ~ string }
 in_groups = { string ~ "in" ~ "groups" }
 
-string = @{ dquote ~ (!dquote ~ ANY)* ~ dquote | squote ~ (!squote ~ ANY)* ~ squote }
+string = @{ double_quoted | single_quoted }
+double_quoted = { dquote ~ (escaped_dquote | escaped_backslash | !dquote ~ ANY)* ~ dquote }
+single_quoted = { squote ~ (escaped_squote | escaped_backslash | !squote ~ ANY)* ~ squote }
+escaped_dquote = { "\\\"" }
+escaped_squote = { "\\'" }
+escaped_backslash = { "\\\\" }
 dquote = _{ "\"" }
 squote = _{ "'" }
+kw_not = { "not" }
 "#]
 struct SelectorParser;
 
@@ -121,6 +127,7 @@ impl QueryResult {
 struct CachedQuery {
     bitmap: RoaringBitmap,
     cached_at: i64,
+    last_accessed_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +161,10 @@ pub struct SelectorEngine {
 }
 
 impl SelectorEngine {
+    fn current_timestamp() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
     async fn invalidate_cached_queries(
         parse_cache: &DashMap<String, CachedQuery>,
         all_agents_cache: &AsyncRwLock<Option<(RoaringBitmap, Instant)>>,
@@ -309,12 +320,12 @@ impl SelectorEngine {
             severity: ErrorSeverity::Error,
         })?;
 
-        self.parse_logical_or(logical_or_pair)
+        Self::parse_logical_or(logical_or_pair)
     }
 
-    fn parse_logical_or(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+    fn parse_logical_or(pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
-        let first = self.parse_logical_and(
+        let first = Self::parse_logical_and(
             inner
                 .next()
                 .ok_or_else(|| parse_error("missing logical_and"))?,
@@ -322,16 +333,16 @@ impl SelectorEngine {
 
         let mut result = first;
         for and_pair in inner {
-            let right = self.parse_logical_and(and_pair)?;
+            let right = Self::parse_logical_and(and_pair)?;
             result = SelectorAst::Or(Box::new(result), Box::new(right));
         }
 
         Ok(result)
     }
 
-    fn parse_logical_and(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+    fn parse_logical_and(pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
-        let first = self.parse_logical_not(
+        let first = Self::parse_logical_not(
             inner
                 .next()
                 .ok_or_else(|| parse_error("missing logical_not"))?,
@@ -339,36 +350,41 @@ impl SelectorEngine {
 
         let mut result = first;
         for not_pair in inner {
-            let right = self.parse_logical_not(not_pair)?;
+            let right = Self::parse_logical_not(not_pair)?;
             result = SelectorAst::And(Box::new(result), Box::new(right));
         }
 
         Ok(result)
     }
 
-    fn parse_logical_not(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
-        let pair_str = pair.as_str().trim();
+    fn parse_logical_not(pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+        let mut inner = pair.into_inner();
+        let first_pair = inner
+            .next()
+            .ok_or_else(|| parse_error("missing logical_not inner expression"))?;
 
-        if pair_str.starts_with("not ") {
-            let mut inner = pair.into_inner();
-            let primary_pair = inner
-                .next()
-                .ok_or_else(|| parse_error("missing primary after 'not'"))?;
-            let inner_ast = self.parse_primary(primary_pair)?;
-            Ok(SelectorAst::Not(Box::new(inner_ast)))
-        } else {
-            let mut inner = pair.into_inner();
-            let primary_pair = inner.next().ok_or_else(|| parse_error("missing primary"))?;
-            self.parse_primary(primary_pair)
+        match first_pair.as_rule() {
+            Rule::kw_not => {
+                let primary_pair = inner
+                    .next()
+                    .ok_or_else(|| parse_error("missing primary after 'not'"))?;
+                let inner_ast = Self::parse_primary(primary_pair)?;
+                Ok(SelectorAst::Not(Box::new(inner_ast)))
+            }
+            Rule::primary => Self::parse_primary(first_pair),
+            other => Err(CoreError::InvalidTask {
+                reason: format!("Unsupported logical_not rule: {:?}", other),
+                severity: ErrorSeverity::Error,
+            }),
         }
     }
 
-    fn parse_primary(&self, pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
+    fn parse_primary(pair: pest::iterators::Pair<Rule>) -> CoreResult<SelectorAst> {
         let mut inner = pair.into_inner();
         let first_pair = inner.next().ok_or_else(|| parse_error("empty primary"))?;
 
         match first_pair.as_rule() {
-            Rule::logical_or => self.parse_logical_or(first_pair),
+            Rule::logical_or => Self::parse_logical_or(first_pair),
             Rule::all_true => Ok(SelectorAst::AllTrue),
             Rule::id_list => {
                 let mut ids = Vec::new();
@@ -507,16 +523,14 @@ impl SelectorEngine {
     }
 
     async fn get_cached_result(&self, cache_key: &str) -> CoreResult<Option<RoaringBitmap>> {
-        let now = chrono::Utc::now().timestamp();
+        let now = Self::current_timestamp();
 
-        if let Some(cached) = self.parse_cache.get(cache_key) {
+        if let Some(mut cached) = self.parse_cache.get_mut(cache_key) {
             let is_valid = now - cached.cached_at < self.cache_config.ttl_seconds as i64;
             if is_valid {
+                cached.last_accessed_at = now;
                 return Ok(Some(cached.bitmap.clone()));
             }
-            // Drop the guard explicitly before calling remove to avoid deadlock.
-            // DashMap::get() holds a read guard; calling remove() while the guard
-            // is alive can cause a deadlock when remove() tries to acquire a write lock.
             drop(cached);
             self.parse_cache.remove(cache_key);
         }
@@ -524,25 +538,31 @@ impl SelectorEngine {
         Ok(None)
     }
 
+    fn evict_oldest_cache_entries(parse_cache: &DashMap<String, CachedQuery>, max_entries: usize) {
+        let remove_count = (max_entries / 10).max(1);
+        let mut oldest_keys: Vec<(String, i64)> = parse_cache
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().last_accessed_at))
+            .collect();
+
+        oldest_keys.sort_by_key(|(_, last_accessed_at)| *last_accessed_at);
+
+        for (key, _) in oldest_keys.into_iter().take(remove_count) {
+            parse_cache.remove(&key);
+        }
+    }
+
     async fn cache_result(&self, cache_key: &str, bitmap: &RoaringBitmap) -> CoreResult<()> {
         // 检查缓存大小限制
         if self.parse_cache.len() >= self.cache_config.max_entries {
-            // 简单的 LRU：随机删除一些旧条目
-            let keys_to_remove: Vec<String> = self
-                .parse_cache
-                .iter()
-                .take(self.cache_config.max_entries / 10)
-                .map(|entry| entry.key().clone())
-                .collect();
-
-            for key in keys_to_remove {
-                self.parse_cache.remove(&key);
-            }
+            Self::evict_oldest_cache_entries(&self.parse_cache, self.cache_config.max_entries);
         }
 
+        let now = Self::current_timestamp();
         let cached_query = CachedQuery {
             bitmap: bitmap.clone(),
-            cached_at: chrono::Utc::now().timestamp(),
+            cached_at: now,
+            last_accessed_at: now,
         };
 
         self.parse_cache.insert(cache_key.to_string(), cached_query);
@@ -612,7 +632,43 @@ impl SelectorEngine {
 }
 
 fn unquote(s: &str) -> String {
-    s.trim_matches('"').trim_matches('\'').to_string()
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+
+    if (first != '"' && first != '\'') || !s.ends_with(first) || s.len() < 2 {
+        return s.to_string();
+    }
+
+    let inner = &s[1..s.len() - 1];
+    let mut result = String::with_capacity(inner.len());
+    let mut escaped = false;
+
+    for ch in inner.chars() {
+        if escaped {
+            match ch {
+                '\\' => result.push('\\'),
+                '"' => result.push('"'),
+                '\'' => result.push('\''),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                other => result.push(other),
+            }
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            result.push(ch);
+        }
+    }
+
+    if escaped {
+        result.push('\\');
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -647,6 +703,16 @@ mod tests {
         #[test]
         fn test_inner_quotes_preserved() {
             assert_eq!(unquote("\"hello world\""), "hello world");
+        }
+
+        #[test]
+        fn test_unquote_unescapes_double_quotes() {
+            assert_eq!(unquote("\"he said \\\"hi\\\"\""), "he said \"hi\"");
+        }
+
+        #[test]
+        fn test_unquote_unescapes_single_quotes() {
+            assert_eq!(unquote("'it\\'s ok'"), "it's ok");
         }
     }
 
@@ -699,6 +765,24 @@ mod tests {
         #[test]
         fn test_parse_label_eq_single_quotes() {
             let result = SelectorParser::parse(Rule::selector, "labels['region']=='us-east-1'");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_label_eq_with_escaped_double_quotes() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "labels[\"note\"]==\"he said \\\"hi\\\"\"",
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_parse_label_eq_with_escaped_single_quotes() {
+            let result = SelectorParser::parse(
+                Rule::selector,
+                "labels['note']=='it\\'s ok'",
+            );
             assert!(result.is_ok());
         }
 
@@ -855,6 +939,26 @@ mod tests {
                 panic!("Clone failed");
             }
         }
+
+        #[test]
+        fn test_parse_primary_unquotes_escaped_double_quotes() {
+            let primary = SelectorParser::parse(
+                Rule::primary,
+                "labels[\"note\"]==\"he said \\\"hi\\\"\"",
+            )
+            .expect("primary parse")
+            .next()
+            .expect("primary pair");
+
+            let ast = SelectorEngine::parse_primary(primary).expect("ast");
+            match ast {
+                SelectorAst::LabelEq(key, value) => {
+                    assert_eq!(key, "note");
+                    assert_eq!(value, "he said \"hi\"");
+                }
+                other => panic!("unexpected ast: {:?}", other),
+            }
+        }
     }
 
     mod cache_invalidation_tests {
@@ -867,7 +971,8 @@ mod tests {
                 "query|labels[\"env\"]==\"prod\"".to_string(),
                 CachedQuery {
                     bitmap: RoaringBitmap::from_iter([1, 2]),
-                    cached_at: chrono::Utc::now().timestamp(),
+                    cached_at: SelectorEngine::current_timestamp(),
+                    last_accessed_at: SelectorEngine::current_timestamp(),
                 },
             );
             let all_agents_cache = AsyncRwLock::new(Some((RoaringBitmap::from_iter([1]), Instant::now())));
@@ -876,6 +981,54 @@ mod tests {
 
             assert!(parse_cache.is_empty());
             assert!(all_agents_cache.read().await.is_none());
+        }
+
+        #[test]
+        fn test_evict_oldest_cache_entries_prefers_recently_used_items() {
+            let parse_cache = DashMap::new();
+            parse_cache.insert(
+                "old".to_string(),
+                CachedQuery {
+                    bitmap: RoaringBitmap::from_iter([1]),
+                    cached_at: 1,
+                    last_accessed_at: 1,
+                },
+            );
+            parse_cache.insert(
+                "new".to_string(),
+                CachedQuery {
+                    bitmap: RoaringBitmap::from_iter([2]),
+                    cached_at: 2,
+                    last_accessed_at: 20,
+                },
+            );
+
+            SelectorEngine::evict_oldest_cache_entries(&parse_cache, 10);
+
+            assert!(!parse_cache.contains_key("old"));
+            assert!(parse_cache.contains_key("new"));
+        }
+    }
+
+    mod parse_logical_not_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_not_with_parentheses() {
+            let mut pairs = SelectorParser::parse(
+                Rule::selector,
+                "not(labels[\"env\"]==\"prod\")",
+            )
+            .expect("selector should parse");
+
+            let selector_pair = pairs.next().expect("selector pair");
+            let logical_or_pair = selector_pair
+                .into_inner()
+                .next()
+                .expect("logical_or pair");
+
+            let ast = SelectorEngine::parse_logical_or(logical_or_pair).expect("ast");
+            assert!(matches!(ast, SelectorAst::Not(_)));
         }
     }
 }
