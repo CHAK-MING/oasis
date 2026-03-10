@@ -1,6 +1,7 @@
 use crate::{core_types::SelectorExpression, error::CoreError};
 use crate::core_types::AgentId;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// 统一的文件规格类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +174,40 @@ impl FileConfig {
     }
 }
 
+pub fn file_object_namespace(source_path: &str) -> Result<String, CoreError> {
+    if source_path.trim().is_empty() {
+        return Err(CoreError::file_error(source_path, "source path cannot be empty"));
+    }
+
+    let mut path_hasher = Sha256::new();
+    path_hasher.update(source_path.as_bytes());
+    Ok(format!("{:x}", path_hasher.finalize()))
+}
+
+pub fn file_object_name(source_path: &str) -> Result<String, CoreError> {
+    std::path::Path::new(source_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))
+}
+
+pub fn file_object_key(source_path: &str, revision: u64) -> Result<String, CoreError> {
+    Ok(format!(
+        "{}/{}.v{}",
+        file_object_namespace(source_path)?,
+        file_object_name(source_path)?,
+        revision
+    ))
+}
+
+pub fn file_pointer_key(source_path: &str) -> Result<String, CoreError> {
+    Ok(format!(
+        "{}/{}.current",
+        file_object_namespace(source_path)?,
+        file_object_name(source_path)?
+    ))
+}
+
 impl FileApplyExecution {
     pub fn success(
         agent_id: AgentId,
@@ -287,6 +322,23 @@ impl FileOperationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_file_object_namespace_uses_full_sha256_hex() {
+        let namespace = file_object_namespace("/tmp/example.conf").expect("namespace");
+
+        assert_eq!(namespace.len(), 64);
+        assert!(namespace.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_file_object_key_is_deterministic() {
+        let key_a = file_object_key("/tmp/example.conf", 42).expect("key");
+        let key_b = file_object_key("/tmp/example.conf", 42).expect("key");
+
+        assert_eq!(key_a, key_b);
+        assert!(key_a.ends_with("/example.conf.v42"));
+    }
 
     #[test]
     fn test_file_config_validate_empty_destination() {

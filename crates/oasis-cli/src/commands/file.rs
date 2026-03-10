@@ -132,6 +132,30 @@ pub struct GcArgs {
     source_path: Option<String>,
 }
 
+fn normalize_registry_source_path(path: &str) -> Result<String> {
+    let path = std::path::Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| format!("无法获取当前工作目录: {}", path.display()))?
+            .join(path)
+    };
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+
+    Ok(normalized.to_string_lossy().to_string())
+}
+
 /// 执行 `file` 子命令
 pub async fn run_file(
     mut client: OasisServiceClient<tonic::transport::Channel>,
@@ -240,10 +264,7 @@ async fn run_file_apply(
 
     let pb_commit = crate::ui::create_spinner("提交文件上传...");
     let commit_result = client
-        .commit_file_upload(CommitFileMsg {
-            upload_id,
-            verify_checksum: true,
-        })
+        .commit_file_upload(CommitFileMsg { upload_id })
         .await
         .map_err(|e| anyhow::anyhow!("提交上传失败: {}", format_grpc_error(&e)))?
         .into_inner();
@@ -320,12 +341,8 @@ async fn run_file_history(
     print_header("文件历史信息");
     print_info(&format!("文件路径: {}", style(&args.source_path).cyan()));
 
-    let source_path = std::path::Path::new(&args.source_path)
-        .canonicalize()
-        .with_context(|| format!("无法解析源文件路径: {}", args.source_path))?;
-
     let base_req = GetFileHistoryRequest {
-        source_path: source_path.to_string_lossy().to_string(),
+        source_path: normalize_registry_source_path(&args.source_path)?,
     };
     let response = grpc_retry!(client, get_file_history(base_req.clone()))
         .await?
@@ -408,13 +425,9 @@ async fn run_file_rollback(
     print_info(&format!("目标: {}", args.target));
     print_info(&format!("版本: {}", args.revision));
 
-    let abs_path = std::path::Path::new(&args.source_path)
-        .canonicalize()
-        .with_context(|| format!("无法解析源文件路径: {}", args.source_path))?;
-
     let request = RollbackFileRequest {
         config: Some(FileConfigMsg {
-            source_path: abs_path.to_string_lossy().to_string(),
+            source_path: normalize_registry_source_path(&args.source_path)?,
             destination_path: args.dest,
             revision: args.revision,
             owner: args.owner.unwrap_or_default(),
@@ -464,10 +477,7 @@ async fn run_file_gc(
     print_info(&format!("保留最近 {} 天的版本", args.keep_days));
 
     let source_path = if let Some(path) = args.source_path {
-        let abs_path = std::path::Path::new(&path)
-            .canonicalize()
-            .with_context(|| format!("无法解析源文件路径: {}", path))?;
-        Some(abs_path.to_string_lossy().to_string())
+        Some(normalize_registry_source_path(&path)?)
     } else {
         None
     };
@@ -494,4 +504,25 @@ async fn run_file_gc(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_registry_source_path_makes_relative_path_absolute_without_existing_file() {
+        let normalized = normalize_registry_source_path("./missing/../config/app.conf").unwrap();
+
+        assert!(normalized.starts_with('/'));
+        assert!(normalized.ends_with("/config/app.conf"));
+        assert!(!normalized.contains("/./"));
+        assert!(!normalized.contains("missing/.."));
+    }
+
+    #[test]
+    fn test_normalize_registry_source_path_keeps_absolute_path() {
+        let normalized = normalize_registry_source_path("/etc/oasis/app.conf").unwrap();
+        assert_eq!(normalized, "/etc/oasis/app.conf");
+    }
 }

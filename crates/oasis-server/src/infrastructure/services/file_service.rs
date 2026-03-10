@@ -174,15 +174,8 @@ impl FileService {
         let lock = self.lock_manager.acquire_lock(source_path).await?;
 
         let result = async {
-            let mut path_hasher = Sha256::new();
-            path_hasher.update(source_path.as_bytes());
-            let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-            let filename = std::path::Path::new(source_path)
-                .file_name()
-                .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
-                .to_string_lossy();
             let revision = chrono::Utc::now().timestamp() as u64;
-            let object_key = format!("{}/{}.v{}", path_hash, filename, revision);
+            let object_key = file_object_key(source_path, revision)?;
 
             let mut hasher = Sha256::new();
             hasher.update(&data);
@@ -475,14 +468,7 @@ impl FileService {
 
     /// 更新指定源文件的当前版本指针（写入 `{path_hash}/{filename}.current` 对象，内容为 revision）
     async fn set_active_revision(&self, source_path: &str, revision: u64) -> Result<()> {
-        let mut path_hasher = Sha256::new();
-        path_hasher.update(source_path.as_bytes());
-        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-        let filename = std::path::Path::new(source_path)
-            .file_name()
-            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
-            .to_string_lossy();
-        let pointer_key = format!("{}/{}.current", path_hash, filename);
+        let pointer_key = file_pointer_key(source_path)?;
 
         let content = revision.to_string().into_bytes();
         let store = self.get_object_store().await?;
@@ -498,14 +484,7 @@ impl FileService {
 
     /// 读取指定源文件的当前版本指针（从 `{path_hash}/{filename}.current` 读取 revision）
     async fn get_active_revision(&self, source_path: &str) -> Result<Option<u64>> {
-        let mut path_hasher = Sha256::new();
-        path_hasher.update(source_path.as_bytes());
-        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-        let filename = std::path::Path::new(source_path)
-            .file_name()
-            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
-            .to_string_lossy();
-        let pointer_key = format!("{}/{}.current", path_hash, filename);
+        let pointer_key = file_pointer_key(source_path)?;
 
         let store = self.get_object_store().await?;
         match store.get(pointer_key.as_str()).await {
@@ -595,14 +574,8 @@ impl FileService {
     pub async fn get_file_history(&self, source_path: &str) -> Result<Option<FileHistory>> {
         debug!("Getting file history for: {}", source_path);
 
-        // 生成路径hash和文件名
-        let mut path_hasher = Sha256::new();
-        path_hasher.update(source_path.as_bytes());
-        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-        let filename = std::path::Path::new(source_path)
-            .file_name()
-            .ok_or_else(|| CoreError::file_error(source_path, "no filename in path"))?
-            .to_string_lossy();
+        let namespace = file_object_namespace(source_path)?;
+        let filename = file_object_name(source_path)?;
 
         let store = self.get_object_store().await?;
 
@@ -614,7 +587,7 @@ impl FileService {
 
         let mut versions = Vec::new();
         // 构建匹配模式：{path_hash}/{filename}.v*
-        let pattern_prefix = format!("{}/{}.v", path_hash, filename);
+        let pattern_prefix = format!("{}/{}.v", namespace, filename);
 
         // 收集所有版本信息
         while let Some(result) = list.next().await {
@@ -740,10 +713,8 @@ impl FileService {
 
         for ((path_hash, filename), mut versions) in file_groups {
             if let Some(ref sp) = source_path {
-                let mut path_hasher = Sha256::new();
-                path_hasher.update(sp.as_bytes());
-                let target_hash = &format!("{:x}", path_hasher.finalize())[..8];
-                if path_hash != target_hash {
+                let target_namespace = file_object_namespace(sp)?;
+                if path_hash != target_namespace {
                     continue;
                 }
             }

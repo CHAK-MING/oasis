@@ -126,6 +126,22 @@ async fn cleanup_sessions(
 }
 
 impl FileHandlers {
+    fn validate_committable_session(session: &UploadSession) -> std::result::Result<(), Status> {
+        if session.buffer.is_empty() {
+            return Err(Status::invalid_argument("uploaded file is empty"));
+        }
+
+        if session.buffer.len() as u64 != session.size {
+            return Err(Status::invalid_argument(format!(
+                "incomplete upload: expected {} bytes, got {}",
+                session.size,
+                session.buffer.len()
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn create(
         upload_id: String,
         source_path: String,
@@ -198,7 +214,14 @@ impl FileHandlers {
         Ok(session.buffer.len() as u64)
     }
 
-    async fn take(upload_id: &str) -> Option<UploadSession> {
+    async fn get(upload_id: &str) -> Option<UploadSession> {
+        SESSIONS
+            .sessions
+            .get(upload_id)
+            .map(|session| session.value().clone())
+    }
+
+    async fn remove(upload_id: &str) -> Option<UploadSession> {
         SESSIONS
             .sessions
             .remove(upload_id)
@@ -311,23 +334,11 @@ impl FileHandlers {
     ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
         let req = request.into_inner();
 
-        // 获取上传会话
-        let Some(session) = FileHandlers::take(&req.upload_id).await else {
+        let Some(session) = FileHandlers::get(&req.upload_id).await else {
             return Err(Status::not_found("upload session not found"));
         };
 
-        // 验证文件大小
-        if session.buffer.is_empty() {
-            return Err(Status::invalid_argument("uploaded file is empty"));
-        }
-
-        if session.buffer.len() as u64 != session.size {
-            return Err(Status::invalid_argument(format!(
-                "incomplete upload: expected {} bytes, got {}",
-                session.size,
-                session.buffer.len()
-            )));
-        }
+        FileHandlers::validate_committable_session(&session)?;
 
         // 计算 SHA256（大文件放到阻塞线程池）
         let checksum = if session.size > 32 * 1024 * 1024 {
@@ -357,9 +368,11 @@ impl FileHandlers {
         let upload_result = srv
             .context()
             .file_service
-            .upload(&session.source_path, session.buffer)
+            .upload(&session.source_path, session.buffer.clone())
             .await
             .map_err(|e| Status::internal(format!("Failed to store file: {}", e)))?;
+
+        let _ = FileHandlers::remove(&req.upload_id).await;
 
         debug!(
             "File uploaded successfully: {} (size: {}, sha256: {})",
@@ -543,5 +556,45 @@ impl FileHandlers {
             message: format!("Successfully deleted {} old versions", deleted_count),
             deleted_count: deleted_count as u64,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_committable_session_rejects_incomplete_uploads() {
+        let session = UploadSession {
+            source_path: "/tmp/app.conf".to_string(),
+            size: 10,
+            buffer: vec![1, 2, 3],
+            checksum: String::new(),
+            created_at: Instant::now(),
+        };
+
+        let err = FileHandlers::validate_committable_session(&session).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("incomplete upload"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_validation_failure_keeps_session_available() {
+        let upload_id = format!("test-upload-{}", uuid::Uuid::now_v7());
+        FileHandlers::create(
+            upload_id.clone(),
+            "/tmp/app.conf".to_string(),
+            10,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        FileHandlers::write_chunk(&upload_id, 0, &[1, 2, 3]).await.unwrap();
+
+        let session = FileHandlers::get(&upload_id).await.expect("session should exist");
+        assert!(FileHandlers::validate_committable_session(&session).is_err());
+        assert!(FileHandlers::get(&upload_id).await.is_some());
+
+        let _ = FileHandlers::remove(&upload_id).await;
     }
 }

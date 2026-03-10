@@ -25,6 +25,10 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
+    fn should_ack_task_message(result_publish: &Result<()>) -> bool {
+        result_publish.is_ok()
+    }
+
     pub fn new(
         agent_id: AgentId,
         nats_client: ManagedNatsClient,
@@ -233,11 +237,20 @@ impl TaskManager {
         self.running_tasks.remove(&task.task_id);
 
         // 发布执行结果
-        if let Err(e) = self.publish_task_result(&execution).await {
+        let publish_result = self.publish_task_result(&execution).await;
+        if let Err(e) = &publish_result {
             error!("Failed to publish task result: {}", e);
         }
 
-        // 确认消息
+        if !Self::should_ack_task_message(&publish_result) {
+            return Err(anyhow::anyhow!(
+                "Failed to publish final task result for {}",
+                task.task_id
+            )
+            .into());
+        }
+
+        // 仅在终态结果成功发布后确认消息，避免任务已执行但结果丢失。
         msg.ack()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
@@ -645,6 +658,15 @@ mod tests {
                 };
                 assert!(!phase.is_empty());
             }
+        }
+
+        #[test]
+        fn test_only_ack_after_final_result_publish_succeeds() {
+            let ok_result: Result<()> = Ok(());
+            let err_result: Result<()> = Err(anyhow::anyhow!("publish failed").into());
+
+            assert!(TaskManager::should_ack_task_message(&ok_result));
+            assert!(!TaskManager::should_ack_task_message(&err_result));
         }
     }
 

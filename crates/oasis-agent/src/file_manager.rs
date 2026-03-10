@@ -5,10 +5,9 @@ use oasis_core::{
     constants::*,
     core_types::AgentId,
     error::{CoreError, ErrorSeverity, Result},
-    file_types::{FileApplyExecution, FileConfig},
+    file_types::{FileApplyExecution, FileConfig, file_object_key},
 };
 use prost::Message;
-use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +21,10 @@ pub struct FileManager {
 }
 
 impl FileManager {
+    fn should_retry_file_apply(error: &CoreError) -> bool {
+        error.is_retriable()
+    }
+
     pub fn new(
         agent_id: AgentId,
         nats_client: ManagedNatsClient,
@@ -99,7 +102,7 @@ impl FileManager {
                     consumer_name.clone(),
                     filter_subject.clone(),
                 )
-                .max_deliver(1)
+                .max_deliver(3)
                 .ack_wait_secs(300)
                 .build(),
             )
@@ -151,6 +154,16 @@ impl FileManager {
         // 执行文件部署
         let result = self.apply_file(&file_config).await;
 
+        if let Err(e) = &result {
+            if Self::should_retry_file_apply(e) {
+                warn!(
+                    "Retryable file apply failure for {}: {}",
+                    file_config.source_path, e
+                );
+                return Err(e.clone());
+            }
+        }
+
         let apply_execution = match &result {
             Ok(_) => FileApplyExecution::success(
                 self.agent_id.clone(),
@@ -172,6 +185,7 @@ impl FileManager {
 
         if let Err(e) = self.publish_file_apply_result(&apply_execution).await {
             error!("Failed to publish file apply result: {}", e);
+            return Err(e);
         }
 
         match &result {
@@ -263,17 +277,7 @@ impl FileManager {
                 severity: ErrorSeverity::Error,
             })?;
 
-        let mut path_hasher = Sha256::new();
-        path_hasher.update(config.source_path.as_bytes());
-        let path_hash = &format!("{:x}", path_hasher.finalize())[..8];
-        let filename = std::path::Path::new(&config.source_path)
-            .file_name()
-            .ok_or_else(|| CoreError::Validation {
-                message: "Invalid source path: no filename".to_string(),
-                severity: ErrorSeverity::Error,
-            })?
-            .to_string_lossy();
-        let object_key = format!("{}/{}.v{}", path_hash, filename, config.revision);
+        let object_key = file_object_key(&config.source_path, config.revision)?;
 
         let mut object = object_store
             .get(object_key)
@@ -429,5 +433,30 @@ impl FileManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retryable_file_apply_errors_are_retried() {
+        let err = CoreError::Nats {
+            message: "nats unavailable".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+
+        assert!(FileManager::should_retry_file_apply(&err));
+    }
+
+    #[test]
+    fn test_validation_file_apply_errors_are_terminal() {
+        let err = CoreError::Validation {
+            message: "bad config".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+
+        assert!(!FileManager::should_retry_file_apply(&err));
     }
 }

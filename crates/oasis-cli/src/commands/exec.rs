@@ -131,6 +131,24 @@ fn decode_base64_prefixed(s: &str) -> String {
     }
 }
 
+fn task_output_summary(execution: &TaskExecutionMsg) -> (&'static str, bool) {
+    match execution.state() {
+        TaskStateEnum::TaskCreated | TaskStateEnum::TaskPending => ("任务已创建，尚未开始输出", false),
+        TaskStateEnum::TaskRunning if execution.stdout.is_empty() && execution.stderr.is_empty() => {
+            ("任务正在执行，尚未产生输出", false)
+        }
+        _ => ("任务输出获取成功", true),
+    }
+}
+
+fn batch_success_rate(success: usize, terminal_total: usize) -> Option<f64> {
+    if terminal_total == 0 {
+        None
+    } else {
+        Some((success as f64 / terminal_total as f64) * 100.0)
+    }
+}
+
 async fn run_exec_output(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: ExecOutputArgs,
@@ -166,9 +184,15 @@ async fn run_exec_output(
         .map(|id| id.value.as_str())
         .unwrap_or("unknown");
 
-    crate::ui::print_success("任务输出获取成功");
+    let (summary, is_ready) = task_output_summary(&execution);
+    if is_ready {
+        crate::ui::print_success(summary);
+    } else {
+        print_warning(summary);
+    }
     print_info(&format!("Task ID: {}", style(&args.task_id).bold()));
     print_info(&format!("Agent: {}", style(agent_id).bold()));
+    print_info(&format!("状态: {}", style(state_to_cn(execution.state())).bold()));
 
     if let Some(exit_code) = execution.exit_code {
         print_info(&format!("退出码: {}", style(exit_code).bold()));
@@ -530,16 +554,22 @@ fn display_batch_statistics(executions: &[TaskExecutionMsg]) {
         print_info(&format!("🚫 已取消: {}", style(cancelled).dim().bold()));
     }
 
-    let success_rate = if total > 0 {
-        (success as f64 / total as f64) * 100.0
+    let terminal_total = success + failed + timeout + cancelled;
+    let completion_rate = if total > 0 {
+        (terminal_total as f64 / total as f64) * 100.0
     } else {
         0.0
     };
 
+    let success_rate_text = batch_success_rate(success, terminal_total)
+        .map(|rate| format!("{:.1}%", rate))
+        .unwrap_or_else(|| "-".to_string());
+
     print_info(&format!(
-        "总计: {} | 成功率: {}",
+        "总计: {} | 完成率: {} | 成功率(已完成): {}",
         style(total).bold(),
-        style(format!("{:.1}%", success_rate)).green().bold()
+        style(format!("{:.1}%", completion_rate)).blue().bold(),
+        style(success_rate_text).green().bold()
     ));
 }
 
@@ -608,5 +638,30 @@ fn state_to_cn(state: TaskStateEnum) -> &'static str {
         TaskStateEnum::TaskFailed => "失败",
         TaskStateEnum::TaskTimeout => "超时",
         TaskStateEnum::TaskCancelled => "已取消",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_output_summary_marks_running_without_output_as_not_ready() {
+        let execution = TaskExecutionMsg {
+            state: TaskStateEnum::TaskRunning as i32,
+            stdout: String::new(),
+            stderr: String::new(),
+            ..Default::default()
+        };
+
+        let (summary, ready) = task_output_summary(&execution);
+        assert!(!ready);
+        assert!(summary.contains("尚未产生输出"));
+    }
+
+    #[test]
+    fn test_batch_success_rate_uses_only_completed_tasks() {
+        assert_eq!(batch_success_rate(2, 4), Some(50.0));
+        assert_eq!(batch_success_rate(0, 0), None);
     }
 }

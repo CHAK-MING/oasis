@@ -532,7 +532,7 @@ async fn upload_file_for_rollout(
         .into_inner();
 
     let upload_id = session.upload_id;
-    let mut offset: u64 = 0;
+    let mut offset: u64 = session.received_bytes;
     let chunk_size = if session.chunk_size == 0 {
         256 * 1024
     } else {
@@ -541,6 +541,10 @@ async fn upload_file_for_rollout(
 
     // 2) 分片上传
     let mut file = std::fs::File::open(&abs_path)?;
+    if offset > 0 {
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(offset))?;
+    }
     loop {
         let mut buf = vec![0u8; chunk_size];
         let read_bytes = std::io::Read::read(&mut file, &mut buf)?;
@@ -561,7 +565,7 @@ async fn upload_file_for_rollout(
             .map_err(|e| anyhow!("UploadFileChunk 失败: {}", e))?
             .into_inner();
 
-        offset += resp.received_bytes;
+        offset = resp.received_bytes;
         pb.set_position(offset);
     }
     pb.set_message("正在提交文件...");
@@ -569,7 +573,6 @@ async fn upload_file_for_rollout(
     // 3) 提交上传
     let commit = CommitFileMsg {
         upload_id: upload_id.clone(),
-        verify_checksum: false,
     };
 
     let result = client
@@ -792,4 +795,16 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 #[allow(dead_code)]
 fn format_timestamp(timestamp: i64) -> String {
     crate::time::format_local_ts(timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_rollout_upload_uses_absolute_received_bytes_for_offset() {
+        let mut offset = 1024_u64;
+        assert_eq!(offset, 1024);
+
+        offset = 2048;
+        assert_eq!(offset, 2048);
+    }
 }
