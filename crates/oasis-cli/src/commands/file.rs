@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
 use oasis_core::{
-    core_types::SelectorExpression,
+    core_types::{OperationId, SelectorExpression},
     proto::{
         CommitFileMsg, EmptyMsg, FileApplyRequestMsg, FileChunkMsg, FileConfigMsg, FileSpecMsg,
         GetFileHistoryRequest, RollbackFileRequest, oasis_service_client::OasisServiceClient,
@@ -288,7 +288,7 @@ async fn run_file_apply(
             owner: args.owner.unwrap_or_default(),
             mode: args.mode.unwrap_or_default(),
             target: Some(SelectorExpression::new(args.target).into()),
-            operation_id: String::new(),
+            operation_id: OperationId::generate().to_string(),
         }),
     };
 
@@ -433,7 +433,7 @@ async fn run_file_rollback(
             owner: args.owner.unwrap_or_default(),
             mode: args.mode.unwrap_or_default(),
             target: Some(SelectorExpression::new(args.target).into()),
-            operation_id: String::new(),
+            operation_id: OperationId::generate().to_string(),
         }),
     };
 

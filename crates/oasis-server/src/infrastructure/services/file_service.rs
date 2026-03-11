@@ -13,7 +13,8 @@ use futures::StreamExt;
 use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{
-    FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS, file_types::*, kv_key_file_apply_result,
+    FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS, core_types::OperationId, file_types::*,
+    kv_key_file_apply_result,
 };
 
 const FILE_APPLY_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -93,6 +94,14 @@ fn summarize_apply_results(
 
 fn should_update_active_revision_after_rollback(success: bool) -> bool {
     success
+}
+
+fn file_apply_dedupe_key(config: &oasis_core::proto::FileConfigMsg, agent_id: &AgentId) -> String {
+    format!(
+        "file-op-{}@{}",
+        config.operation_id.trim(),
+        agent_id.as_str()
+    )
 }
 
 fn apply_active_revision_to_versions(
@@ -233,6 +242,12 @@ impl FileService {
         if operation_id.is_empty() {
             return Err(CoreError::Validation {
                 message: "Missing file apply operation_id".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        }
+        if !OperationId::is_valid(operation_id) {
+            return Err(CoreError::Validation {
+                message: "Invalid file apply operation_id".to_string(),
                 severity: ErrorSeverity::Error,
             });
         }
@@ -382,10 +397,7 @@ impl FileService {
 
         // 设置去重头部
         let mut headers = async_nats::HeaderMap::new();
-        let dedupe_key = format!(
-            "file-{}@{}@{}",
-            config.source_path, config.revision, agent_id
-        );
+        let dedupe_key = file_apply_dedupe_key(config, agent_id);
         headers.insert("Nats-Msg-Id", dedupe_key);
 
         // 发布并等待 ACK
@@ -879,6 +891,9 @@ mod tests {
     use oasis_core::file_types::FileApplyExecution;
     use std::collections::HashMap;
 
+    const OP_ID_1: &str = "123e4567-e89b-12d3-a456-426614174000";
+    const OP_ID_2: &str = "123e4567-e89b-12d3-a456-426614174001";
+
     #[test]
     fn test_summarize_apply_results_marks_missing_agents_as_failures() {
         let agent_a = AgentId::new("agent-a");
@@ -888,7 +903,7 @@ mod tests {
             agent_a.clone(),
             FileApplyExecution::success(
                 agent_a.clone(),
-                "op-1".to_string(),
+                OP_ID_1.to_string(),
                 "/tmp/app.conf".to_string(),
                 "/etc/app.conf".to_string(),
                 42,
@@ -897,7 +912,7 @@ mod tests {
         );
 
         let summary = summarize_apply_results(
-            "op-1",
+            OP_ID_1,
             "/tmp/app.conf",
             42,
             &[agent_a.clone(), agent_b.clone()],
@@ -923,6 +938,28 @@ mod tests {
     }
 
     #[test]
+    fn test_file_apply_dedupe_key_uses_operation_id() {
+        let agent_id = AgentId::new("agent-a");
+        let mut config = oasis_core::proto::FileConfigMsg {
+            source_path: "/tmp/app.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 42,
+            owner: String::new(),
+            mode: String::new(),
+            target: None,
+            operation_id: OP_ID_1.to_string(),
+        };
+
+        let first = file_apply_dedupe_key(&config, &agent_id);
+        config.operation_id = OP_ID_2.to_string();
+        let second = file_apply_dedupe_key(&config, &agent_id);
+
+        assert_ne!(first, second);
+        assert!(first.contains(OP_ID_1));
+        assert!(second.contains(OP_ID_2));
+    }
+
+    #[test]
     fn test_summarize_apply_results_includes_timeout_agents_in_all_results() {
         let agent_a = AgentId::new("agent-a");
         let agent_b = AgentId::new("agent-b");
@@ -931,7 +968,7 @@ mod tests {
             agent_a.clone(),
             FileApplyExecution::success(
                 agent_a.clone(),
-                "op-1".to_string(),
+                OP_ID_1.to_string(),
                 "/tmp/app.conf".to_string(),
                 "/etc/app.conf".to_string(),
                 42,
@@ -940,7 +977,7 @@ mod tests {
         );
 
         let summary = summarize_apply_results(
-            "op-1",
+            OP_ID_1,
             "/tmp/app.conf",
             42,
             &[agent_a, agent_b.clone()],

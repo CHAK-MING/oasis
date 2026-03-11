@@ -19,6 +19,10 @@ pub struct BatchId(String);
     Debug, Clone, PartialEq, Eq, Hash, Display, From, Into, AsRef, Serialize, Deserialize, Default,
 )]
 pub struct RolloutId(String);
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Display, From, Into, AsRef, Serialize, Deserialize, Default,
+)]
+pub struct OperationId(String);
 
 impl AgentId {
     pub fn new(id: impl Into<String>) -> Self {
@@ -65,6 +69,21 @@ impl RolloutId {
     }
     pub fn generate() -> Self {
         Self(uuid::Uuid::now_v7().to_string())
+    }
+}
+
+impl OperationId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7().to_string())
+    }
+    pub fn is_valid(id: &str) -> bool {
+        uuid::Uuid::parse_str(id).is_ok()
     }
 }
 
@@ -241,6 +260,30 @@ mod tests {
             let expr1 = SelectorExpression::new("test");
             let expr2 = SelectorExpression::new("test");
             assert_eq!(expr1, expr2);
+        }
+    }
+
+    mod operation_id_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_and_as_str() {
+            let id = OperationId::new("123e4567-e89b-12d3-a456-426614174000");
+            assert_eq!(id.as_str(), "123e4567-e89b-12d3-a456-426614174000");
+        }
+
+        #[test]
+        fn test_generate_is_valid_uuid() {
+            let id = OperationId::generate();
+            assert!(uuid::Uuid::parse_str(id.as_str()).is_ok());
+        }
+
+        #[test]
+        fn test_is_valid() {
+            assert!(OperationId::is_valid(
+                "123e4567-e89b-12d3-a456-426614174000"
+            ));
+            assert!(!OperationId::is_valid("op-1"));
         }
     }
 }

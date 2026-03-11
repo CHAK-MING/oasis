@@ -1,5 +1,5 @@
-use crate::{core_types::SelectorExpression, error::CoreError};
-use crate::core_types::AgentId;
+use crate::core_types::{AgentId, OperationId, SelectorExpression};
+use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -119,6 +119,17 @@ impl FileConfig {
         {
             return Err(CoreError::InvalidTask {
                 reason: "operation_id cannot be empty".to_string(),
+                severity: crate::error::ErrorSeverity::Error,
+            });
+        }
+
+        if self
+            .operation_id
+            .as_ref()
+            .is_some_and(|operation_id| !OperationId::is_valid(operation_id))
+        {
+            return Err(CoreError::InvalidTask {
+                reason: "operation_id must be a valid UUID".to_string(),
                 severity: crate::error::ErrorSeverity::Error,
             });
         }
@@ -609,5 +620,35 @@ mod tests {
         };
         assert_eq!(spec.size, 2048);
         assert!(!spec.checksum.is_empty());
+    }
+
+    #[test]
+    fn test_file_config_rejects_invalid_operation_id() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: Some("op-1".to_string()),
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_file_config_accepts_uuid_operation_id() {
+        let config = FileConfig {
+            source_path: "test.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 1,
+            owner: None,
+            mode: None,
+            target: Some(SelectorExpression::from("all".to_string())),
+            operation_id: Some(OperationId::generate().to_string()),
+        };
+
+        assert!(config.validate().is_ok());
     }
 }

@@ -9,7 +9,7 @@ use tokio::task;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, instrument, warn};
 
-use oasis_core::error::Result;
+use oasis_core::{core_types::OperationId, error::Result};
 
 use crate::interface::grpc::server::OasisServer;
 
@@ -423,7 +423,7 @@ impl FileHandlers {
         // 下载文件数据
         let mut config = config;
         if config.operation_id.trim().is_empty() {
-            config.operation_id = uuid::Uuid::now_v7().to_string();
+            config.operation_id = OperationId::generate().to_string();
         }
 
         let result = srv

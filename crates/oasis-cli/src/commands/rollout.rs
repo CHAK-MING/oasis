@@ -5,9 +5,11 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use console::style;
+use oasis_core::core_types::OperationId;
 use oasis_core::proto::{
     AdvanceRolloutRequest, CreateRolloutRequest, GetRolloutStatusRequest, ListRolloutsRequest,
-    RolloutId, RolloutStateEnum, oasis_service_client::OasisServiceClient,
+    PauseRolloutRequest, ResumeRolloutRequest, RolloutId, RolloutStateEnum,
+    oasis_service_client::OasisServiceClient,
 };
 use std::path::PathBuf;
 
@@ -40,6 +42,12 @@ use std::path::PathBuf;
   # 推进到下一阶段
   oasis-cli rollout advance rollout-12345678
 
+  # 暂停发布
+  oasis-cli rollout pause rollout-12345678
+
+  # 恢复发布
+  oasis-cli rollout resume rollout-12345678
+
   # 回滚发布
   oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
 "#
@@ -59,6 +67,10 @@ pub enum RolloutCmd {
     List(ListArgs),
     /// 推进到下一阶段
     Advance(AdvanceArgs),
+    /// 暂停发布
+    Pause(PauseArgs),
+    /// 恢复发布
+    Resume(ResumeArgs),
     /// 回滚发布
     Rollback(RollbackArgs),
 }
@@ -115,6 +127,22 @@ pub struct CreateArgs {
     /// 推进间隔（秒）
     #[arg(long, default_value_t = 60, help = "自动推进间隔（秒）")]
     advance_interval: u32,
+
+    /// 阶段超时时间（秒）
+    #[arg(long, default_value_t = 600, help = "阶段超时时间（秒）")]
+    stage_timeout: u32,
+
+    /// 允许的最大失败率（百分比）
+    #[arg(long, default_value_t = 0, help = "允许的最大失败率（百分比）")]
+    max_failure_rate: u32,
+
+    /// 失败后自动回滚
+    #[arg(long, help = "阶段失败后自动回滚")]
+    auto_rollback: bool,
+
+    /// 回滚命令（用于命令类型发布）
+    #[arg(long, help = "自动回滚使用的命令")]
+    rollback_command: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -172,6 +200,8 @@ pub async fn run_rollout(
         RolloutCmd::Status(status) => run_rollout_status(&mut client, status).await,
         RolloutCmd::List(list) => run_rollout_list(&mut client, list).await,
         RolloutCmd::Advance(advance) => run_rollout_advance(&mut client, advance).await,
+        RolloutCmd::Pause(pause) => run_rollout_pause(&mut client, pause).await,
+        RolloutCmd::Resume(resume) => run_rollout_resume(&mut client, resume).await,
         RolloutCmd::Rollback(rollback) => run_rollout_rollback(&mut client, rollback).await,
     }
 }
@@ -236,6 +266,10 @@ async fn run_rollout_create(
         task_type: Some(task_type),
         auto_advance: args.auto_advance,
         advance_interval_seconds: args.advance_interval,
+        stage_timeout_seconds: args.stage_timeout,
+        max_failure_rate_percent: args.max_failure_rate,
+        auto_rollback: args.auto_rollback,
+        rollback_command: args.rollback_command,
     };
 
     // 发送请求
@@ -365,6 +399,68 @@ async fn run_rollout_advance(
     }
 }
 
+async fn run_rollout_pause(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: PauseArgs,
+) -> Result<()> {
+    print_header(&format!("暂停发布: {}", style(&args.rollout_id).cyan()));
+
+    let request = PauseRolloutRequest {
+        rollout_id: Some(RolloutId {
+            value: args.rollout_id.clone(),
+        }),
+    };
+
+    let pb = crate::ui::create_spinner("正在暂停发布...");
+    match grpc_retry!(client, pause_rollout(request.clone())).await {
+        Ok(response) => {
+            pb.finish_with_message("暂停请求已发送");
+            let resp = response.into_inner();
+            if resp.success {
+                print_info(&resp.message);
+            } else {
+                print_warning(&resp.message);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            pb.finish_with_message("暂停失败");
+            Err(anyhow!("暂停发布失败: {}", format_grpc_error(&e)))
+        }
+    }
+}
+
+async fn run_rollout_resume(
+    client: &mut OasisServiceClient<tonic::transport::Channel>,
+    args: ResumeArgs,
+) -> Result<()> {
+    print_header(&format!("恢复发布: {}", style(&args.rollout_id).cyan()));
+
+    let request = ResumeRolloutRequest {
+        rollout_id: Some(RolloutId {
+            value: args.rollout_id.clone(),
+        }),
+    };
+
+    let pb = crate::ui::create_spinner("正在恢复发布...");
+    match grpc_retry!(client, resume_rollout(request.clone())).await {
+        Ok(response) => {
+            pb.finish_with_message("恢复请求已发送");
+            let resp = response.into_inner();
+            if resp.success {
+                print_info(&resp.message);
+            } else {
+                print_warning(&resp.message);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            pb.finish_with_message("恢复失败");
+            Err(anyhow!("恢复发布失败: {}", format_grpc_error(&e)))
+        }
+    }
+}
+
 async fn run_rollout_rollback(
     client: &mut OasisServiceClient<tonic::transport::Channel>,
     args: RollbackArgs,
@@ -490,7 +586,7 @@ fn create_file_task_type(
         owner: owner.unwrap_or_default(),
         mode: mode.unwrap_or("0644".to_string()),
         target: Some(SelectorExpression { expression: target }),
-        operation_id: String::new(),
+        operation_id: OperationId::generate().to_string(),
     };
 
     Ok(RolloutTaskTypeMsg {
@@ -729,6 +825,7 @@ fn parse_rollout_state(state_str: &str) -> Option<RolloutStateEnum> {
     match state_str.to_lowercase().as_str() {
         "created" => Some(RolloutStateEnum::RolloutCreated),
         "running" => Some(RolloutStateEnum::RolloutRunning),
+        "paused" => Some(RolloutStateEnum::RolloutPaused),
         "completed" => Some(RolloutStateEnum::RolloutCompleted),
         "failed" => Some(RolloutStateEnum::RolloutFailed),
         "rollingback" => Some(RolloutStateEnum::RolloutRollingback),
@@ -742,6 +839,7 @@ fn rollout_state_to_cn(state: RolloutStateEnum) -> &'static str {
     match state {
         RolloutStateEnum::RolloutCreated => "已创建",
         RolloutStateEnum::RolloutRunning => "执行中",
+        RolloutStateEnum::RolloutPaused => "已暂停",
         RolloutStateEnum::RolloutCompleted => "已完成",
         RolloutStateEnum::RolloutFailed => "失败",
         RolloutStateEnum::RolloutRollingback => "正在回滚",
@@ -758,6 +856,7 @@ fn create_colored_state_cell(state: RolloutStateEnum) -> Cell {
     match state {
         RolloutStateEnum::RolloutCreated => cell.fg(Color::Yellow),
         RolloutStateEnum::RolloutRunning => cell.fg(Color::Blue),
+        RolloutStateEnum::RolloutPaused => cell.fg(Color::Cyan),
         RolloutStateEnum::RolloutCompleted => cell.fg(Color::Green).add_attribute(Attribute::Bold),
         RolloutStateEnum::RolloutFailed => cell.fg(Color::Red).add_attribute(Attribute::Bold),
         RolloutStateEnum::RolloutRollingback => cell.fg(Color::Magenta),
@@ -774,6 +873,7 @@ fn create_colored_status_text(state: RolloutStateEnum) -> console::StyledObject<
     match state {
         RolloutStateEnum::RolloutCreated => console::style(state_cn).yellow(),
         RolloutStateEnum::RolloutRunning => console::style(state_cn).blue(),
+        RolloutStateEnum::RolloutPaused => console::style(state_cn).cyan(),
         RolloutStateEnum::RolloutCompleted => console::style(state_cn).green().bold(),
         RolloutStateEnum::RolloutFailed => console::style(state_cn).red().bold(),
         RolloutStateEnum::RolloutRollingback => console::style(state_cn).magenta(),

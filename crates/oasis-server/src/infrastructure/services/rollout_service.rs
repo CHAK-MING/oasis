@@ -1,13 +1,17 @@
 //! 灰度发布服务
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
+use crate::infrastructure::services::file_service::FileService;
+use crate::infrastructure::services::task_service::TaskService;
 use async_nats::jetstream::Context;
 use dashmap::DashMap;
 use futures::StreamExt;
 use oasis_core::constants::JS_KV_ROLLOUTS;
-use oasis_core::core_types::{AgentId, BatchId, RolloutId};
+use oasis_core::core_types::{AgentId, BatchId, OperationId, RolloutId, SelectorExpression};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::file_types::FileApplyExecution;
+use oasis_core::proto;
 use oasis_core::rollout_types::*;
+use oasis_core::task_types::BatchRequest;
 use oasis_core::task_types::TaskState;
 use prost::Message;
 use std::sync::Arc;
@@ -28,6 +32,9 @@ mod tests {
     use oasis_core::file_types::FileApplyExecution;
     use oasis_core::task_types::TaskExecution;
 
+    const OP_ID_1: &str = "123e4567-e89b-12d3-a456-426614174000";
+    const OP_ID_ROLLBACK: &str = "123e4567-e89b-12d3-a456-426614174099";
+
     #[test]
     fn test_apply_file_stage_result_uses_actual_failures() {
         let config = RolloutConfig {
@@ -43,11 +50,15 @@ mod tests {
                     owner: None,
                     mode: None,
                     target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-                    operation_id: Some("op-1".to_string()),
+                    operation_id: Some(OP_ID_1.to_string()),
                 },
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -62,7 +73,7 @@ mod tests {
             &[
                 FileApplyExecution::success(
                     agent_a,
-                    "op-1".to_string(),
+                    OP_ID_1.to_string(),
                     "/tmp/app.conf".to_string(),
                     "/etc/app.conf".to_string(),
                     7,
@@ -70,7 +81,7 @@ mod tests {
                 ),
                 FileApplyExecution::failure(
                     agent_b.clone(),
-                    "op-1".to_string(),
+                    OP_ID_1.to_string(),
                     "/tmp/app.conf".to_string(),
                     "/etc/app.conf".to_string(),
                     7,
@@ -101,6 +112,10 @@ mod tests {
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -132,11 +147,15 @@ mod tests {
                     owner: None,
                     mode: None,
                     target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-                    operation_id: Some("op-1".to_string()),
+                    operation_id: Some(OP_ID_1.to_string()),
                 },
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -150,7 +169,7 @@ mod tests {
             &mut status,
             &[FileApplyExecution::success(
                 agent,
-                "op-rollback".to_string(),
+                OP_ID_ROLLBACK.to_string(),
                 "/tmp/app.conf".to_string(),
                 "/etc/app.conf".to_string(),
                 8,
@@ -176,11 +195,15 @@ mod tests {
                     owner: None,
                     mode: None,
                     target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-                    operation_id: Some("op-1".to_string()),
+                    operation_id: Some(OP_ID_1.to_string()),
                 },
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -194,7 +217,7 @@ mod tests {
             &mut status,
             &[FileApplyExecution::failure(
                 agent,
-                "op-rollback".to_string(),
+                OP_ID_ROLLBACK.to_string(),
                 "/tmp/app.conf".to_string(),
                 "/etc/app.conf".to_string(),
                 8,
@@ -214,7 +237,7 @@ mod tests {
             owner: None,
             mode: None,
             target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-            operation_id: Some("op-1".to_string()),
+            operation_id: Some(OP_ID_1.to_string()),
         };
 
         let snapshot = build_file_version_snapshot(file_config, Some(12));
@@ -224,6 +247,74 @@ mod tests {
             panic!("expected file snapshot");
         };
         assert_eq!(previous_revision, Some(12));
+    }
+
+    #[test]
+    fn test_resolve_file_rollback_revision_uses_rollout_baseline_revision() {
+        let file_config = oasis_core::file_types::FileConfig {
+            source_path: "/tmp/app.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 20,
+            owner: None,
+            mode: None,
+            target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+            operation_id: Some(OP_ID_1.to_string()),
+        };
+
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "file rollback".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1, 1] },
+            task_type: RolloutTaskType::FileDeployment {
+                config: file_config.clone(),
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.stages[0].version_snapshot = Some(build_file_version_snapshot(file_config.clone(), Some(10)));
+        status.stages[1].version_snapshot = Some(build_file_version_snapshot(file_config, Some(20)));
+
+        assert_eq!(resolve_file_rollback_revision(&status), Some(10));
+    }
+
+    #[test]
+    fn test_choose_file_rollback_revision_falls_back_to_previous_history_version() {
+        let history = oasis_core::file_types::FileHistory {
+            name: "app.conf".to_string(),
+            current_version: 20,
+            versions: vec![
+                oasis_core::file_types::FileVersion {
+                    name: "app.conf".to_string(),
+                    revision: 20,
+                    size: 10,
+                    checksum: "new".to_string(),
+                    created_at: 20,
+                    is_current: true,
+                },
+                oasis_core::file_types::FileVersion {
+                    name: "app.conf".to_string(),
+                    revision: 10,
+                    size: 10,
+                    checksum: "old".to_string(),
+                    created_at: 10,
+                    is_current: false,
+                },
+            ],
+        };
+
+        let chosen = choose_file_rollback_revision(20, 20, Some(&history));
+        assert_eq!(chosen, 10);
     }
 
     #[test]
@@ -240,6 +331,10 @@ mod tests {
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
         let mut status = RolloutStatus::new(
@@ -267,11 +362,15 @@ mod tests {
                     owner: None,
                     mode: None,
                     target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-                    operation_id: Some("op-1".to_string()),
+                    operation_id: Some(OP_ID_1.to_string()),
                 },
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
         let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
@@ -296,6 +395,10 @@ mod tests {
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -307,6 +410,161 @@ mod tests {
         assert_eq!(status.stages.len(), 2);
         assert_eq!(status.stages[0].target_agents.len(), 1);
         assert_eq!(status.stages[1].target_agents.len(), 1);
+    }
+
+    #[test]
+    fn test_build_stage_selector_matches_existing_style() {
+        let selector = RolloutService::build_stage_selector(&[
+            AgentId::new("agent-a"),
+            AgentId::new("agent-b"),
+        ]);
+        assert_eq!(selector, "agent_id in [agent-a,agent-b]");
+    }
+
+    #[test]
+    fn test_build_file_stage_config_uses_stage_selector() {
+        let config = oasis_core::file_types::FileConfig {
+            source_path: "/tmp/app.conf".to_string(),
+            destination_path: "/etc/app.conf".to_string(),
+            revision: 9,
+            owner: None,
+            mode: None,
+            target: None,
+            operation_id: None,
+        };
+
+        let file_config = RolloutService::build_file_stage_config(
+            &config,
+            &[AgentId::new("agent-a")],
+            OP_ID_1.to_string(),
+            9,
+        );
+
+        assert_eq!(
+            file_config.target.as_ref().map(|v| v.expression.as_str()),
+            Some("agent_id in [agent-a]")
+        );
+        assert_eq!(file_config.operation_id, OP_ID_1);
+    }
+
+    #[test]
+    fn test_resume_rollout_state_restores_created_before_first_stage() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "resume rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
+        status.state = RolloutState::Paused;
+
+        resume_rollout_state(&mut status);
+        assert_eq!(status.state, RolloutState::Created);
+    }
+
+    #[test]
+    fn test_resume_rollout_state_restores_running_after_stage_started() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "resume rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
+        status.state = RolloutState::Paused;
+        status.stages[0].started_at = Some(chrono::Utc::now().timestamp());
+
+        resume_rollout_state(&mut status);
+        assert_eq!(status.state, RolloutState::Running);
+    }
+
+    #[test]
+    fn test_apply_command_stage_result_allows_failures_within_threshold() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "threshold rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![2] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 50,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.state = RolloutState::Running;
+
+        apply_command_stage_result(&mut status, false, 1, 1, Vec::<TaskExecution>::new());
+
+        assert_eq!(status.state, RolloutState::Completed);
+    }
+
+    #[test]
+    fn test_enforce_stage_timeout_marks_running_rollout_failed() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "timeout rollout".to_string(),
+            target: oasis_core::core_types::SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 1,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(config, vec![AgentId::new("agent-a")]);
+        status.state = RolloutState::Running;
+        status.stages[0].started_at = Some(chrono::Utc::now().timestamp() - 5);
+
+        enforce_stage_timeout(&mut status);
+
+        assert_eq!(status.state, RolloutState::Failed);
+        assert!(status.error_message.as_deref().unwrap_or_default().contains("超时"));
     }
 
     #[test]
@@ -324,11 +582,15 @@ mod tests {
                     owner: None,
                     mode: None,
                     target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
-                    operation_id: Some("op-1".to_string()),
+                    operation_id: Some(OP_ID_1.to_string()),
                 },
             },
             auto_advance: false,
             advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -346,6 +608,41 @@ mod tests {
 }
 
 impl RolloutService {
+    fn build_stage_selector(target_agents: &[AgentId]) -> String {
+        let agent_ids: Vec<String> = target_agents.iter().map(|id| id.to_string()).collect();
+        format!("agent_id in [{}]", agent_ids.join(","))
+    }
+
+    fn build_rollback_command_selector(target_agents: &[AgentId]) -> String {
+        format!(
+            "agent_id in [{}]",
+            target_agents
+                .iter()
+                .map(|id| format!("\"{}\"", id))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    fn build_file_stage_config(
+        config: &oasis_core::file_types::FileConfig,
+        target_agents: &[AgentId],
+        operation_id: String,
+        revision: u64,
+    ) -> proto::FileConfigMsg {
+        proto::FileConfigMsg {
+            source_path: config.source_path.clone(),
+            destination_path: config.destination_path.clone(),
+            revision,
+            owner: config.owner.clone().unwrap_or_default(),
+            mode: config.mode.clone().unwrap_or_default(),
+            target: Some(proto::SelectorExpression {
+                expression: Self::build_stage_selector(target_agents),
+            }),
+            operation_id,
+        }
+    }
+
     pub async fn new(jetstream: Arc<Context>, task_monitor: Arc<TaskMonitor>) -> Result<Self> {
         info!("Initializing RolloutService");
 
@@ -361,6 +658,285 @@ impl RolloutService {
         }
 
         Ok(service)
+    }
+
+    pub async fn advance_once(
+        &self,
+        rollout_id: &RolloutId,
+        task_service: &TaskService,
+        file_service: &FileService,
+    ) -> Result<()> {
+        let stage_info = self
+            .get_next_stage_info(rollout_id)
+            .await?
+            .ok_or_else(|| CoreError::InvalidTask {
+                reason: "Rollout 已完成所有阶段".to_string(),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        let (target_agents, task_type) = stage_info;
+
+        match &task_type {
+            RolloutTaskType::Command {
+                command,
+                args,
+                timeout_seconds,
+            } => {
+                let batch_request = BatchRequest {
+                    command: command.clone(),
+                    args: args.clone(),
+                    selector: SelectorExpression::from(Self::build_stage_selector(&target_agents)),
+                    timeout_seconds: *timeout_seconds,
+                };
+
+                let batch_id = task_service
+                    .submit_batch(batch_request, target_agents)
+                    .await?;
+
+                self.mark_advance_next_stage(
+                    rollout_id,
+                    task_type,
+                    Some(batch_id),
+                    None,
+                )
+                .await
+            }
+            RolloutTaskType::FileDeployment { config } => {
+                let operation_id = OperationId::generate().to_string();
+                let previous_revision = file_service
+                    .current_active_revision(&config.source_path)
+                    .await?;
+                let version_snapshot =
+                    Some(build_file_version_snapshot(config.clone(), previous_revision));
+
+                self.mark_advance_next_stage(
+                    rollout_id,
+                    task_type.clone(),
+                    None,
+                    version_snapshot,
+                )
+                .await?;
+
+                let file_config = Self::build_file_stage_config(
+                    config,
+                    &target_agents,
+                    operation_id,
+                    config.revision,
+                );
+
+                let summary = match file_service
+                    .apply_with_details(&file_config, target_agents)
+                    .await
+                {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        let _ = self
+                            .mark_stage_operation_error(rollout_id, false, error.to_string())
+                            .await;
+                        return Err(error);
+                    }
+                };
+
+                self.mark_file_stage_result(rollout_id, &summary.all_results)
+                    .await
+            }
+        }
+    }
+
+    pub async fn rollback_once(
+        &self,
+        rollout_id: &RolloutId,
+        rollback_command: Option<String>,
+        task_service: &TaskService,
+        file_service: &FileService,
+    ) -> Result<(bool, String)> {
+        let configured_rollback_command = self
+            .rollout_cache
+            .get(rollout_id)
+            .and_then(|status| status.config.rollback_command.clone());
+
+        let (target_agents, task_type, version_snapshot) = self
+            .get_rollback_stage_info(rollout_id)
+            .await?
+            .ok_or_else(|| CoreError::InvalidTask {
+                reason: "没有找到可回滚的阶段".to_string(),
+                severity: ErrorSeverity::Error,
+            })?;
+
+        match &task_type {
+            RolloutTaskType::Command { .. } => {
+                let command = rollback_command
+                    .or(configured_rollback_command)
+                    .ok_or_else(|| CoreError::InvalidTask {
+                    reason: "命令回滚需要提供 rollback_command".to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
+
+                let batch_request = BatchRequest {
+                    command: command.clone(),
+                    args: vec![],
+                    selector: SelectorExpression::from(Self::build_rollback_command_selector(
+                        &target_agents,
+                    )),
+                    timeout_seconds: 300,
+                };
+
+                let batch_id = task_service
+                    .submit_batch(batch_request, target_agents.clone())
+                    .await?;
+
+                self.mark_rollback_stage(
+                    rollout_id,
+                    task_type,
+                    Some(command.clone()),
+                    Some(batch_id),
+                )
+                .await?;
+
+                Ok((
+                    true,
+                    format!(
+                        "回滚命令已提交，影响 {} 个Agent，命令: {}",
+                        target_agents.len(),
+                        command
+                    ),
+                ))
+            }
+            RolloutTaskType::FileDeployment { .. } => {
+                let snapshot = version_snapshot.ok_or_else(|| CoreError::InvalidTask {
+                    reason: "缺少版本快照信息，无法文件回滚".to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
+
+                let (file_config, previous_revision) = match snapshot.snapshot_data {
+                    SnapshotData::FileSnapshot {
+                        file_config,
+                        previous_revision,
+                    } => (file_config, previous_revision),
+                    _ => {
+                        return Err(CoreError::InvalidTask {
+                            reason: "版本快照类型不匹配，无法文件回滚".to_string(),
+                            severity: ErrorSeverity::Error,
+                        });
+                    }
+                };
+
+                let previous_revision = previous_revision.ok_or_else(|| CoreError::InvalidTask {
+                    reason: "缺少 previous_revision，无法回滚".to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
+                let snapshot_previous_revision = self
+                    .rollout_cache
+                    .get(rollout_id)
+                    .and_then(|status| resolve_file_rollback_revision(status.value()))
+                    .unwrap_or(previous_revision);
+                let file_history = file_service.get_file_history(&file_config.source_path).await?;
+                let previous_revision = choose_file_rollback_revision(
+                    snapshot_previous_revision,
+                    file_config.revision,
+                    file_history.as_ref(),
+                );
+
+                self.mark_rollback_stage(
+                    rollout_id,
+                    task_type,
+                    rollback_command,
+                    None,
+                )
+                .await?;
+
+                let cfg = Self::build_file_stage_config(
+                    &file_config,
+                    &target_agents,
+                    OperationId::generate().to_string(),
+                    previous_revision,
+                );
+
+                let summary = match file_service
+                    .rollback_file_with_details(&cfg, target_agents.clone())
+                    .await
+                {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        let _ = self
+                            .mark_stage_operation_error(rollout_id, true, error.to_string())
+                            .await;
+                        return Err(error);
+                    }
+                };
+
+                self.mark_file_stage_result(rollout_id, &summary.all_results)
+                    .await?;
+
+                if summary.success {
+                    Ok((
+                        true,
+                        format!(
+                            "文件回滚成功，影响 {} 个Agent，版本 {}",
+                            target_agents.len(),
+                            previous_revision
+                        ),
+                    ))
+                } else {
+                    Ok((
+                        false,
+                        format!(
+                            "文件回滚失败，影响 {} 个Agent，版本 {}，{}",
+                            target_agents.len(),
+                            previous_revision,
+                            summary.message
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    pub async fn pause_rollout(&self, rollout_id: &RolloutId) -> Result<()> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status = status.value_mut();
+            if !status.state.can_pause() {
+                return Err(CoreError::InvalidTask {
+                    reason: format!("Rollout {} 当前状态不允许暂停", rollout_id),
+                    severity: ErrorSeverity::Error,
+                });
+            }
+
+            status.state = RolloutState::Paused;
+            status.current_action = "发布已暂停".to_string();
+            status.updated_at = chrono::Utc::now().timestamp();
+            self.persist_rollout_to_jetstream(status).await?;
+            Ok(())
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
+    }
+
+    pub async fn resume_rollout(&self, rollout_id: &RolloutId) -> Result<RolloutStatus> {
+        if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
+            let status = status.value_mut();
+            if !status.state.can_resume() {
+                return Err(CoreError::InvalidTask {
+                    reason: format!("Rollout {} 当前状态不允许恢复", rollout_id),
+                    severity: ErrorSeverity::Error,
+                });
+            }
+
+            resume_rollout_state(status);
+            status.updated_at = chrono::Utc::now().timestamp();
+            self.persist_rollout_to_jetstream(status).await?;
+            Ok(status.clone())
+        } else {
+            Err(CoreError::NotFound {
+                entity_type: "Rollout".to_string(),
+                entity_id: rollout_id.to_string(),
+                severity: ErrorSeverity::Error,
+            })
+        }
     }
 
     /// 从 JetStream 加载所有 rollout 状态到内存缓存
@@ -467,6 +1043,10 @@ impl RolloutService {
             task_type: request.task_type,
             auto_advance: request.auto_advance,
             advance_interval_seconds: request.advance_interval_seconds,
+            stage_timeout_seconds: request.stage_timeout_seconds,
+            max_failure_rate_percent: request.max_failure_rate_percent,
+            auto_rollback: request.auto_rollback,
+            rollback_command: request.rollback_command,
             created_at: chrono::Utc::now().timestamp(),
         };
 
@@ -499,6 +1079,9 @@ impl RolloutService {
             // 更新阶段状态
             self.update_stage_status_from_task(status.value_mut()).await;
             self.update_stage_status_from_file(status.value_mut()).await;
+            if enforce_stage_timeout(status.value_mut()) {
+                let _ = self.persist_rollout_to_jetstream(status.value()).await;
+            }
             Ok(status.value().clone())
         } else {
             // 从 JetStream 加载
@@ -507,6 +1090,7 @@ impl RolloutService {
                     // 更新状态并缓存
                     self.update_stage_status_from_task(&mut status).await;
                     self.update_stage_status_from_file(&mut status).await;
+                    let _ = enforce_stage_timeout(&mut status);
                     self.rollout_cache
                         .insert(rollout_id.clone(), status.clone());
                     Ok(status)
@@ -569,6 +1153,9 @@ impl RolloutService {
             let status = entry.value_mut();
             self.update_stage_status_from_task(status).await;
             self.update_stage_status_from_file(status).await;
+            if enforce_stage_timeout(status) {
+                let _ = self.persist_rollout_to_jetstream(status).await;
+            }
             let updated_status = status.clone();
 
             // 应用状态过滤
@@ -662,6 +1249,7 @@ impl RolloutService {
             };
             current_stage.batch_id = batch_id;
             current_stage.version_snapshot = version_snapshot;
+            current_stage.started_at = Some(chrono::Utc::now().timestamp());
             if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
                 warn!("Failed to persist advance next stage: {}", e);
             }
@@ -703,6 +1291,7 @@ impl RolloutService {
                 status_val.current_stage_idx = stage_idx as u64;
                 if let Some(stage) = status_val.current_stage_status_mut() {
                     stage.batch_id = batch_id;
+                    stage.started_at = Some(chrono::Utc::now().timestamp());
                 }
             }
 
@@ -799,6 +1388,9 @@ impl RolloutService {
 
     /// 从 TaskMonitor 更新阶段状态
     async fn update_stage_status_from_task(&self, status: &mut RolloutStatus) {
+        if enforce_stage_timeout(status) {
+            return;
+        }
         if (status.state == RolloutState::Running || status.state == RolloutState::RollingBack)
             && !status.current_action.starts_with("部署文件")
         {
@@ -829,7 +1421,7 @@ impl RolloutService {
                                 self.task_monitor.latest_execution_from_cache(&task_id)
                             {
                                 match execution.state {
-                                    TaskState::Running => started_count += 1,
+                                    TaskState::Running | TaskState::Cancelling => started_count += 1,
                                     TaskState::Success => completed_count += 1,
                                     TaskState::Failed => {
                                         failed_count += 1;
@@ -880,6 +1472,9 @@ impl RolloutService {
     }
 
     pub async fn update_stage_status_from_file(&self, status: &mut RolloutStatus) {
+        if enforce_stage_timeout(status) {
+            return;
+        }
         if (status.state == RolloutState::Running || status.state == RolloutState::RollingBack)
             && status.current_action.starts_with("部署文件")
         {
@@ -922,6 +1517,7 @@ fn apply_command_stage_result(
     failed_executions: Vec<oasis_core::task_types::TaskExecution>,
 ) {
     let stage_idx = result_stage_index(status, is_rolling_back);
+    let max_failure_rate_percent = status.config.max_failure_rate_percent;
 
     let Some(stage_idx) = stage_idx else {
         return;
@@ -934,11 +1530,19 @@ fn apply_command_stage_result(
     stage.failed_executions = failed_executions;
     stage.completed_at = Some(chrono::Utc::now().timestamp());
 
-    if failed_count > 0 {
+    let target_count = stage.target_agents.len() as u32;
+    let allowed_failures = allowed_failures_for_target_count(target_count, max_failure_rate_percent);
+    if failed_count > allowed_failures {
         if is_rolling_back {
             status.state = RolloutState::RollbackFailed;
         } else {
             status.state = RolloutState::Failed;
+            status.error_message = Some(format!(
+                "阶段失败率超过阈值: {}/{} (允许失败数: {})",
+                failed_count,
+                target_count,
+                allowed_failures
+            ));
         }
         return;
     }
@@ -966,6 +1570,7 @@ pub(crate) fn build_file_version_snapshot(
 fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecution]) {
     let is_rolling_back = status.state == RolloutState::RollingBack;
     let stage_idx = result_stage_index(status, is_rolling_back);
+    let max_failure_rate_percent = status.config.max_failure_rate_percent;
 
     let Some(stage_idx) = stage_idx else {
         return;
@@ -1006,12 +1611,22 @@ fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecu
     stage.failed_executions = failed_executions;
     stage.completed_at = Some(chrono::Utc::now().timestamp());
 
-    if failed_count > 0 {
+    let target_count = stage.target_agents.len() as u32;
+    let allowed_failures = allowed_failures_for_target_count(target_count, max_failure_rate_percent);
+    if failed_count > allowed_failures {
         status.state = if is_rolling_back {
             RolloutState::RollbackFailed
         } else {
             RolloutState::Failed
         };
+        if !is_rolling_back {
+            status.error_message = Some(format!(
+                "阶段失败率超过阈值: {}/{} (允许失败数: {})",
+                failed_count,
+                target_count,
+                allowed_failures
+            ));
+        }
         return;
     }
 
@@ -1042,6 +1657,43 @@ fn rollback_stage_index(status: &RolloutStatus) -> Option<usize> {
     }
 }
 
+fn resolve_file_rollback_revision(status: &RolloutStatus) -> Option<u64> {
+    status
+        .stages
+        .iter()
+        .find_map(|stage| match &stage.version_snapshot {
+            Some(VersionSnapshot {
+                snapshot_data:
+                    SnapshotData::FileSnapshot {
+                        previous_revision: Some(previous_revision),
+                        ..
+                    },
+                ..
+            }) => Some(*previous_revision),
+            _ => None,
+        })
+}
+
+fn choose_file_rollback_revision(
+    snapshot_previous_revision: u64,
+    current_revision: u64,
+    file_history: Option<&oasis_core::file_types::FileHistory>,
+) -> u64 {
+    if snapshot_previous_revision != current_revision {
+        return snapshot_previous_revision;
+    }
+
+    file_history
+        .and_then(|history| {
+            history
+                .versions
+                .iter()
+                .find(|version| version.revision != current_revision)
+                .map(|version| version.revision)
+        })
+        .unwrap_or(snapshot_previous_revision)
+}
+
 fn result_stage_index(status: &RolloutStatus, is_rolling_back: bool) -> Option<usize> {
     let current_idx = status.current_stage_idx as usize;
     if status.stages.get(current_idx).is_some() {
@@ -1057,4 +1709,53 @@ fn result_stage_index(status: &RolloutStatus, is_rolling_back: bool) -> Option<u
     }
 
     None
+}
+
+fn resume_rollout_state(status: &mut RolloutStatus) {
+    let has_started_current_stage = status
+        .current_stage_status()
+        .and_then(|stage| stage.started_at)
+        .is_some();
+
+    status.state = if has_started_current_stage {
+        RolloutState::Running
+    } else {
+        RolloutState::Created
+    };
+    status.current_action = "恢复发布".to_string();
+}
+
+fn enforce_stage_timeout(status: &mut RolloutStatus) -> bool {
+    if status.state != RolloutState::Running {
+        return false;
+    }
+    let stage_timeout_seconds = status.config.stage_timeout_seconds as i64;
+
+    let Some(stage) = status.current_stage_status_mut() else {
+        return false;
+    };
+    let Some(started_at) = stage.started_at else {
+        return false;
+    };
+    if stage.completed_at.is_some() {
+        return false;
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    if now - started_at < stage_timeout_seconds {
+        return false;
+    }
+
+    stage.completed_at = Some(now);
+    stage.failed_count = stage.target_agents.len() as u32;
+    status.state = RolloutState::Failed;
+    status.error_message = Some(format!(
+        "阶段执行超时，超过 {} 秒",
+        stage_timeout_seconds
+    ));
+    true
+}
+
+fn allowed_failures_for_target_count(target_count: u32, max_failure_rate_percent: u32) -> u32 {
+    target_count.saturating_mul(max_failure_rate_percent) / 100
 }
