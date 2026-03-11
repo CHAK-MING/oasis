@@ -13,9 +13,11 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 use x509_parser::prelude::*;
 
 const ENROLLMENT_REQUEST_MAX_SKEW_SECS: i64 = 600;
+const ENROLLMENT_SECRET_TTL_SECS: i64 = 30 * 24 * 3600;
 
 pub struct CaService {
     ca_issuer: Issuer<'static, KeyPair>,
@@ -23,6 +25,8 @@ pub struct CaService {
     ca_cert_der: Vec<u8>,
     token_store: Arc<RwLock<TokenStore>>,
     token_store_path: std::path::PathBuf,
+    enrollment_store: Arc<RwLock<EnrollmentSecretStore>>,
+    enrollment_store_path: std::path::PathBuf,
     enrollment_master_secret: Option<String>,
     cert_validity_hours: u64,
 }
@@ -30,6 +34,18 @@ pub struct CaService {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct TokenStore {
     tokens: std::collections::HashMap<String, BootstrapToken>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EnrollmentSecretRecord {
+    secret_hash: String,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct EnrollmentSecretStore {
+    secrets: std::collections::HashMap<String, EnrollmentSecretRecord>,
 }
 
 impl TokenStore {
@@ -63,6 +79,22 @@ impl TokenStore {
     }
 }
 
+impl EnrollmentSecretStore {
+    fn new() -> Self {
+        Self {
+            secrets: std::collections::HashMap::new(),
+        }
+    }
+
+    fn put(&mut self, agent_id: &AgentId, record: EnrollmentSecretRecord) {
+        self.secrets.insert(agent_id.to_string(), record);
+    }
+
+    fn get(&self, agent_id: &AgentId) -> Option<&EnrollmentSecretRecord> {
+        self.secrets.get(agent_id.as_str())
+    }
+}
+
 impl CaService {
     pub async fn new(
         ca_cert_path: impl AsRef<Path>,
@@ -74,6 +106,7 @@ impl CaService {
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let token_store_path = ca_dir.join("bootstrap-tokens.json");
+        let enrollment_store_path = ca_dir.join("enrollment-secrets.json");
         let enrollment_secret_path = ca_dir.join("enrollment-secret");
 
         let ca_key_pem = tokio::fs::read_to_string(ca_key_path.as_ref())
@@ -125,6 +158,10 @@ impl CaService {
             ca_cert_der,
             token_store: Arc::new(RwLock::new(Self::load_token_store(&token_store_path).await?)),
             token_store_path,
+            enrollment_store: Arc::new(RwLock::new(
+                Self::load_enrollment_store(&enrollment_store_path).await?,
+            )),
+            enrollment_store_path,
             enrollment_master_secret: Self::load_enrollment_master_secret(&enrollment_secret_path)
                 .await?,
             cert_validity_hours,
@@ -147,8 +184,9 @@ impl CaService {
         Ok(token)
     }
 
-    pub fn create_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
-        self.derive_enrollment_secret(agent_id)
+    pub async fn create_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
+        self.create_enrollment_secret_with_ttl(agent_id, ENROLLMENT_SECRET_TTL_SECS)
+            .await
     }
 
     pub async fn handle_csr_request(&self, request: CsrRequest) -> CsrResponse {
@@ -186,7 +224,10 @@ impl CaService {
                 error!(error = %e, "Invalid enrollment request timestamp");
                 return CsrResponse::error(format!("Invalid request timestamp: {e}"));
             }
-            if let Err(e) = self.validate_enrollment_secret(&request.agent_id, enrollment_secret) {
+            if let Err(e) = self
+                .validate_enrollment_secret(&request.agent_id, enrollment_secret)
+                .await
+            {
                 error!(error = %e, "Invalid enrollment secret");
                 return CsrResponse::error(format!("Invalid enrollment secret: {e}"));
             }
@@ -325,23 +366,96 @@ impl CaService {
         }
     }
 
-    fn derive_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
-        let Some(master_secret) = self.enrollment_master_secret.as_deref() else {
-            return Err(CoreError::Config {
-                message: "Enrollment secret is not configured on the server".to_string(),
-                severity: ErrorSeverity::Error,
-            });
-        };
+    fn enrollment_pepper(&self) -> Result<&str> {
+        self.enrollment_master_secret.as_deref().ok_or_else(|| CoreError::Config {
+            message: "Enrollment secret is not configured on the server".to_string(),
+            severity: ErrorSeverity::Error,
+        })
+    }
 
+    fn hash_enrollment_secret(&self, secret: &str) -> Result<String> {
+        let master_secret = self.enrollment_pepper()?;
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
         hasher.update(master_secret.as_bytes());
         hasher.update([0xff]);
-        hasher.update(agent_id.as_str().as_bytes());
+        hasher.update(secret.as_bytes());
         let digest = hasher.finalize();
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+    }
+
+    fn build_enrollment_secret_record(
+        &self,
+        plain_secret: &str,
+        ttl_secs: i64,
+    ) -> Result<EnrollmentSecretRecord> {
+        let created_at = Self::now_timestamp();
+        Ok(EnrollmentSecretRecord {
+            secret_hash: self.hash_enrollment_secret(plain_secret)?,
+            created_at,
+            expires_at: created_at.saturating_add(ttl_secs.max(1)),
+        })
+    }
+
+    fn generate_enrollment_secret(&self, agent_id: &AgentId) -> Result<String> {
+        let _ = self.enrollment_pepper()?;
+        Ok(format!(
+            "enr.{}.{}",
+            agent_id.as_str(),
+            Uuid::now_v7().simple()
+        ))
+    }
+
+    async fn create_enrollment_secret_with_ttl(
+        &self,
+        agent_id: &AgentId,
+        ttl_secs: i64,
+    ) -> Result<String> {
+        let secret = self.generate_enrollment_secret(agent_id)?;
+        let record = self.build_enrollment_secret_record(&secret, ttl_secs)?;
+        let snapshot = {
+            let mut store = self.enrollment_store.write().await;
+            store.put(agent_id, record);
+            store.clone()
+        };
+        self.persist_enrollment_store(&snapshot).await?;
+        Ok(secret)
+    }
+
+    async fn load_enrollment_store(path: &Path) -> Result<EnrollmentSecretStore> {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => serde_json::from_str(&contents).map_err(|e| CoreError::Config {
+                message: format!("Failed to parse enrollment secret store: {e}"),
+                severity: ErrorSeverity::Critical,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(EnrollmentSecretStore::new()),
+            Err(e) => Err(CoreError::Io {
+                message: format!("Failed to read enrollment secret store: {e}"),
+                severity: ErrorSeverity::Critical,
+            }),
+        }
+    }
+
+    async fn persist_enrollment_store(&self, store: &EnrollmentSecretStore) -> Result<()> {
+        if let Some(parent) = self.enrollment_store_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| CoreError::Io {
+                message: format!("Failed to create enrollment secret store directory: {e}"),
+                severity: ErrorSeverity::Critical,
+            })?;
+        }
+
+        let bytes = serde_json::to_vec_pretty(store).map_err(|e| CoreError::Internal {
+            message: format!("Failed to serialize enrollment secret store: {e}"),
+            severity: ErrorSeverity::Error,
+        })?;
+        tokio::fs::write(&self.enrollment_store_path, bytes)
+            .await
+            .map_err(|e| CoreError::Io {
+                message: format!("Failed to persist enrollment secret store: {e}"),
+                severity: ErrorSeverity::Critical,
+            })
     }
 
     async fn load_token_store(path: &Path) -> Result<TokenStore> {
@@ -406,9 +520,25 @@ impl CaService {
         }
     }
 
-    fn validate_enrollment_secret(&self, agent_id: &AgentId, provided: &str) -> Result<()> {
-        let expected = self.derive_enrollment_secret(agent_id)?;
-        if expected == provided {
+    async fn validate_enrollment_secret(&self, agent_id: &AgentId, provided: &str) -> Result<()> {
+        let now = Self::now_timestamp();
+        let expected_hash = self.hash_enrollment_secret(provided)?;
+        let snapshot = self.enrollment_store.read().await;
+        let Some(record) = snapshot.get(agent_id) else {
+            return Err(CoreError::Validation {
+                message: "Enrollment secret is not issued for this agent".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        };
+
+        if record.expires_at <= now {
+            return Err(CoreError::Validation {
+                message: "Enrollment secret expired".to_string(),
+                severity: ErrorSeverity::Error,
+            });
+        }
+
+        if record.secret_hash == expected_hash {
             Ok(())
         } else {
             Err(CoreError::Validation {
@@ -435,6 +565,13 @@ impl CaService {
                 severity: ErrorSeverity::Error,
             })
         }
+    }
+
+    fn now_timestamp() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
     }
 }
 
@@ -628,9 +765,75 @@ mod tests {
         let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
         let secret = ca_service
             .create_enrollment_secret(&AgentId::new("deploy-agent"))
+            .await
             .unwrap();
 
         assert!(!secret.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rotated_enrollment_secret_invalidates_previous_value() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let agent_id = AgentId::new("rotate-agent");
+        let first = ca_service.create_enrollment_secret(&agent_id).await.unwrap();
+        let second = ca_service.create_enrollment_secret(&agent_id).await.unwrap();
+
+        assert_ne!(first, second, "newly issued enrollment secret should rotate");
+        assert!(ca_service
+            .validate_enrollment_secret(&agent_id, &second)
+            .await
+            .is_ok());
+        assert!(ca_service
+            .validate_enrollment_secret(&agent_id, &first)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_enrollment_secret_survives_service_restart() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let agent_id = AgentId::new("persist-enroll-agent");
+        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let secret = first.create_enrollment_secret(&agent_id).await.unwrap();
+
+        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        assert!(second
+            .validate_enrollment_secret(&agent_id, &secret)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_expired_enrollment_secret_is_rejected() {
+        let (temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
+        let enrollment_secret_path = temp_dir.path().join("enrollment-secret");
+        tokio::fs::write(&enrollment_secret_path, "cluster-enrollment-secret")
+            .await
+            .unwrap();
+
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let agent_id = AgentId::new("expired-enroll-agent");
+        let secret = ca_service
+            .create_enrollment_secret_with_ttl(&agent_id, 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_secs(2)).await;
+
+        assert!(ca_service
+            .validate_enrollment_secret(&agent_id, &secret)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -807,7 +1010,8 @@ mod tests {
         let agent_id = AgentId::new("reenroll-agent");
         let generator = CsrGenerator::new().unwrap();
         let enrollment_secret = ca_service
-            .derive_enrollment_secret(&agent_id)
+            .create_enrollment_secret(&agent_id)
+            .await
             .unwrap();
 
         let request = CsrRequest {
@@ -835,7 +1039,8 @@ mod tests {
         let agent_id = AgentId::new("stale-reenroll-agent");
         let generator = CsrGenerator::new().unwrap();
         let enrollment_secret = ca_service
-            .derive_enrollment_secret(&agent_id)
+            .create_enrollment_secret(&agent_id)
+            .await
             .unwrap();
 
         let request = CsrRequest {

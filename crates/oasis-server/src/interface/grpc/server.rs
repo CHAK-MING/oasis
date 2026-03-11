@@ -14,7 +14,8 @@ use oasis_core::proto::{
     GetBatchDetailsResponse, GetFileHistoryRequest, GetFileHistoryResponse,
     GetRolloutStatusRequest, GetRolloutStatusResponse, GetTaskOutputRequest, GetTaskOutputResponse,
     ListAgentsRequest, ListAgentsResponse, ListBatchesRequest, ListBatchesResponse,
-    ListRolloutsRequest, ListRolloutsResponse, RemoveAgentRequest, RemoveAgentResponse,
+    ListRolloutsRequest, ListRolloutsResponse, PauseRolloutRequest, PauseRolloutResponse,
+    RemoveAgentRequest, RemoveAgentResponse, ResumeRolloutRequest, ResumeRolloutResponse,
     RollbackFileRequest, RollbackRolloutRequest, RollbackRolloutResponse, SetInfoAgentRequest,
     SetInfoAgentResponse, SubmitBatchRequest, SubmitBatchResponse, oasis_service_server,
 };
@@ -213,6 +214,22 @@ impl oasis_service_server::OasisService for OasisServer {
         request: Request<AdvanceRolloutRequest>,
     ) -> std::result::Result<Response<AdvanceRolloutResponse>, Status> {
         crate::interface::grpc::handlers::RolloutHandlers::advance_rollout(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn pause_rollout(
+        &self,
+        request: Request<PauseRolloutRequest>,
+    ) -> std::result::Result<Response<PauseRolloutResponse>, Status> {
+        crate::interface::grpc::handlers::RolloutHandlers::pause_rollout(self, request).await
+    }
+
+    #[instrument(skip_all)]
+    async fn resume_rollout(
+        &self,
+        request: Request<ResumeRolloutRequest>,
+    ) -> std::result::Result<Response<ResumeRolloutResponse>, Status> {
+        crate::interface::grpc::handlers::RolloutHandlers::resume_rollout(self, request).await
     }
 
     #[instrument(skip_all)]

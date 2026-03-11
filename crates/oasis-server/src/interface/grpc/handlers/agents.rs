@@ -77,7 +77,7 @@ impl AgentHandlers {
 
         let agent_id = AgentId::from(agent_id.value.clone());
 
-        match srv.context().ca_service.create_enrollment_secret(&agent_id) {
+        match srv.context().ca_service.create_enrollment_secret(&agent_id).await {
             Ok(secret) => Ok(Response::new(CreateEnrollmentSecretResponse {
                 success: true,
                 enrollment_secret: secret,

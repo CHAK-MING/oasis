@@ -98,43 +98,6 @@ fn get_nats_client_key_path() -> PathBuf {
     workspace_root.join("certs/nats-client-key.pem")
 }
 
-async fn setup_test_ca() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-    use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, IsCa, BasicConstraints, KeyUsagePurpose, DnType};
-    
-    let temp_dir = tempdir().unwrap();
-    
-    let mut ca_params = CertificateParams::default();
-    ca_params.distinguished_name.push(DnType::CommonName, "Integration Test CA");
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-        KeyUsagePurpose::DigitalSignature,
-    ];
-    
-    let ca_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let ca_cert = ca_params.self_signed(&ca_key_pair).unwrap();
-    
-    let ca_cert_path = temp_dir.path().join("ca.pem");
-    let ca_key_path = temp_dir.path().join("ca-key.pem");
-    
-    tokio::fs::write(&ca_cert_path, ca_cert.pem()).await.unwrap();
-    tokio::fs::write(&ca_key_path, ca_key_pair.serialize_pem()).await.unwrap();
-    
-    (temp_dir, ca_cert_path, ca_key_path)
-}
-
-fn derive_enrollment_secret(master_secret: &str, agent_id: &AgentId) -> String {
-    use base64::Engine as _;
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    hasher.update(master_secret.as_bytes());
-    hasher.update([0xff]);
-    hasher.update(agent_id.as_str().as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
-}
-
 async fn connect_test_nats(nats_url: &str, ca_cert_path: &std::path::Path) -> async_nats::Client {
     async_nats::ConnectOptions::new()
         .require_tls(true)
@@ -542,14 +505,17 @@ async fn test_expired_bootstrap_token_falls_back_to_enrollment_secret_and_connec
         .unwrap();
 
     let nats_client = connect_test_nats(&nats_url, &ca_cert_path).await;
-    let ca_listener = spawn_ca_responder(ca_service, nats_client);
+    let ca_listener = spawn_ca_responder(ca_service.clone(), nats_client);
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let agent_certs_dir = tempdir().unwrap();
     tokio::fs::copy(&ca_cert_path, agent_certs_dir.path().join("nats-ca.pem"))
         .await
         .unwrap();
-    let enrollment_secret = derive_enrollment_secret(master_secret, &agent_id);
+    let enrollment_secret = ca_service
+        .create_enrollment_secret(&agent_id)
+        .await
+        .expect("Failed to create enrollment secret");
 
     let cert_bootstrap = oasis_agent::cert_bootstrap::CertBootstrap::new(
         agent_id.clone(),

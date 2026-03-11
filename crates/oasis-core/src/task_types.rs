@@ -9,6 +9,7 @@ pub enum TaskState {
     Created,
     Pending,
     Running,
+    Cancelling,
     Success,
     Failed,
     Timeout,
@@ -126,10 +127,23 @@ impl Task {
             (TaskState::Created, TaskState::Pending) => true,
             // 待处理 -> 运行
             (TaskState::Pending, TaskState::Running) => true,
+            // 可取消状态 -> 取消中
+            (
+                TaskState::Created | TaskState::Pending | TaskState::Running,
+                TaskState::Cancelling,
+            ) => true,
             // 运行 -> 成功/失败/超时
             (TaskState::Running, TaskState::Success | TaskState::Failed | TaskState::Timeout) => {
                 true
             }
+            // 取消中 -> 终态
+            (
+                TaskState::Cancelling,
+                TaskState::Success
+                    | TaskState::Failed
+                    | TaskState::Timeout
+                    | TaskState::Cancelled,
+            ) => true,
             // 任何状态 -> 取消
             (_, TaskState::Cancelled) => true,
             // 其他转换不允许
@@ -302,6 +316,11 @@ mod tests {
         }
 
         #[test]
+        fn test_is_not_terminal_cancelling() {
+            assert!(!TaskState::Cancelling.is_terminal());
+        }
+
+        #[test]
         fn test_is_cancellable_created() {
             assert!(TaskState::Created.is_cancellable());
         }
@@ -318,6 +337,7 @@ mod tests {
 
         #[test]
         fn test_is_not_cancellable_terminal_states() {
+            assert!(!TaskState::Cancelling.is_cancellable());
             assert!(!TaskState::Success.is_cancellable());
             assert!(!TaskState::Failed.is_cancellable());
             assert!(!TaskState::Timeout.is_cancellable());
@@ -413,6 +433,23 @@ mod tests {
             task.transition_to(TaskState::Pending).unwrap();
             task.transition_to(TaskState::Running).unwrap();
             assert!(task.transition_to(TaskState::Timeout).is_ok());
+        }
+
+        #[test]
+        fn test_valid_transition_pending_to_cancelling() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            assert!(task.transition_to(TaskState::Cancelling).is_ok());
+            assert_eq!(task.state, TaskState::Cancelling);
+        }
+
+        #[test]
+        fn test_valid_transition_cancelling_to_cancelled() {
+            let mut task = create_test_task();
+            task.transition_to(TaskState::Pending).unwrap();
+            task.transition_to(TaskState::Cancelling).unwrap();
+            assert!(task.transition_to(TaskState::Cancelled).is_ok());
+            assert_eq!(task.state, TaskState::Cancelled);
         }
 
         #[test]

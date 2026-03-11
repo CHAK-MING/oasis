@@ -171,6 +171,7 @@ impl From<TaskState> for proto::TaskStateEnum {
             TaskState::Created => proto::TaskStateEnum::TaskCreated,
             TaskState::Pending => proto::TaskStateEnum::TaskPending,
             TaskState::Running => proto::TaskStateEnum::TaskRunning,
+            TaskState::Cancelling => proto::TaskStateEnum::TaskCancelling,
             TaskState::Success => proto::TaskStateEnum::TaskSuccess,
             TaskState::Failed => proto::TaskStateEnum::TaskFailed,
             TaskState::Timeout => proto::TaskStateEnum::TaskTimeout,
@@ -185,6 +186,7 @@ impl From<proto::TaskStateEnum> for TaskState {
             proto::TaskStateEnum::TaskCreated => TaskState::Created,
             proto::TaskStateEnum::TaskPending => TaskState::Pending,
             proto::TaskStateEnum::TaskRunning => TaskState::Running,
+            proto::TaskStateEnum::TaskCancelling => TaskState::Cancelling,
             proto::TaskStateEnum::TaskSuccess => TaskState::Success,
             proto::TaskStateEnum::TaskFailed => TaskState::Failed,
             proto::TaskStateEnum::TaskTimeout => TaskState::Timeout,
@@ -908,6 +910,10 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
             task_type,
             auto_advance: cfg.auto_advance,
             advance_interval_seconds: cfg.advance_interval_seconds,
+            stage_timeout_seconds: cfg.stage_timeout_seconds,
+            max_failure_rate_percent: cfg.max_failure_rate_percent,
+            auto_rollback: cfg.auto_rollback,
+            rollback_command: cfg.rollback_command,
             created_at: cfg.created_at,
         };
 
@@ -976,6 +982,10 @@ impl From<&RolloutConfig> for proto::RolloutConfigMsg {
             task_type: Some(task_type),
             auto_advance: config.auto_advance,
             advance_interval_seconds: config.advance_interval_seconds,
+            stage_timeout_seconds: config.stage_timeout_seconds,
+            max_failure_rate_percent: config.max_failure_rate_percent,
+            auto_rollback: config.auto_rollback,
+            rollback_command: config.rollback_command.clone(),
             created_at: config.created_at,
         }
     }
@@ -998,6 +1008,10 @@ impl From<RolloutConfig> for proto::RolloutConfigMsg {
             task_type: Some(task_type),
             auto_advance: config.auto_advance,
             advance_interval_seconds: config.advance_interval_seconds,
+            stage_timeout_seconds: config.stage_timeout_seconds,
+            max_failure_rate_percent: config.max_failure_rate_percent,
+            auto_rollback: config.auto_rollback,
+            rollback_command: config.rollback_command,
             created_at: config.created_at,
         }
     }
@@ -1162,6 +1176,7 @@ impl From<RolloutState> for proto::RolloutStateEnum {
         match state {
             RolloutState::Created => proto::RolloutStateEnum::RolloutCreated,
             RolloutState::Running => proto::RolloutStateEnum::RolloutRunning,
+            RolloutState::Paused => proto::RolloutStateEnum::RolloutPaused,
             RolloutState::Completed => proto::RolloutStateEnum::RolloutCompleted,
             RolloutState::Failed => proto::RolloutStateEnum::RolloutFailed,
             RolloutState::RollingBack => proto::RolloutStateEnum::RolloutRollingback,
@@ -1176,6 +1191,7 @@ impl From<proto::RolloutStateEnum> for RolloutState {
         match state {
             proto::RolloutStateEnum::RolloutCreated => RolloutState::Created,
             proto::RolloutStateEnum::RolloutRunning => RolloutState::Running,
+            proto::RolloutStateEnum::RolloutPaused => RolloutState::Paused,
             proto::RolloutStateEnum::RolloutCompleted => RolloutState::Completed,
             proto::RolloutStateEnum::RolloutFailed => RolloutState::Failed,
             proto::RolloutStateEnum::RolloutRollingback => RolloutState::RollingBack,
@@ -1296,6 +1312,7 @@ mod tests {
             TaskState::Created,
             TaskState::Pending,
             TaskState::Running,
+            TaskState::Cancelling,
             TaskState::Success,
             TaskState::Failed,
             TaskState::Timeout,
@@ -1347,6 +1364,7 @@ mod tests {
         let states = vec![
             RolloutState::Created,
             RolloutState::Running,
+            RolloutState::Paused,
             RolloutState::Completed,
             RolloutState::Failed,
             RolloutState::RollingBack,

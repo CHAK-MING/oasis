@@ -6,6 +6,7 @@ use rcgen::{
     ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
     SanType,
 };
+use rand::Rng;
 use std::net::IpAddr;
 
 pub struct CertificateGenerator;
@@ -33,6 +34,7 @@ impl CertificateGenerator {
         // 生成服务器和客户端证书
         Self::generate_server_certificates(certs_dir, &ca)?;
         Self::generate_client_certificates(certs_dir, &ca)?;
+        Self::generate_enrollment_secret(certs_dir)?;
 
         println!(
             "  {} 基础证书已成功生成到 {}",
@@ -40,6 +42,12 @@ impl CertificateGenerator {
             style(certs_dir.display()).cyan()
         );
 
+        Ok(())
+    }
+
+    fn generate_enrollment_secret(certs_dir: &std::path::Path) -> Result<()> {
+        let secret = hex::encode(rand::rng().random::<[u8; 32]>());
+        std::fs::write(certs_dir.join("enrollment-secret"), format!("{secret}\n"))?;
         Ok(())
     }
 
@@ -276,6 +284,20 @@ mod tests {
         assert!(certs_dir.join("nats-client-key.pem").exists());
         assert!(certs_dir.join("grpc-client.pem").exists());
         assert!(certs_dir.join("grpc-client-key.pem").exists());
+        assert!(certs_dir.join("enrollment-secret").exists());
+    }
+
+    #[tokio::test]
+    async fn test_generate_base_certificates_creates_enrollment_secret() {
+        let temp_dir = tempdir().unwrap();
+        let certs_dir = temp_dir.path();
+
+        CertificateGenerator::generate_base_certificates(certs_dir)
+            .await
+            .unwrap();
+
+        let secret = std::fs::read_to_string(certs_dir.join("enrollment-secret")).unwrap();
+        assert!(!secret.trim().is_empty());
     }
 
     #[tokio::test]

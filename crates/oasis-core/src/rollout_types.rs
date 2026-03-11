@@ -12,6 +12,7 @@ pub enum RolloutState {
     #[default]
     Created, // 已创建
     Running,        // 执行中
+    Paused,         // 已暂停
     Completed,      // 已完成
     Failed,         // 失败
     RollingBack,    // 正在回滚
@@ -40,8 +41,16 @@ impl RolloutState {
     pub fn can_rollback(&self) -> bool {
         matches!(
             self,
-            RolloutState::Running | RolloutState::Failed | RolloutState::Completed
+            RolloutState::Running | RolloutState::Paused | RolloutState::Failed | RolloutState::Completed
         )
+    }
+
+    pub fn can_pause(&self) -> bool {
+        matches!(self, RolloutState::Created | RolloutState::Running)
+    }
+
+    pub fn can_resume(&self) -> bool {
+        matches!(self, RolloutState::Paused)
     }
 
     pub fn is_busy(&self) -> bool {
@@ -52,6 +61,7 @@ impl RolloutState {
         match self {
             Self::Created => "created",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::RollingBack => "rolling_back",
@@ -80,7 +90,10 @@ impl Default for RolloutStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::RolloutState;
+    use super::{
+        CreateRolloutRequest, RolloutState, RolloutStrategy, RolloutTaskType,
+    };
+    use crate::core_types::SelectorExpression;
 
     #[test]
     fn test_rollback_terminal_states_are_not_advanceable() {
@@ -88,6 +101,59 @@ mod tests {
         assert!(RolloutState::RollbackFailed.is_terminal());
         assert!(!RolloutState::RolledBack.can_advance());
         assert!(!RolloutState::RollbackFailed.can_advance());
+    }
+
+    #[test]
+    fn test_paused_rollout_cannot_advance_but_can_resume() {
+        assert!(!RolloutState::Paused.can_advance());
+        assert!(RolloutState::Paused.can_resume());
+        assert!(RolloutState::Paused.can_rollback());
+    }
+
+    #[test]
+    fn test_command_auto_rollback_requires_rollback_command() {
+        let request = CreateRolloutRequest {
+            name: "command rollout".to_string(),
+            target: SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: true,
+            rollback_command: None,
+        };
+
+        let err = request.validate().expect_err("validation should fail");
+        assert!(err.contains("rollback_command"));
+    }
+
+    #[test]
+    fn test_stage_timeout_must_be_positive() {
+        let request = CreateRolloutRequest {
+            name: "command rollout".to_string(),
+            target: SelectorExpression::from("all".to_string()),
+            strategy: RolloutStrategy::Count { stages: vec![1] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                timeout_seconds: 30,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 0,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+        };
+
+        let err = request.validate().expect_err("validation should fail");
+        assert!(err.contains("阶段超时时间"));
     }
 }
 
@@ -169,6 +235,15 @@ pub struct RolloutConfig {
     pub auto_advance: bool,
     /// 推进间隔（秒，仅在auto_advance=true时有效）
     pub advance_interval_seconds: u32,
+    /// 阶段超时时间（秒）
+    pub stage_timeout_seconds: u32,
+    /// 阶段允许的最大失败率（百分比）
+    pub max_failure_rate_percent: u32,
+    /// 失败后是否自动回滚
+    pub auto_rollback: bool,
+    /// 命令类型发布的回滚命令
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_command: Option<String>,
     /// 创建时间
     pub created_at: i64,
 }
@@ -395,6 +470,15 @@ impl RolloutStatus {
         self.state.can_rollback()
     }
 
+    pub fn allowed_failures_for_stage(&self, stage: &RolloutStageStatus) -> u32 {
+        if stage.target_agents.is_empty() {
+            return 0;
+        }
+
+        let total = stage.target_agents.len() as u32;
+        total.saturating_mul(self.config.max_failure_rate_percent) / 100
+    }
+
     /// 计算总体进度百分比
     pub fn overall_progress(&self) -> f64 {
         let total_agents = self.all_target_agents.len() as f64;
@@ -417,12 +501,24 @@ pub struct CreateRolloutRequest {
     pub task_type: RolloutTaskType,
     pub auto_advance: bool,
     pub advance_interval_seconds: u32,
+    pub stage_timeout_seconds: u32,
+    pub max_failure_rate_percent: u32,
+    pub auto_rollback: bool,
+    pub rollback_command: Option<String>,
 }
 
 impl CreateRolloutRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("名称不能为空".to_string());
+        }
+
+        if self.stage_timeout_seconds == 0 {
+            return Err("阶段超时时间必须大于0".to_string());
+        }
+
+        if self.max_failure_rate_percent > 100 {
+            return Err("最大失败率必须在0-100之间".to_string());
         }
 
         match &self.strategy {
@@ -455,6 +551,14 @@ impl CreateRolloutRequest {
                 }
                 if *timeout_seconds == 0 {
                     return Err("超时时间必须大于0".to_string());
+                }
+                if self.auto_rollback
+                    && self
+                        .rollback_command
+                        .as_ref()
+                        .is_none_or(|cmd| cmd.trim().is_empty())
+                {
+                    return Err("命令发布启用自动回滚时必须提供 rollback_command".to_string());
                 }
             }
             RolloutTaskType::FileDeployment { config, .. } => {
