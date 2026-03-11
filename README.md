@@ -19,7 +19,7 @@ Oasis 是一个大规模集群节点管理工具，支持 Linux 操作系统。�
 ### 1. 构建项目
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/CHAK-MING/oasis
 cd oasis
 cargo build --release
 ```
@@ -251,17 +251,32 @@ oasis-cli rollout create \
   --auto-advance \
   --advance-interval 300
 
+# 带阶段超时、失败率门禁和自动回滚的命令发布
+oasis-cli rollout create \
+  --name "nginx reload" \
+  --target '"canary" in groups' \
+  --strategy count:1,0 \
+  --command "systemctl reload nginx" \
+  --stage-timeout 120 \
+  --max-failure-rate 0 \
+  --auto-rollback \
+  --rollback-command "systemctl restart nginx"
+
 # 查看发布状态
 oasis-cli rollout status rollout-12345678
 
 # 手动推进到下一阶段
 oasis-cli rollout advance rollout-12345678
 
+# 暂停 / 恢复发布
+oasis-cli rollout pause rollout-12345678
+oasis-cli rollout resume rollout-12345678
+
 # 列出所有发布
 oasis-cli rollout list --limit 10
 
 # 回滚发布
-oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
+oasis-cli rollout rollback rollout-12345678 --rollback-command "systemctl restart nginx"
 ```
 
 ## 🎯 选择器语法
@@ -319,6 +334,22 @@ percentage:10,30,60,100
 
 # 计数策略：2台 -> 5台 -> 10台 -> 全部
 count:2,5,10,0
+```
+
+### 灰度控制能力
+
+```bash
+# 阶段超时（秒）：超时后阶段直接判失败
+--stage-timeout 300
+
+# 阶段允许的最大失败率（百分比）
+--max-failure-rate 10
+
+# 自动推进
+--auto-advance --advance-interval 300
+
+# 自动回滚（命令发布需同时提供 rollback-command）
+--auto-rollback --rollback-command "systemctl restart myapp"
 ```
 
 ## 📊 系统信息标签
