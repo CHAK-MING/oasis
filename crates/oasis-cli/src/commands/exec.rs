@@ -134,6 +134,7 @@ fn decode_base64_prefixed(s: &str) -> String {
 fn task_output_summary(execution: &TaskExecutionMsg) -> (&'static str, bool) {
     match execution.state() {
         TaskStateEnum::TaskCreated | TaskStateEnum::TaskPending => ("任务已创建，尚未开始输出", false),
+        TaskStateEnum::TaskCancelling => ("任务取消请求已发出，等待 Agent 确认", false),
         TaskStateEnum::TaskRunning if execution.stdout.is_empty() && execution.stderr.is_empty() => {
             ("任务正在执行，尚未产生输出", false)
         }
@@ -488,6 +489,7 @@ fn display_task_executions(executions: &[TaskExecutionMsg]) -> Result<()> {
             TaskStateEnum::TaskCreated => state_cell.fg(Color::DarkGrey),
             TaskStateEnum::TaskPending => state_cell.fg(Color::Yellow),
             TaskStateEnum::TaskRunning => state_cell.fg(Color::Blue),
+            TaskStateEnum::TaskCancelling => state_cell.fg(Color::Cyan),
             TaskStateEnum::TaskSuccess => {
                 state_cell.fg(Color::Green).add_attribute(Attribute::Bold)
             }
@@ -518,6 +520,7 @@ fn display_batch_statistics(executions: &[TaskExecutionMsg]) {
     let mut failed = 0;
     let mut running = 0;
     let mut pending = 0;
+    let mut cancelling = 0;
     let mut timeout = 0;
     let mut cancelled = 0;
 
@@ -526,6 +529,7 @@ fn display_batch_statistics(executions: &[TaskExecutionMsg]) {
             TaskStateEnum::TaskSuccess => success += 1,
             TaskStateEnum::TaskFailed => failed += 1,
             TaskStateEnum::TaskRunning => running += 1,
+            TaskStateEnum::TaskCancelling => cancelling += 1,
             TaskStateEnum::TaskPending | TaskStateEnum::TaskCreated => pending += 1,
             TaskStateEnum::TaskTimeout => timeout += 1,
             TaskStateEnum::TaskCancelled => cancelled += 1,
@@ -543,6 +547,9 @@ fn display_batch_statistics(executions: &[TaskExecutionMsg]) {
     }
     if running > 0 {
         print_info(&format!("⏳ 运行中: {}", style(running).blue().bold()));
+    }
+    if cancelling > 0 {
+        print_info(&format!("取消中: {}", style(cancelling).cyan().bold()));
     }
     if pending > 0 {
         print_info(&format!("⌛ 等待中: {}", style(pending).yellow().bold()));
@@ -579,6 +586,7 @@ fn parse_task_state(state_str: &str) -> Result<i32> {
         "created" => Ok(TaskStateEnum::TaskCreated as i32),
         "pending" => Ok(TaskStateEnum::TaskPending as i32),
         "running" => Ok(TaskStateEnum::TaskRunning as i32),
+        "cancelling" => Ok(TaskStateEnum::TaskCancelling as i32),
         "success" => Ok(TaskStateEnum::TaskSuccess as i32),
         "failed" => Ok(TaskStateEnum::TaskFailed as i32),
         "timeout" => Ok(TaskStateEnum::TaskTimeout as i32),
@@ -634,6 +642,7 @@ fn state_to_cn(state: TaskStateEnum) -> &'static str {
         TaskStateEnum::TaskCreated => "已创建",
         TaskStateEnum::TaskPending => "等待中",
         TaskStateEnum::TaskRunning => "执行中",
+        TaskStateEnum::TaskCancelling => "取消中",
         TaskStateEnum::TaskSuccess => "成功",
         TaskStateEnum::TaskFailed => "失败",
         TaskStateEnum::TaskTimeout => "超时",

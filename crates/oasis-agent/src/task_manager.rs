@@ -1,7 +1,7 @@
 use crate::nats_client::{ManagedNatsClient, NatsClient};
 use async_nats::jetstream;
 use base64::Engine;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use oasis_core::{
     constants::*,
@@ -22,11 +22,31 @@ pub struct TaskManager {
     nats_client: ManagedNatsClient,
     shutdown_token: CancellationToken,
     running_tasks: Arc<DashMap<TaskId, CancellationToken>>,
+    cancelled_tasks: Arc<DashSet<TaskId>>,
 }
 
 impl TaskManager {
     fn should_ack_task_message(result_publish: &Result<()>) -> bool {
         result_publish.is_ok()
+    }
+
+    fn register_cancel_request(
+        task_id: &TaskId,
+        running_tasks: &Arc<DashMap<TaskId, CancellationToken>>,
+        cancelled_tasks: &Arc<DashSet<TaskId>>,
+    ) {
+        cancelled_tasks.insert(task_id.clone());
+
+        if let Some((_task_id, cancel_token)) = running_tasks.remove(task_id) {
+            cancel_token.cancel();
+        }
+    }
+
+    fn take_pending_cancellation(
+        task_id: &TaskId,
+        cancelled_tasks: &Arc<DashSet<TaskId>>,
+    ) -> bool {
+        cancelled_tasks.remove(task_id).is_some()
     }
 
     pub fn new(
@@ -39,6 +59,7 @@ impl TaskManager {
             nats_client,
             shutdown_token,
             running_tasks: Arc::new(DashMap::new()),
+            cancelled_tasks: Arc::new(DashSet::new()),
         }
     }
 
@@ -181,11 +202,13 @@ impl TaskManager {
 
         info!("Processing cancel request for task: {}", task_id);
 
-        if let Some((_task_id, cancel_token)) = self.running_tasks.remove(&task_id) {
-            cancel_token.cancel();
+        let was_running = self.running_tasks.contains_key(&task_id);
+        Self::register_cancel_request(&task_id, &self.running_tasks, &self.cancelled_tasks);
+
+        if was_running {
             info!("Cancelled running task: {}", task_id);
         } else {
-            debug!("Task {} not running, ignoring cancel", task_id);
+            debug!("Recorded cancel request for pending task {}", task_id);
         }
 
         msg.ack()
@@ -220,6 +243,28 @@ impl TaskManager {
 
         info!("Processing {} task: {}", source, task.task_id);
 
+        if Self::take_pending_cancellation(&task.task_id, &self.cancelled_tasks) {
+            info!("Skipping task {} because a cancel request was already recorded", task.task_id);
+            let execution = Self::cancelled_execution(task.task_id.clone(), self.agent_id.clone());
+            let publish_result = self.publish_task_result(&execution).await;
+            if let Err(e) = &publish_result {
+                error!("Failed to publish cancelled task result: {}", e);
+            }
+
+            if !Self::should_ack_task_message(&publish_result) {
+                return Err(anyhow::anyhow!(
+                    "Failed to publish cancelled task result for {}",
+                    task.task_id
+                )
+                .into());
+            }
+
+            msg.ack()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+            return Ok(());
+        }
+
         let task_cancel_token = CancellationToken::new();
         self.running_tasks
             .insert(task.task_id.clone(), task_cancel_token.clone());
@@ -235,6 +280,7 @@ impl TaskManager {
         let execution = self.execute_task(&task, task_cancel_token.clone()).await;
 
         self.running_tasks.remove(&task.task_id);
+        self.cancelled_tasks.remove(&task.task_id);
 
         // 发布执行结果
         let publish_result = self.publish_task_result(&execution).await;
@@ -256,6 +302,21 @@ impl TaskManager {
             .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
 
         Ok(())
+    }
+
+    fn cancelled_execution(task_id: TaskId, agent_id: AgentId) -> TaskExecution {
+        let now = chrono::Utc::now().timestamp();
+        TaskExecution {
+            task_id,
+            agent_id,
+            state: TaskState::Cancelled,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: "Task cancelled before execution started".to_string(),
+            started_at: now,
+            finished_at: Some(now),
+            duration_ms: Some(0.0),
+        }
     }
 
     async fn execute_task(&self, task: &Task, task_cancel_token: CancellationToken) -> TaskExecution {
@@ -514,6 +575,7 @@ impl TaskManager {
             TaskState::Created => "created",
             TaskState::Pending => "pending",
             TaskState::Running => "running",
+            TaskState::Cancelling => "cancelling",
             TaskState::Success => "success",
             TaskState::Failed => "failed",
             TaskState::Timeout => "timeout",
@@ -626,6 +688,7 @@ mod tests {
                 TaskState::Created => "created",
                 TaskState::Pending => "pending",
                 TaskState::Running => "running",
+                TaskState::Cancelling => "cancelling",
                 TaskState::Success => "success",
                 TaskState::Failed => "failed",
                 TaskState::Timeout => "timeout",
@@ -640,6 +703,7 @@ mod tests {
                 TaskState::Created,
                 TaskState::Pending,
                 TaskState::Running,
+                TaskState::Cancelling,
                 TaskState::Success,
                 TaskState::Failed,
                 TaskState::Timeout,
@@ -651,6 +715,7 @@ mod tests {
                     TaskState::Created => "created",
                     TaskState::Pending => "pending",
                     TaskState::Running => "running",
+                    TaskState::Cancelling => "cancelling",
                     TaskState::Success => "success",
                     TaskState::Failed => "failed",
                     TaskState::Timeout => "timeout",
@@ -898,6 +963,36 @@ mod tests {
             }
 
             assert_eq!(running_tasks.len(), 4);
+        }
+    }
+
+    mod cancellation_tracking_tests {
+        use super::*;
+        use dashmap::DashSet;
+
+        #[test]
+        fn test_register_cancel_request_marks_task_and_cancels_running_token() {
+            let task_id = TaskId::new("task-cancel");
+            let running_tasks: Arc<DashMap<TaskId, CancellationToken>> = Arc::new(DashMap::new());
+            let cancelled_tasks: Arc<DashSet<TaskId>> = Arc::new(DashSet::new());
+            let token = CancellationToken::new();
+            running_tasks.insert(task_id.clone(), token.clone());
+
+            TaskManager::register_cancel_request(&task_id, &running_tasks, &cancelled_tasks);
+
+            assert!(token.is_cancelled());
+            assert!(cancelled_tasks.contains(&task_id));
+            assert!(!running_tasks.contains_key(&task_id));
+        }
+
+        #[test]
+        fn test_take_pending_cancellation_consumes_marker_once() {
+            let task_id = TaskId::new("task-cancelled-before-start");
+            let cancelled_tasks: Arc<DashSet<TaskId>> = Arc::new(DashSet::new());
+            cancelled_tasks.insert(task_id.clone());
+
+            assert!(TaskManager::take_pending_cancellation(&task_id, &cancelled_tasks));
+            assert!(!TaskManager::take_pending_cancellation(&task_id, &cancelled_tasks));
         }
     }
 }

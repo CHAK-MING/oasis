@@ -393,6 +393,10 @@ mod tests {
                 task.transition_to(TaskState::Pending).unwrap();
                 task.transition_to(TaskState::Running).unwrap();
             }
+            TaskState::Cancelling => {
+                task.transition_to(TaskState::Pending).unwrap();
+                task.transition_to(TaskState::Cancelling).unwrap();
+            }
             TaskState::Success | TaskState::Failed | TaskState::Timeout => {
                 task.transition_to(TaskState::Pending).unwrap();
                 task.transition_to(TaskState::Running).unwrap();

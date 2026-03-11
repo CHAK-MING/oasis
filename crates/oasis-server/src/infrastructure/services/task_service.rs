@@ -26,7 +26,7 @@ impl TaskService {
             return false;
         }
 
-        task.transition_to(TaskState::Cancelled).is_ok()
+        task.transition_to(TaskState::Cancelling).is_ok()
     }
 
     fn task_publish_headers(task_id: &TaskId, payload: &[u8]) -> async_nats::HeaderMap {
@@ -386,7 +386,7 @@ mod tests {
     use oasis_core::core_types::{AgentId, BatchId};
 
     #[test]
-    fn test_mark_task_cancelled_only_changes_cancellable_tasks() {
+    fn test_mark_task_cancel_requested_only_changes_cancellable_tasks() {
         let batch_id = BatchId::generate();
         let agent_id = AgentId::new("agent-1");
 
@@ -396,7 +396,7 @@ mod tests {
         cancellable.transition_to(TaskState::Pending).unwrap();
 
         assert!(TaskService::mark_task_cancelled(&mut cancellable));
-        assert_eq!(cancellable.state, TaskState::Cancelled);
+        assert_eq!(cancellable.state, TaskState::Cancelling);
 
         let mut terminal = Task::new("echo".to_string(), Vec::new(), 30)
             .with_batch_id(batch_id)
