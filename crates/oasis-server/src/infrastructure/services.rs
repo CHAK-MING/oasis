@@ -2,6 +2,7 @@
 
 pub mod agent_service;
 pub mod ca_service;
+pub mod event_bus;
 pub mod file_service;
 pub mod rollout_service;
 pub mod task_service;
@@ -9,6 +10,7 @@ pub mod task_service;
 pub use agent_service::AgentService;
 #[allow(unused_imports)]
 pub use ca_service::CaService;
+pub use event_bus::EventBus;
 pub use file_service::FileService;
 pub use rollout_service::RolloutService;
 pub use task_service::TaskService;

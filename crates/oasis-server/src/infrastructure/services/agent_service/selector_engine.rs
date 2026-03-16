@@ -770,19 +770,14 @@ mod tests {
 
         #[test]
         fn test_parse_label_eq_with_escaped_double_quotes() {
-            let result = SelectorParser::parse(
-                Rule::selector,
-                "labels[\"note\"]==\"he said \\\"hi\\\"\"",
-            );
+            let result =
+                SelectorParser::parse(Rule::selector, "labels[\"note\"]==\"he said \\\"hi\\\"\"");
             assert!(result.is_ok());
         }
 
         #[test]
         fn test_parse_label_eq_with_escaped_single_quotes() {
-            let result = SelectorParser::parse(
-                Rule::selector,
-                "labels['note']=='it\\'s ok'",
-            );
+            let result = SelectorParser::parse(Rule::selector, "labels['note']=='it\\'s ok'");
             assert!(result.is_ok());
         }
 
@@ -942,13 +937,11 @@ mod tests {
 
         #[test]
         fn test_parse_primary_unquotes_escaped_double_quotes() {
-            let primary = SelectorParser::parse(
-                Rule::primary,
-                "labels[\"note\"]==\"he said \\\"hi\\\"\"",
-            )
-            .expect("primary parse")
-            .next()
-            .expect("primary pair");
+            let primary =
+                SelectorParser::parse(Rule::primary, "labels[\"note\"]==\"he said \\\"hi\\\"\"")
+                    .expect("primary parse")
+                    .next()
+                    .expect("primary pair");
 
             let ast = SelectorEngine::parse_primary(primary).expect("ast");
             match ast {
@@ -975,7 +968,8 @@ mod tests {
                     last_accessed_at: SelectorEngine::current_timestamp(),
                 },
             );
-            let all_agents_cache = AsyncRwLock::new(Some((RoaringBitmap::from_iter([1]), Instant::now())));
+            let all_agents_cache =
+                AsyncRwLock::new(Some((RoaringBitmap::from_iter([1]), Instant::now())));
 
             SelectorEngine::invalidate_cached_queries(&parse_cache, &all_agents_cache).await;
 
@@ -1015,17 +1009,11 @@ mod tests {
 
         #[test]
         fn test_parse_not_with_parentheses() {
-            let mut pairs = SelectorParser::parse(
-                Rule::selector,
-                "not(labels[\"env\"]==\"prod\")",
-            )
-            .expect("selector should parse");
+            let mut pairs = SelectorParser::parse(Rule::selector, "not(labels[\"env\"]==\"prod\")")
+                .expect("selector should parse");
 
             let selector_pair = pairs.next().expect("selector pair");
-            let logical_or_pair = selector_pair
-                .into_inner()
-                .next()
-                .expect("logical_or pair");
+            let logical_or_pair = selector_pair.into_inner().next().expect("logical_or pair");
 
             let ast = SelectorEngine::parse_logical_or(logical_or_pair).expect("ast");
             assert!(matches!(ast, SelectorAst::Not(_)));

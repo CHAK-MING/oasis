@@ -21,6 +21,36 @@ pub enum RolloutState {
 }
 
 impl RolloutState {
+    /// 显式定义允许的状态迁移，避免迁移规则分散在服务层
+    pub fn can_transition_to(&self, next: RolloutState) -> bool {
+        use RolloutState::*;
+
+        matches!(
+            (*self, next),
+            (Created, Created)
+                | (Created, Running)
+                | (Created, Paused)
+                | (Running, Running)
+                | (Running, Paused)
+                | (Running, Completed)
+                | (Running, Failed)
+                | (Running, RollingBack)
+                | (Paused, Paused)
+                | (Paused, Created)
+                | (Paused, Running)
+                | (Paused, RollingBack)
+                | (Completed, Completed)
+                | (Completed, RollingBack)
+                | (Failed, Failed)
+                | (Failed, RollingBack)
+                | (RollingBack, RollingBack)
+                | (RollingBack, RolledBack)
+                | (RollingBack, RollbackFailed)
+                | (RollbackFailed, RollbackFailed)
+                | (RolledBack, RolledBack)
+        )
+    }
+
     /// 检查是否为终端状态
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -41,7 +71,10 @@ impl RolloutState {
     pub fn can_rollback(&self) -> bool {
         matches!(
             self,
-            RolloutState::Running | RolloutState::Paused | RolloutState::Failed | RolloutState::Completed
+            RolloutState::Running
+                | RolloutState::Paused
+                | RolloutState::Failed
+                | RolloutState::Completed
         )
     }
 
@@ -90,9 +123,7 @@ impl Default for RolloutStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CreateRolloutRequest, RolloutState, RolloutStrategy, RolloutTaskType,
-    };
+    use super::{CreateRolloutRequest, RolloutState, RolloutStrategy, RolloutTaskType};
     use crate::core_types::SelectorExpression;
 
     #[test]
@@ -108,6 +139,29 @@ mod tests {
         assert!(!RolloutState::Paused.can_advance());
         assert!(RolloutState::Paused.can_resume());
         assert!(RolloutState::Paused.can_rollback());
+    }
+
+    #[test]
+    fn test_rollout_state_transition_matrix_accepts_expected_edges() {
+        assert!(RolloutState::Created.can_transition_to(RolloutState::Running));
+        assert!(RolloutState::Created.can_transition_to(RolloutState::Paused));
+        assert!(RolloutState::Running.can_transition_to(RolloutState::Completed));
+        assert!(RolloutState::Running.can_transition_to(RolloutState::Failed));
+        assert!(RolloutState::Running.can_transition_to(RolloutState::RollingBack));
+        assert!(RolloutState::Paused.can_transition_to(RolloutState::Created));
+        assert!(RolloutState::Paused.can_transition_to(RolloutState::Running));
+        assert!(RolloutState::Completed.can_transition_to(RolloutState::RollingBack));
+        assert!(RolloutState::RollingBack.can_transition_to(RolloutState::RolledBack));
+        assert!(RolloutState::RollingBack.can_transition_to(RolloutState::RollbackFailed));
+    }
+
+    #[test]
+    fn test_rollout_state_transition_matrix_rejects_invalid_edges() {
+        assert!(!RolloutState::Created.can_transition_to(RolloutState::Completed));
+        assert!(!RolloutState::Paused.can_transition_to(RolloutState::Completed));
+        assert!(!RolloutState::Failed.can_transition_to(RolloutState::Completed));
+        assert!(!RolloutState::Completed.can_transition_to(RolloutState::Running));
+        assert!(!RolloutState::RolledBack.can_transition_to(RolloutState::Running));
     }
 
     #[test]
@@ -197,10 +251,7 @@ impl RolloutStrategy {
                 Err(_) => Err("无效的计数格式".to_string()),
             }
         } else {
-            Err(
-                "策略格式无效，支持: percentage:10,30,100 或 count:2,5,0 或 groups:canary,prod"
-                    .to_string(),
-            )
+            Err("策略格式无效，支持: percentage:10,30,100 或 count:2,5,0".to_string())
         }
     }
 }
@@ -342,6 +393,19 @@ pub struct RolloutStatus {
 }
 
 impl RolloutStatus {
+    pub fn transition_to(&mut self, next: RolloutState) -> Result<(), String> {
+        if self.state.can_transition_to(next) {
+            self.state = next;
+            Ok(())
+        } else {
+            Err(format!(
+                "非法状态迁移: {} -> {}",
+                self.state.as_str(),
+                next.as_str()
+            ))
+        }
+    }
+
     pub fn new(config: RolloutConfig, all_target_agents: Vec<AgentId>) -> Self {
         let stages = Self::create_initial_stages(&config, &all_target_agents);
 

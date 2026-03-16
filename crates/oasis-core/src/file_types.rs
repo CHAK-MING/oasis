@@ -187,7 +187,10 @@ impl FileConfig {
 
 pub fn file_object_namespace(source_path: &str) -> Result<String, CoreError> {
     if source_path.trim().is_empty() {
-        return Err(CoreError::file_error(source_path, "source path cannot be empty"));
+        return Err(CoreError::file_error(
+            source_path,
+            "source path cannot be empty",
+        ));
     }
 
     let mut path_hasher = Sha256::new();

@@ -1,3 +1,4 @@
+use crate::infrastructure::services::EventBus;
 use async_nats::jetstream::Context;
 use dashmap::DashMap;
 use futures_util::StreamExt;
@@ -5,6 +6,7 @@ use oasis_core::{
     constants,
     core_types::{BatchId, TaskId},
     error::{CoreError, ErrorSeverity, Result},
+    event_types::{OasisEvent, OasisEventKind},
     task_types::{Batch, Task, TaskExecution, TaskState},
 };
 use prost::Message;
@@ -38,6 +40,7 @@ pub struct CachedExecution {
 pub struct TaskMonitor {
     jetstream: Arc<Context>,
     shutdown_token: CancellationToken,
+    event_bus: Option<Arc<EventBus>>,
 
     // 缓存
     pub batch_cache: DashMap<BatchId, Arc<Batch>>,
@@ -88,7 +91,13 @@ impl TaskMonitor {
             task_cache: DashMap::new(),
             execution_cache: DashMap::new(),
             config: TaskMonitorConfig::default(),
+            event_bus: None,
         }
+    }
+
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
@@ -198,6 +207,23 @@ impl TaskMonitor {
                                                 if !task.state.is_terminal() {
                                                     let _ = task.transition_to(execution.state);
                                                     info!("Updated task {} status to {:?}", task_id, execution.state);
+                                                }
+                                            }
+
+                                            if let Some(event_bus) = &self.event_bus {
+                                                let batch_id = self
+                                                    .task_cache
+                                                    .get(task_id)
+                                                    .map(|task| task.batch_id.clone())
+                                                    .filter(|batch_id| !batch_id.as_str().is_empty());
+                                                let event = OasisEvent::new(OasisEventKind::TaskTerminal {
+                                                    task_id: execution.task_id.clone(),
+                                                    agent_id: execution.agent_id.clone(),
+                                                    batch_id,
+                                                    state: execution.state,
+                                                });
+                                                if let Err(e) = event_bus.publish(&event).await {
+                                                    warn!("Failed to publish task terminal event: {}", e);
                                                 }
                                             }
                                         }

@@ -1,8 +1,9 @@
-
 //! Agent 证书引导流程
 
 use oasis_core::core_types::AgentId;
-use oasis_core::csr_types::{cert_needs_renewal, CsrGenerator, CsrRequest, CsrResponse, save_credentials, load_private_key};
+use oasis_core::csr_types::{
+    CsrGenerator, CsrRequest, CsrResponse, cert_needs_renewal, load_private_key, save_credentials,
+};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -59,14 +60,18 @@ impl CertBootstrap {
             match self.request_certificate_with_token(token).await {
                 Ok(()) => return Ok(true),
                 Err(err) if self.enrollment_secret.is_some() => {
-                    warn!("Bootstrap token flow failed, falling back to enrollment secret: {}", err);
+                    warn!(
+                        "Bootstrap token flow failed, falling back to enrollment secret: {}",
+                        err
+                    );
                 }
                 Err(err) => return Err(err),
             }
         }
 
         if let Some(secret) = self.enrollment_secret.as_deref() {
-            self.request_certificate_with_enrollment_secret(secret).await?;
+            self.request_certificate_with_enrollment_secret(secret)
+                .await?;
             return Ok(true);
         }
 
@@ -82,18 +87,21 @@ impl CertBootstrap {
         }
 
         let cert_path = self.certs_dir.join("nats-client.pem");
-        let cert_pem = tokio::fs::read_to_string(&cert_path).await.map_err(|e| {
-            CoreError::Io {
+        let cert_pem = tokio::fs::read_to_string(&cert_path)
+            .await
+            .map_err(|e| CoreError::Io {
                 message: format!("Failed to read certificate: {e}"),
                 severity: ErrorSeverity::Error,
-            }
-        })?;
+            })?;
 
         if !cert_needs_renewal(&cert_pem, self.renew_before_days)? {
             return Ok(false);
         }
 
-        info!("Certificate expires within {} days, initiating renewal", self.renew_before_days);
+        info!(
+            "Certificate expires within {} days, initiating renewal",
+            self.renew_before_days
+        );
         self.renew_certificate().await?;
         Ok(true)
     }
@@ -109,39 +117,40 @@ impl CertBootstrap {
         self.save_response(&private_key_pem, response).await
     }
 
-    async fn request_certificate_with_enrollment_secret(&self, enrollment_secret: &str) -> Result<()> {
+    async fn request_certificate_with_enrollment_secret(
+        &self,
+        enrollment_secret: &str,
+    ) -> Result<()> {
         let generator = CsrGenerator::new()?;
         let csr_pem = generator.generate_csr(&self.agent_id)?;
         let private_key_pem = generator.private_key_pem();
 
-        let request = self.build_csr_request(
-            csr_pem,
-            None,
-            None,
-            Some(enrollment_secret.to_string()),
-        );
+        let request =
+            self.build_csr_request(csr_pem, None, None, Some(enrollment_secret.to_string()));
         let response = self.send_csr_request(request).await?;
         self.save_response(&private_key_pem, response).await
     }
 
     async fn renew_certificate(&self) -> Result<()> {
-        let existing_key = load_private_key(&self.certs_dir).await?.ok_or_else(|| {
-            CoreError::Internal {
-                message: "Cannot renew: private key not found".to_string(),
-                severity: ErrorSeverity::Error,
-            }
-        })?;
+        let existing_key =
+            load_private_key(&self.certs_dir)
+                .await?
+                .ok_or_else(|| CoreError::Internal {
+                    message: "Cannot renew: private key not found".to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
 
         let generator = CsrGenerator::from_existing_key(&existing_key)?;
         let csr_pem = generator.generate_csr(&self.agent_id)?;
 
         let cert_path = self.certs_dir.join("nats-client.pem");
-        let current_cert_pem = tokio::fs::read_to_string(&cert_path).await.map_err(|e| {
-            CoreError::Io {
-                message: format!("Failed to read certificate: {e}"),
-                severity: ErrorSeverity::Error,
-            }
-        })?;
+        let current_cert_pem =
+            tokio::fs::read_to_string(&cert_path)
+                .await
+                .map_err(|e| CoreError::Io {
+                    message: format!("Failed to read certificate: {e}"),
+                    severity: ErrorSeverity::Error,
+                })?;
 
         let request = self.build_csr_request(csr_pem, None, Some(current_cert_pem), None);
         let response = self.send_csr_request(request).await?;
@@ -190,15 +199,16 @@ impl CertBootstrap {
             .require_tls(true)
             .add_root_certificates(ca_path);
 
-        info!("Connecting to NATS for certificate request: {}", self.nats_url);
-        
+        info!(
+            "Connecting to NATS for certificate request: {}",
+            self.nats_url
+        );
+
         let client = async_nats::connect_with_options(&self.nats_url, connect_opts)
             .await
-            .map_err(|e| {
-                CoreError::Internal {
-                    message: format!("Failed to connect to NATS for bootstrap: {e}"),
-                    severity: ErrorSeverity::Critical,
-                }
+            .map_err(|e| CoreError::Internal {
+                message: format!("Failed to connect to NATS for bootstrap: {e}"),
+                severity: ErrorSeverity::Critical,
             })?;
 
         let request_json = serde_json::to_string(&request).map_err(|e| CoreError::Internal {
@@ -215,18 +225,19 @@ impl CertBootstrap {
                 severity: ErrorSeverity::Error,
             })?;
 
-        let response: CsrResponse = serde_json::from_slice(&response.payload).map_err(|e| {
-            CoreError::Internal {
+        let response: CsrResponse =
+            serde_json::from_slice(&response.payload).map_err(|e| CoreError::Internal {
                 message: format!("Failed to parse CSR response: {e}"),
                 severity: ErrorSeverity::Error,
-            }
-        })?;
+            })?;
 
         if !response.success {
             return Err(CoreError::Internal {
                 message: format!(
                     "Certificate request failed: {}",
-                    response.error_message.unwrap_or_else(|| "Unknown error".to_string())
+                    response
+                        .error_message
+                        .unwrap_or_else(|| "Unknown error".to_string())
                 ),
                 severity: ErrorSeverity::Error,
             });
@@ -236,15 +247,19 @@ impl CertBootstrap {
     }
 
     async fn save_response(&self, private_key_pem: &str, response: CsrResponse) -> Result<()> {
-        let cert_pem = response.certificate_pem.ok_or_else(|| CoreError::Internal {
-            message: "Response missing certificate".to_string(),
-            severity: ErrorSeverity::Error,
-        })?;
+        let cert_pem = response
+            .certificate_pem
+            .ok_or_else(|| CoreError::Internal {
+                message: "Response missing certificate".to_string(),
+                severity: ErrorSeverity::Error,
+            })?;
 
-        let ca_pem = response.ca_certificate_pem.ok_or_else(|| CoreError::Internal {
-            message: "Response missing CA certificate".to_string(),
-            severity: ErrorSeverity::Error,
-        })?;
+        let ca_pem = response
+            .ca_certificate_pem
+            .ok_or_else(|| CoreError::Internal {
+                message: "Response missing CA certificate".to_string(),
+                severity: ErrorSeverity::Error,
+            })?;
 
         save_credentials(&self.certs_dir, private_key_pem, &cert_pem, &ca_pem).await?;
 
@@ -332,7 +347,7 @@ mod tests {
 
         let result = bootstrap.bootstrap_if_needed().await;
         assert!(result.is_err());
-        
+
         let error = result.unwrap_err();
         assert!(matches!(error, CoreError::Config { .. }));
     }
@@ -341,7 +356,7 @@ mod tests {
     async fn test_bootstrap_if_needed_certs_already_exist() {
         let dir = tempdir().unwrap();
         let agent_id = AgentId::new("test-agent");
-        
+
         fs::write(dir.path().join("nats-client.pem"), "cert").unwrap();
         fs::write(dir.path().join("nats-client-key.pem"), "key").unwrap();
         fs::write(dir.path().join("nats-ca.pem"), "ca").unwrap();
@@ -377,7 +392,7 @@ mod tests {
             None,
             None,
         );
-        
+
         assert_eq!(request.agent_id, agent_id);
         assert_eq!(request.csr_pem, "csr_content");
         assert_eq!(request.bootstrap_token, Some("token123".to_string()));
@@ -403,7 +418,7 @@ mod tests {
             Some(current_cert.clone()),
             None,
         );
-        
+
         assert_eq!(request.agent_id, agent_id);
         assert_eq!(request.csr_pem, "new_csr_pem");
         assert!(request.bootstrap_token.is_none());
@@ -446,7 +461,8 @@ mod tests {
             "nats://localhost:4222".to_string(),
             None,
             None,
-        ).with_renew_before_days(7);
+        )
+        .with_renew_before_days(7);
 
         assert_eq!(bootstrap.renew_before_days, 7);
     }
@@ -494,7 +510,7 @@ mod tests {
     async fn test_multiple_bootstrap_instances() {
         let dir1 = tempdir().unwrap();
         let dir2 = tempdir().unwrap();
-        
+
         let agent_id1 = AgentId::new("agent-1");
         let agent_id2 = AgentId::new("agent-2");
 
@@ -535,12 +551,7 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
-        let request = bootstrap.build_csr_request(
-            "csr".to_string(),
-            None,
-            None,
-            None,
-        );
+        let request = bootstrap.build_csr_request("csr".to_string(), None, None, None);
 
         let after = SystemTime::now()
             .duration_since(UNIX_EPOCH)

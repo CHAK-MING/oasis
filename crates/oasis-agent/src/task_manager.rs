@@ -2,27 +2,33 @@ use crate::nats_client::{ManagedNatsClient, NatsClient};
 use async_nats::jetstream;
 use base64::Engine;
 use dashmap::{DashMap, DashSet};
-use futures::StreamExt;
+use futures::{StreamExt, stream::SelectAll};
 use oasis_core::{
     constants::*,
-    core_types::{AgentId, TaskId},
+    core_types::{AgentId, BatchId, TaskId},
     error::Result,
     shutdown::{ExecutionError, execute_process_with_cancellation},
     task_types::{Task, TaskExecution, TaskState},
 };
 use prost::Message;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+const COMPLETED_TASK_CACHE_LIMIT: usize = 1024;
+
 #[derive(Clone)]
 pub struct TaskManager {
     agent_id: AgentId,
+    groups: Vec<String>,
     nats_client: ManagedNatsClient,
     shutdown_token: CancellationToken,
     running_tasks: Arc<DashMap<TaskId, CancellationToken>>,
     cancelled_tasks: Arc<DashSet<TaskId>>,
+    completed_tasks: Arc<DashMap<TaskId, TaskExecution>>,
+    completed_task_order: Arc<std::sync::Mutex<VecDeque<TaskId>>>,
 }
 
 impl TaskManager {
@@ -42,25 +48,93 @@ impl TaskManager {
         }
     }
 
-    fn take_pending_cancellation(
-        task_id: &TaskId,
-        cancelled_tasks: &Arc<DashSet<TaskId>>,
-    ) -> bool {
+    fn take_pending_cancellation(task_id: &TaskId, cancelled_tasks: &Arc<DashSet<TaskId>>) -> bool {
         cancelled_tasks.remove(task_id).is_some()
+    }
+
+    fn completed_execution(
+        task_id: &TaskId,
+        completed_tasks: &Arc<DashMap<TaskId, TaskExecution>>,
+    ) -> Option<TaskExecution> {
+        completed_tasks.get(task_id).map(|entry| entry.value().clone())
+    }
+
+    fn cache_completed_execution(
+        execution: &TaskExecution,
+        completed_tasks: &Arc<DashMap<TaskId, TaskExecution>>,
+        completed_task_order: &Arc<std::sync::Mutex<VecDeque<TaskId>>>,
+    ) {
+        if !execution.state.is_terminal() {
+            return;
+        }
+
+        completed_tasks.insert(execution.task_id.clone(), execution.clone());
+
+        let mut order = completed_task_order
+            .lock()
+            .expect("completed task cache order mutex poisoned");
+        order.push_back(execution.task_id.clone());
+        while order.len() > COMPLETED_TASK_CACHE_LIMIT {
+            if let Some(evicted_task_id) = order.pop_front() {
+                if evicted_task_id != execution.task_id {
+                    completed_tasks.remove(&evicted_task_id);
+                }
+            }
+        }
     }
 
     pub fn new(
         agent_id: AgentId,
         nats_client: ManagedNatsClient,
         shutdown_token: CancellationToken,
+        groups: Vec<String>,
     ) -> Self {
         Self {
             agent_id,
+            groups,
             nats_client,
             shutdown_token,
             running_tasks: Arc::new(DashMap::new()),
             cancelled_tasks: Arc::new(DashSet::new()),
+            completed_tasks: Arc::new(DashMap::new()),
+            completed_task_order: Arc::new(std::sync::Mutex::new(VecDeque::new())),
         }
+    }
+
+    pub(crate) fn parse_groups_from_info(info: &HashMap<String, String>) -> Vec<String> {
+        info.get("__groups")
+            .map(|groups| {
+                groups
+                    .split(',')
+                    .map(|group| group.trim().to_string())
+                    .filter(|group| !group.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn task_from_group_message(
+        agent_id: &AgentId,
+        group_msg: &oasis_core::proto::GroupTaskMsg,
+    ) -> Option<Task> {
+        let batch_id = group_msg
+            .batch_id
+            .as_ref()
+            .map(|batch_id| BatchId::new(batch_id.value.clone()))?;
+        let task_id = group_msg.agent_task_ids.get(agent_id.as_str())?;
+        let now = chrono::Utc::now().timestamp();
+
+        Some(Task {
+            task_id: TaskId::new(task_id.clone()),
+            batch_id,
+            agent_id: agent_id.clone(),
+            command: group_msg.command.clone(),
+            args: group_msg.args.clone(),
+            timeout_seconds: group_msg.timeout_seconds,
+            state: TaskState::Pending,
+            created_at: now,
+            updated_at: now,
+        })
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -71,9 +145,15 @@ impl TaskManager {
             let client = self.nats_client.current().await;
             let unicast_consumer = self.create_unicast_task_consumer(&client).await?;
             let cancel_consumer = self.create_cancel_consumer(&client).await?;
+            let group_consumers = self.create_group_task_consumers(&client).await?;
+            let has_group_consumers = !group_consumers.is_empty();
 
             let mut unicast_messages = unicast_consumer.messages().await?;
             let mut cancel_messages = cancel_consumer.messages().await?;
+            let mut group_messages = SelectAll::new();
+            for consumer in group_consumers {
+                group_messages.push(consumer.messages().await?);
+            }
 
             info!("Task manager started with task and cancel consumers");
 
@@ -105,6 +185,19 @@ impl TaskManager {
                             }
                         }
                     }
+                    Some(msg_result) = group_messages.next(), if has_group_consumers => {
+                        match msg_result {
+                            Ok(msg) => {
+                                debug!("Received group task message");
+                                if let Err(e) = self.process_group_task_message(msg).await {
+                                    error!("Failed to process group task message: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error receiving group task message: {}", e);
+                            }
+                        }
+                    }
                     changed = generation_rx.changed() => {
                         match changed {
                             Ok(()) => {
@@ -131,10 +224,7 @@ impl TaskManager {
         &self,
         nats_client: &NatsClient,
     ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
-        let stream = nats_client
-            .jetstream
-            .get_stream(JS_STREAM_TASKS)
-            .await?;
+        let stream = nats_client.jetstream.get_stream(JS_STREAM_TASKS).await?;
 
         // 为此Agent创建专用的消费者，接收单播任务
         let consumer_name = unicast_consumer_name(&self.agent_id);
@@ -158,14 +248,48 @@ impl TaskManager {
         Ok(consumer)
     }
 
+    async fn create_group_task_consumers(
+        &self,
+        nats_client: &NatsClient,
+    ) -> Result<Vec<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>>> {
+        if self.groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let stream = nats_client
+            .jetstream
+            .get_stream(JS_STREAM_GROUP_TASKS)
+            .await?;
+
+        let mut consumers = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let consumer_name = group_consumer_name(&self.agent_id, group);
+            let subject = tasks_group_subject(group);
+            let consumer = stream
+                .create_consumer(
+                    oasis_core::nats::ConsumerConfigBuilder::new(
+                        consumer_name.clone(),
+                        subject.clone(),
+                    )
+                    .build(),
+                )
+                .await?;
+
+            info!(
+                "Created group task consumer: {} for subject: {}",
+                consumer_name, subject
+            );
+            consumers.push(consumer);
+        }
+
+        Ok(consumers)
+    }
+
     async fn create_cancel_consumer(
         &self,
         nats_client: &NatsClient,
     ) -> Result<jetstream::consumer::Consumer<jetstream::consumer::pull::Config>> {
-        let stream = nats_client
-            .jetstream
-            .get_stream(JS_STREAM_TASKS)
-            .await?;
+        let stream = nats_client.jetstream.get_stream(JS_STREAM_TASKS).await?;
 
         let consumer_name = format!("oasis-cancel-v1-{}", self.agent_id);
         let subject = format!("tasks.cancel.agent.{}.>", self.agent_id);
@@ -229,7 +353,6 @@ impl TaskManager {
 
     /// 处理任务消息
     async fn process_task_message(&self, msg: jetstream::Message, source: &str) -> Result<()> {
-        // 解析任务(这里需要换成 proto)
         let task = match oasis_core::proto::TaskMsg::decode(msg.payload.as_ref()) {
             Ok(task_msg) => Task::from(task_msg),
             Err(e) => {
@@ -241,10 +364,80 @@ impl TaskManager {
             }
         };
 
+        self.process_task(msg, task, source).await
+    }
+
+    async fn process_group_task_message(&self, msg: jetstream::Message) -> Result<()> {
+        let group_msg = match oasis_core::proto::GroupTaskMsg::decode(msg.payload.as_ref()) {
+            Ok(group_msg) => group_msg,
+            Err(e) => {
+                error!("Failed to decode group task message: {}", e);
+                msg.ack()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+                return Ok(());
+            }
+        };
+
+        let Some(task) = Self::task_from_group_message(&self.agent_id, &group_msg) else {
+            warn!(
+                "Ignoring group task {} because agent {} is not in the delivery map",
+                group_msg.group, self.agent_id
+            );
+            msg.ack()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+            return Ok(());
+        };
+
+        self.process_task(msg, task, "group").await
+    }
+
+    async fn process_task(&self, msg: jetstream::Message, task: Task, source: &str) -> Result<()> {
         info!("Processing {} task: {}", source, task.task_id);
 
+        if let Some(cached_execution) =
+            Self::completed_execution(&task.task_id, &self.completed_tasks)
+        {
+            info!(
+                "Skipping duplicate task {} because a terminal result is already cached",
+                task.task_id
+            );
+            let publish_result = self.publish_task_result(&cached_execution).await;
+            if let Err(e) = &publish_result {
+                error!("Failed to republish cached task result: {}", e);
+            }
+
+            if !Self::should_ack_task_message(&publish_result) {
+                return Err(anyhow::anyhow!(
+                    "Failed to republish cached task result for {}",
+                    task.task_id
+                )
+                .into());
+            }
+
+            msg.ack()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+            return Ok(());
+        }
+
+        if self.running_tasks.contains_key(&task.task_id) {
+            info!(
+                "Ignoring duplicate in-flight delivery for task {}; original execution is still running",
+                task.task_id
+            );
+            msg.ack_with(async_nats::jetstream::AckKind::Progress)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to mark duplicate task as in-progress: {}", e))?;
+            return Ok(());
+        }
+
         if Self::take_pending_cancellation(&task.task_id, &self.cancelled_tasks) {
-            info!("Skipping task {} because a cancel request was already recorded", task.task_id);
+            info!(
+                "Skipping task {} because a cancel request was already recorded",
+                task.task_id
+            );
             let execution = Self::cancelled_execution(task.task_id.clone(), self.agent_id.clone());
             let publish_result = self.publish_task_result(&execution).await;
             if let Err(e) = &publish_result {
@@ -278,6 +471,11 @@ impl TaskManager {
 
         // 执行任务
         let execution = self.execute_task(&task, task_cancel_token.clone()).await;
+        Self::cache_completed_execution(
+            &execution,
+            &self.completed_tasks,
+            &self.completed_task_order,
+        );
 
         self.running_tasks.remove(&task.task_id);
         self.cancelled_tasks.remove(&task.task_id);
@@ -319,7 +517,11 @@ impl TaskManager {
         }
     }
 
-    async fn execute_task(&self, task: &Task, task_cancel_token: CancellationToken) -> TaskExecution {
+    async fn execute_task(
+        &self,
+        task: &Task,
+        task_cancel_token: CancellationToken,
+    ) -> TaskExecution {
         let start_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -471,9 +673,9 @@ impl TaskManager {
         };
 
         let timeout_duration = std::time::Duration::from_secs(task.timeout_seconds as u64);
-        
+
         let combined_token = CancellationToken::new();
-        
+
         tokio::spawn({
             let combined = combined_token.clone();
             let shutdown = self.shutdown_token.clone();
@@ -485,7 +687,7 @@ impl TaskManager {
                 }
             }
         });
-        
+
         let result = execute_process_with_cancellation(
             child,
             combined_token,
@@ -606,6 +808,7 @@ impl TaskManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     mod encode_output_tests {
         use super::*;
@@ -991,8 +1194,163 @@ mod tests {
             let cancelled_tasks: Arc<DashSet<TaskId>> = Arc::new(DashSet::new());
             cancelled_tasks.insert(task_id.clone());
 
-            assert!(TaskManager::take_pending_cancellation(&task_id, &cancelled_tasks));
-            assert!(!TaskManager::take_pending_cancellation(&task_id, &cancelled_tasks));
+            assert!(TaskManager::take_pending_cancellation(
+                &task_id,
+                &cancelled_tasks
+            ));
+            assert!(!TaskManager::take_pending_cancellation(
+                &task_id,
+                &cancelled_tasks
+            ));
+        }
+    }
+
+    mod task_idempotency_tests {
+        use super::*;
+
+        #[test]
+        fn test_cache_completed_execution_stores_terminal_result() {
+            let completed_tasks = Arc::new(DashMap::new());
+            let completed_task_order = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+            let execution = TaskExecution::success(
+                TaskId::new("task-1"),
+                AgentId::new("agent-1"),
+                0,
+                "ok".to_string(),
+                String::new(),
+                1.0,
+            );
+
+            TaskManager::cache_completed_execution(
+                &execution,
+                &completed_tasks,
+                &completed_task_order,
+            );
+
+            let cached =
+                TaskManager::completed_execution(&TaskId::new("task-1"), &completed_tasks)
+                    .expect("terminal execution should be cached");
+            assert_eq!(cached.state, TaskState::Success);
+            assert_eq!(cached.stdout, "ok");
+        }
+
+        #[test]
+        fn test_cache_completed_execution_ignores_non_terminal_result() {
+            let completed_tasks = Arc::new(DashMap::new());
+            let completed_task_order = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+            let execution = TaskExecution::running(TaskId::new("task-running"), AgentId::new("agent-1"));
+
+            TaskManager::cache_completed_execution(
+                &execution,
+                &completed_tasks,
+                &completed_task_order,
+            );
+
+            assert!(
+                TaskManager::completed_execution(&TaskId::new("task-running"), &completed_tasks)
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn test_cache_completed_execution_evicts_oldest_entries() {
+            let completed_tasks = Arc::new(DashMap::new());
+            let completed_task_order = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+
+            for i in 0..(COMPLETED_TASK_CACHE_LIMIT + 1) {
+                let execution = TaskExecution::success(
+                    TaskId::new(&format!("task-{i}")),
+                    AgentId::new("agent-1"),
+                    0,
+                    "ok".to_string(),
+                    String::new(),
+                    1.0,
+                );
+                TaskManager::cache_completed_execution(
+                    &execution,
+                    &completed_tasks,
+                    &completed_task_order,
+                );
+            }
+
+            assert!(
+                TaskManager::completed_execution(&TaskId::new("task-0"), &completed_tasks)
+                    .is_none()
+            );
+            assert!(
+                TaskManager::completed_execution(
+                    &TaskId::new(&format!("task-{}", COMPLETED_TASK_CACHE_LIMIT)),
+                    &completed_tasks
+                )
+                .is_some()
+            );
+        }
+    }
+
+    mod group_multicast_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_groups_from_info_splits_group_list() {
+            let groups = TaskManager::parse_groups_from_info(&HashMap::from([(
+                "__groups".to_string(),
+                "web, prod ,canary".to_string(),
+            )]));
+
+            assert_eq!(groups, vec!["web", "prod", "canary"]);
+        }
+
+        #[test]
+        fn test_task_from_group_message_returns_task_for_current_agent() {
+            let agent_id = AgentId::new("agent-1");
+            let batch_id = oasis_core::core_types::BatchId::generate();
+            let task_id = TaskId::generate();
+            let group_msg = oasis_core::proto::GroupTaskMsg {
+                batch_id: Some(oasis_core::proto::BatchId {
+                    value: batch_id.as_str().to_string(),
+                }),
+                group: "web".to_string(),
+                command: "uptime".to_string(),
+                args: vec!["--pretty".to_string()],
+                timeout_seconds: 30,
+                agent_task_ids: HashMap::from([(
+                    agent_id.as_str().to_string(),
+                    task_id.as_str().to_string(),
+                )]),
+            };
+
+            let task = TaskManager::task_from_group_message(&agent_id, &group_msg)
+                .expect("agent task should exist");
+
+            assert_eq!(task.agent_id, agent_id);
+            assert_eq!(task.batch_id.as_str(), batch_id.as_str());
+            assert_eq!(task.task_id.as_str(), task_id.as_str());
+            assert_eq!(task.command, "uptime");
+            assert_eq!(task.args, vec!["--pretty"]);
+            assert_eq!(task.timeout_seconds, 30);
+            assert_eq!(task.state, TaskState::Pending);
+        }
+
+        #[test]
+        fn test_task_from_group_message_ignores_other_agents() {
+            let current_agent = AgentId::new("agent-1");
+            let group_msg = oasis_core::proto::GroupTaskMsg {
+                batch_id: Some(oasis_core::proto::BatchId {
+                    value: oasis_core::core_types::BatchId::generate()
+                        .as_str()
+                        .to_string(),
+                }),
+                group: "web".to_string(),
+                command: "uptime".to_string(),
+                args: Vec::new(),
+                timeout_seconds: 30,
+                agent_task_ids: HashMap::from([(
+                    "agent-2".to_string(),
+                    TaskId::generate().to_string(),
+                )]),
+            };
+
+            assert!(TaskManager::task_from_group_message(&current_agent, &group_msg).is_none());
         }
     }
 }

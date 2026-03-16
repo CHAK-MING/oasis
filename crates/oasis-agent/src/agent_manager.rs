@@ -72,6 +72,7 @@ impl AgentManager {
             self.agent_id.clone(),
             self.nats_client.clone(),
             self.shutdown_token.clone(),
+            TaskManager::parse_groups_from_info(&self.info),
         );
 
         let file_manager = FileManager::new(

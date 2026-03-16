@@ -2,6 +2,7 @@
 //! 使用 oasis-core 的统一类型，提供简洁的文件管理接口
 
 use async_nats::jetstream::{Context, object_store::ObjectStore};
+use crate::infrastructure::services::event_bus::EventBus;
 use oasis_core::core_types::AgentId;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -14,6 +15,7 @@ use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{
     FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS, core_types::OperationId, file_types::*,
+    event_types::{OasisEvent, OasisEventKind},
     kv_key_file_apply_result,
 };
 
@@ -92,6 +94,35 @@ fn summarize_apply_results(
     }
 }
 
+fn apply_events_from_summary(summary: &FileApplySummary) -> Vec<OasisEvent> {
+    summary
+        .all_results
+        .iter()
+        .map(|execution| {
+            let operation_id = OperationId::new(execution.operation_id.clone());
+            let kind = if execution.success {
+                OasisEventKind::FileApplied {
+                    operation_id,
+                    agent_id: execution.agent_id.clone(),
+                    source_path: execution.source_path.clone(),
+                    destination_path: execution.destination_path.clone(),
+                    revision: execution.revision,
+                }
+            } else {
+                OasisEventKind::FileApplyFailed {
+                    operation_id,
+                    agent_id: execution.agent_id.clone(),
+                    source_path: execution.source_path.clone(),
+                    destination_path: execution.destination_path.clone(),
+                    revision: execution.revision,
+                    reason: execution.message.clone(),
+                }
+            };
+            OasisEvent::new(kind)
+        })
+        .collect()
+}
+
 fn should_update_active_revision_after_rollback(success: bool) -> bool {
     success
 }
@@ -130,6 +161,7 @@ fn apply_active_revision_to_versions(
 pub struct FileService {
     jetstream: Arc<Context>,
     lock_manager: FileLockManager,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl FileService {
@@ -140,7 +172,13 @@ impl FileService {
         Ok(Self {
             jetstream,
             lock_manager,
+            event_bus: None,
         })
+    }
+
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// 确保对象存储已创建
@@ -297,7 +335,8 @@ impl FileService {
         let mut results = if dispatched_agents.is_empty() {
             HashMap::new()
         } else {
-            self.wait_for_file_apply_results(config, &dispatched_agents).await?
+            self.wait_for_file_apply_results(config, &dispatched_agents)
+                .await?
         };
         for failure in dispatch_failures {
             results.insert(failure.agent_id.clone(), failure);
@@ -320,7 +359,29 @@ impl FileService {
             }
         }
 
+        self.publish_apply_events(&summary).await;
+
         Ok(summary)
+    }
+
+    async fn publish_apply_events(&self, summary: &FileApplySummary) {
+        let Some(event_bus) = self.event_bus.as_ref() else {
+            return;
+        };
+
+        for event in apply_events_from_summary(summary) {
+            if let Err(e) = event_bus.publish(&event).await {
+                let agent_id = match &event.kind {
+                    OasisEventKind::FileApplied { agent_id, .. }
+                    | OasisEventKind::FileApplyFailed { agent_id, .. } => agent_id,
+                    _ => unreachable!(),
+                };
+                warn!(
+                    "Failed to publish file apply event {} for agent {}: {}",
+                    event.event_id, agent_id, e
+                );
+            }
+        }
     }
 
     async fn wait_for_file_apply_results(
@@ -349,15 +410,13 @@ impl FileService {
                 let key = kv_key_file_apply_result(&config.operation_id, agent_id.as_str());
                 match kv.get(&key).await {
                     Ok(Some(bytes)) => {
-                        let execution: FileApplyExecution =
-                            serde_json::from_slice(bytes.as_ref()).map_err(|e| {
-                                CoreError::Serialization {
-                                    message: format!(
-                                        "Failed to decode file apply result for {}: {}",
-                                        agent_id, e
-                                    ),
-                                    severity: ErrorSeverity::Error,
-                                }
+                        let execution: FileApplyExecution = serde_json::from_slice(bytes.as_ref())
+                            .map_err(|e| CoreError::Serialization {
+                                message: format!(
+                                    "Failed to decode file apply result for {}: {}",
+                                    agent_id, e
+                                ),
+                                severity: ErrorSeverity::Error,
                             })?;
                         if execution.operation_id == config.operation_id
                             && execution.revision == config.revision
@@ -695,12 +754,15 @@ impl FileService {
         let mut deleted = 0;
 
         use std::collections::HashMap;
-        
+
         let mut file_groups: HashMap<
             (String, String),
             Vec<async_nats::jetstream::object_store::ObjectInfo>,
         > = HashMap::new();
-        let mut pointer_objects: HashMap<(String, String), async_nats::jetstream::object_store::ObjectInfo> = HashMap::new();
+        let mut pointer_objects: HashMap<
+            (String, String),
+            async_nats::jetstream::object_store::ObjectInfo,
+        > = HashMap::new();
 
         while let Some(result) = list.next().await {
             if let Ok(info) = result {
@@ -708,9 +770,12 @@ impl FileService {
                 if parts.len() >= 2 {
                     let path_hash = parts[0].to_string();
                     let filename_part = parts[1];
-                    
+
                     if filename_part.ends_with(".current") {
-                        let filename = filename_part.strip_suffix(".current").unwrap_or(filename_part).to_string();
+                        let filename = filename_part
+                            .strip_suffix(".current")
+                            .unwrap_or(filename_part)
+                            .to_string();
                         pointer_objects.insert((path_hash, filename), info);
                     } else if let Some(base_name) = filename_part.split(".v").next() {
                         let filename = base_name.to_string();
@@ -756,26 +821,43 @@ impl FileService {
             let protected_revision: u64;
             if let Some(active) = active_revision {
                 let exists = versions.iter().any(|v| {
-                    v.name.rsplit(".v").next()
+                    v.name
+                        .rsplit(".v")
+                        .next()
                         .and_then(|r| r.parse::<u64>().ok())
                         .map(|r| r == active)
                         .unwrap_or(false)
                 });
-                
+
                 if exists {
                     protected_revision = active;
                 } else {
-                    warn!("GC: Pointer for {}/{} points to non-existent revision {}", path_hash, filename, active);
+                    warn!(
+                        "GC: Pointer for {}/{} points to non-existent revision {}",
+                        path_hash, filename, active
+                    );
                     needs_pointer_repair = true;
-                    protected_revision = versions.first()
-                        .and_then(|v| v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()))
+                    protected_revision = versions
+                        .first()
+                        .and_then(|v| {
+                            v.name
+                                .rsplit(".v")
+                                .next()
+                                .and_then(|r| r.parse::<u64>().ok())
+                        })
                         .unwrap_or(0);
                 }
             } else {
                 if !versions.is_empty() {
                     needs_pointer_repair = true;
-                    protected_revision = versions.first()
-                        .and_then(|v| v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()))
+                    protected_revision = versions
+                        .first()
+                        .and_then(|v| {
+                            v.name
+                                .rsplit(".v")
+                                .next()
+                                .and_then(|r| r.parse::<u64>().ok())
+                        })
                         .unwrap_or(0);
                 } else {
                     continue;
@@ -783,9 +865,14 @@ impl FileService {
             }
 
             // Build revisions_sorted for the helper
-            let revisions_sorted: Vec<(u64, i64)> = versions.iter()
+            let revisions_sorted: Vec<(u64, i64)> = versions
+                .iter()
                 .filter_map(|v| {
-                    let rev = v.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok())?;
+                    let rev = v
+                        .name
+                        .rsplit(".v")
+                        .next()
+                        .and_then(|r| r.parse::<u64>().ok())?;
                     let modified_ts = v.modified.as_ref().map(|t| t.unix_timestamp()).unwrap_or(0);
                     Some((rev, modified_ts))
                 })
@@ -800,7 +887,12 @@ impl FileService {
             );
 
             for version in &versions {
-                if let Some(rev) = version.name.rsplit(".v").next().and_then(|r| r.parse::<u64>().ok()) {
+                if let Some(rev) = version
+                    .name
+                    .rsplit(".v")
+                    .next()
+                    .and_then(|r| r.parse::<u64>().ok())
+                {
                     if !keep_set.contains(&rev) {
                         match store.delete(&version.name).await {
                             Ok(_) => {
@@ -818,9 +910,15 @@ impl FileService {
             if needs_pointer_repair {
                 let pointer_key_str = format!("{}/{}.current", path_hash, filename);
                 let content = protected_revision.to_string().into_bytes();
-                match store.put(pointer_key_str.as_str(), &mut content.as_slice()).await {
+                match store
+                    .put(pointer_key_str.as_str(), &mut content.as_slice())
+                    .await
+                {
                     Ok(_) => {
-                        info!("GC: repaired pointer {} -> {}", pointer_key_str, protected_revision);
+                        info!(
+                            "GC: repaired pointer {} -> {}",
+                            pointer_key_str, protected_revision
+                        );
                     }
                     Err(e) => {
                         warn!("GC: failed to repair pointer {}: {}", pointer_key_str, e);
@@ -854,13 +952,17 @@ fn compute_gc_keep_set(
 ) -> std::collections::HashSet<u64> {
     use std::collections::HashSet;
     let mut keep_set: HashSet<u64> = HashSet::new();
-    
+
     // Always keep the active revision (protects against GC-after-rollback bug)
     keep_set.insert(active_revision);
 
     // Keep the newest revisions up to keep_versions count
     let min_keep = std::cmp::max(1, keep_versions) as usize;
-    let mut kept_count = if keep_set.contains(&active_revision) { 1 } else { 0 };
+    let mut kept_count = if keep_set.contains(&active_revision) {
+        1
+    } else {
+        0
+    };
 
     for (rev, _modified_ts) in &revisions_sorted {
         if kept_count >= min_keep {
@@ -991,7 +1093,55 @@ mod tests {
             .find(|result| result.agent_id == agent_b)
             .expect("missing timeout result");
         assert!(!timeout.success);
-        assert!(timeout.message.contains("Timed out waiting for file apply result"));
+        assert!(
+            timeout
+                .message
+                .contains("Timed out waiting for file apply result")
+        );
+    }
+
+    #[test]
+    fn test_apply_events_from_summary_emits_success_and_failure_events() {
+        let summary = FileApplySummary {
+            success: false,
+            completed_agents: vec![AgentId::new("agent-a")],
+            all_results: vec![
+                FileApplyExecution::success(
+                    AgentId::new("agent-a"),
+                    OP_ID_1.to_string(),
+                    "/tmp/app.conf".to_string(),
+                    "/etc/app.conf".to_string(),
+                    42,
+                    "ok".to_string(),
+                ),
+                FileApplyExecution::failure(
+                    AgentId::new("agent-b"),
+                    OP_ID_1.to_string(),
+                    "/tmp/app.conf".to_string(),
+                    "/etc/app.conf".to_string(),
+                    42,
+                    "permission denied".to_string(),
+                ),
+            ],
+            failed_results: vec![FileApplyExecution::failure(
+                AgentId::new("agent-b"),
+                OP_ID_1.to_string(),
+                "/tmp/app.conf".to_string(),
+                "/etc/app.conf".to_string(),
+                42,
+                "permission denied".to_string(),
+            )],
+            revision: 42,
+            message: "partial failure".to_string(),
+        };
+
+        let events = apply_events_from_summary(&summary);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].kind, OasisEventKind::FileApplied { .. }));
+        assert!(matches!(events[1].kind, OasisEventKind::FileApplyFailed { .. }));
+        assert_eq!(events[0].subject(), "events.file.applied.agent-a");
+        assert_eq!(events[1].subject(), "events.file.apply_failed.agent-b");
     }
 
     #[test]
@@ -1007,11 +1157,16 @@ mod tests {
         let keep_days = 0u32;
         let now_ts = 3000i64;
 
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
         // Must keep v1 (active), even though it's not the newest
         assert!(keep_set.contains(&1), "Active revision v1 must be kept");
-        assert_eq!(keep_set.len(), 1, "Should keep exactly 1 revision when keep_versions=1");
+        assert_eq!(
+            keep_set.len(),
+            1,
+            "Should keep exactly 1 revision when keep_versions=1"
+        );
     }
 
     #[test]
@@ -1027,11 +1182,16 @@ mod tests {
         let keep_days = 0u32;
         let now_ts = 3000i64;
 
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
         assert!(keep_set.contains(&1), "Active revision v1 must be kept");
         assert!(keep_set.contains(&2), "Newest revision v2 should be kept");
-        assert_eq!(keep_set.len(), 2, "Should keep both revisions when keep_versions=2");
+        assert_eq!(
+            keep_set.len(),
+            2,
+            "Should keep both revisions when keep_versions=2"
+        );
     }
 
     #[test]
@@ -1041,18 +1201,29 @@ mod tests {
         // Expected: keep both v1 (active) and v2 (within time window)
         let now_ts = 100000i64;
         let revisions = vec![
-            (2u64, now_ts - 1000), // v2 very recent (within 1 day)
+            (2u64, now_ts - 1000),  // v2 very recent (within 1 day)
             (1u64, now_ts - 90000), // v1 old (outside 1 day window)
         ];
         let active_revision = 1u64;
         let keep_versions = 1u32;
         let keep_days = 1u32; // 1 day = 86400 seconds
-        
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
-        assert!(keep_set.contains(&1), "Active revision v1 must be kept even if outside time window");
-        assert!(keep_set.contains(&2), "Recent revision v2 within time window must be kept");
-        assert_eq!(keep_set.len(), 2, "Should keep both active and recent revisions");
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+
+        assert!(
+            keep_set.contains(&1),
+            "Active revision v1 must be kept even if outside time window"
+        );
+        assert!(
+            keep_set.contains(&2),
+            "Recent revision v2 within time window must be kept"
+        );
+        assert_eq!(
+            keep_set.len(),
+            2,
+            "Should keep both active and recent revisions"
+        );
     }
 
     #[test]
@@ -1070,11 +1241,18 @@ mod tests {
         let keep_days = 0u32;
         let now_ts = 4000i64;
 
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
         assert!(keep_set.contains(&3), "Active revision v3 must be kept");
-        assert!(keep_set.contains(&2), "Second newest revision v2 should be kept");
-        assert!(!keep_set.contains(&1), "Oldest revision v1 should not be kept");
+        assert!(
+            keep_set.contains(&2),
+            "Second newest revision v2 should be kept"
+        );
+        assert!(
+            !keep_set.contains(&1),
+            "Oldest revision v1 should not be kept"
+        );
         assert_eq!(keep_set.len(), 2);
     }
 
@@ -1087,28 +1265,34 @@ mod tests {
         let keep_days = 0u32;
         let now_ts = 1000i64;
 
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
-        assert!(keep_set.contains(&1), "Active revision must always be in keep set");
+        assert!(
+            keep_set.contains(&1),
+            "Active revision must always be in keep set"
+        );
         assert_eq!(keep_set.len(), 1);
     }
 
     #[test]
     fn test_gc_keep_set_keep_versions_zero_defaults_to_one() {
         // keep_versions=0 should behave as keep_versions=1 (max(1, keep_versions))
-        let revisions = vec![
-            (2u64, 2000i64),
-            (1u64, 1000i64),
-        ];
+        let revisions = vec![(2u64, 2000i64), (1u64, 1000i64)];
         let active_revision = 1u64;
         let keep_versions = 0u32;
         let keep_days = 0u32;
         let now_ts = 3000i64;
 
-        let keep_set = compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
+        let keep_set =
+            compute_gc_keep_set(revisions, active_revision, keep_versions, keep_days, now_ts);
 
         assert!(keep_set.contains(&1), "Active revision must be kept");
-        assert_eq!(keep_set.len(), 1, "Should keep at least 1 revision even when keep_versions=0");
+        assert_eq!(
+            keep_set.len(),
+            1,
+            "Should keep at least 1 revision even when keep_versions=0"
+        );
     }
 
     #[test]

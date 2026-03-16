@@ -139,10 +139,7 @@ impl Task {
             // 取消中 -> 终态
             (
                 TaskState::Cancelling,
-                TaskState::Success
-                    | TaskState::Failed
-                    | TaskState::Timeout
-                    | TaskState::Cancelled,
+                TaskState::Success | TaskState::Failed | TaskState::Timeout | TaskState::Cancelled,
             ) => true,
             // 任何状态 -> 取消
             (_, TaskState::Cancelled) => true,

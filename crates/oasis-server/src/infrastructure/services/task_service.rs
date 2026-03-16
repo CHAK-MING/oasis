@@ -47,10 +47,86 @@ impl TaskService {
         headers
     }
 
+    fn group_publish_headers(
+        batch_id: &BatchId,
+        group: &str,
+        payload: &[u8],
+    ) -> async_nats::HeaderMap {
+        let mut headers = async_nats::HeaderMap::new();
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let digest = hasher.finalize();
+
+        let mut digest_hex = String::with_capacity(64);
+        for b in digest.iter() {
+            let _ = write!(&mut digest_hex, "{:02x}", b);
+        }
+        let digest_prefix = &digest_hex[..12];
+        headers.insert(
+            "Nats-Msg-Id",
+            format!("task-group-{}-{}-sha256-{}", batch_id, group, digest_prefix),
+        );
+        headers
+    }
+
     fn cancel_publish_headers(task_id: &TaskId) -> async_nats::HeaderMap {
         let mut headers = async_nats::HeaderMap::new();
         headers.insert("Nats-Msg-Id", format!("task-cancel-{}", task_id));
         headers
+    }
+
+    fn extract_multicast_group(
+        selector: &oasis_core::core_types::SelectorExpression,
+    ) -> Option<String> {
+        let mut expr = selector.as_str().trim();
+        if expr.starts_with('(') && expr.ends_with(')') {
+            expr = expr[1..expr.len() - 1].trim();
+        }
+
+        let (quote, suffix) = match expr.as_bytes().first().copied() {
+            Some(b'"') => ('"', "\" in groups"),
+            Some(b'\'') => ('\'', "' in groups"),
+            _ => return None,
+        };
+
+        if !expr.ends_with(suffix) || expr.len() <= suffix.len() + 1 {
+            return None;
+        }
+
+        let group = &expr[1..expr.len() - suffix.len()];
+        if group.is_empty() || group.contains(quote) {
+            return None;
+        }
+
+        Some(group.to_string())
+    }
+
+    fn build_group_task_message(
+        batch_id: &BatchId,
+        group: &str,
+        request: &BatchRequest,
+        tasks_and_agents: &[(Task, AgentId)],
+    ) -> oasis_core::proto::GroupTaskMsg {
+        let agent_task_ids = tasks_and_agents
+            .iter()
+            .map(|(task, agent_id)| {
+                (
+                    agent_id.as_str().to_string(),
+                    task.task_id.as_str().to_string(),
+                )
+            })
+            .collect();
+
+        oasis_core::proto::GroupTaskMsg {
+            batch_id: Some(oasis_core::proto::BatchId {
+                value: batch_id.as_str().to_string(),
+            }),
+            group: group.to_string(),
+            command: request.command.clone(),
+            args: request.args.clone(),
+            timeout_seconds: request.timeout_seconds,
+            agent_task_ids,
+        }
     }
 
     /// 创建新的任务服务
@@ -110,36 +186,73 @@ impl TaskService {
             futures_util::future::try_join_all(task_futures).await?;
 
         // 步骤3: 批量发布所有任务
-        let mut ack_futures = Vec::with_capacity(tasks_and_agents.len());
         let mut task_ids = Vec::with_capacity(tasks_and_agents.len());
+        let multicast_group =
+            Self::extract_multicast_group(&request.selector).filter(|_| tasks_and_agents.len() > 1);
 
-        for (task, agent_id) in &tasks_and_agents {
-            let subject = constants::tasks_unicast_subject(agent_id);
-            let proto_task = oasis_core::proto::TaskMsg::from(task);
-            let payload = proto_task.encode_to_vec();
+        if let Some(group) = multicast_group.as_deref() {
+            let subject = constants::tasks_group_subject(group);
+            let group_task =
+                Self::build_group_task_message(&batch_id, group, &request, &tasks_and_agents);
+            let payload = group_task.encode_to_vec();
+            let headers = Self::group_publish_headers(&batch_id, group, &payload);
 
-            let headers = Self::task_publish_headers(&task.task_id, &payload);
-
-            // 发布消息，获取 PublishAckFuture（此时消息已发送到 NATS）
-            let ack_future = self
+            let ack = self
                 .jetstream
                 .publish_with_headers(subject, headers, payload.into())
                 .await
                 .map_err(|e| CoreError::Nats {
-                    message: format!("Failed to publish unicast task: {}", e),
+                    message: format!("Failed to publish group task: {}", e),
                     severity: ErrorSeverity::Error,
                 })?;
 
-            ack_futures.push((task.task_id.clone(), ack_future));
-            task_ids.push(task.task_id.clone());
-        }
-
-        // 步骤4: 统一等待所有 ACK 确认
-        for (task_id, ack_future) in ack_futures {
-            ack_future.await.map_err(|e| CoreError::Nats {
-                message: format!("Failed to confirm task {} publish: {}", task_id, e),
+            ack.await.map_err(|e| CoreError::Nats {
+                message: format!(
+                    "Failed to confirm group task publish for batch {} and group {}: {}",
+                    batch_id, group, e
+                ),
                 severity: ErrorSeverity::Error,
             })?;
+
+            task_ids.extend(
+                tasks_and_agents
+                    .iter()
+                    .map(|(task, _)| task.task_id.clone()),
+            );
+            info!(
+                "Batch {} published {} tasks via group multicast subject {}",
+                batch_id,
+                task_ids.len(),
+                group
+            );
+        } else {
+            let mut ack_futures = Vec::with_capacity(tasks_and_agents.len());
+            for (task, agent_id) in &tasks_and_agents {
+                let subject = constants::tasks_unicast_subject(agent_id);
+                let proto_task = oasis_core::proto::TaskMsg::from(task);
+                let payload = proto_task.encode_to_vec();
+
+                let headers = Self::task_publish_headers(&task.task_id, &payload);
+
+                let ack_future = self
+                    .jetstream
+                    .publish_with_headers(subject, headers, payload.into())
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: format!("Failed to publish unicast task: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })?;
+
+                ack_futures.push((task.task_id.clone(), ack_future));
+                task_ids.push(task.task_id.clone());
+            }
+
+            for (task_id, ack_future) in ack_futures {
+                ack_future.await.map_err(|e| CoreError::Nats {
+                    message: format!("Failed to confirm task {} publish: {}", task_id, e),
+                    severity: ErrorSeverity::Error,
+                })?;
+            }
         }
 
         debug!(
@@ -338,15 +451,15 @@ impl TaskService {
 
     /// 发布取消消息
     async fn publish_cancel_message(&self, task_id: &TaskId) -> Result<()> {
-        let task = self
-            .task_monitor
-            .task_cache
-            .get(task_id)
-            .ok_or_else(|| CoreError::NotFound {
-                entity_type: "task".to_string(),
-                entity_id: task_id.to_string(),
-                severity: ErrorSeverity::Error,
-            })?;
+        let task =
+            self.task_monitor
+                .task_cache
+                .get(task_id)
+                .ok_or_else(|| CoreError::NotFound {
+                    entity_type: "task".to_string(),
+                    entity_id: task_id.to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
 
         let agent_id = &task.agent_id;
         let subject = format!("tasks.cancel.agent.{}.{}", agent_id, task_id);
@@ -384,6 +497,7 @@ impl TaskService {
 mod tests {
     use super::*;
     use oasis_core::core_types::{AgentId, BatchId};
+    use std::collections::HashMap;
 
     #[test]
     fn test_mark_task_cancel_requested_only_changes_cancellable_tasks() {
@@ -407,5 +521,85 @@ mod tests {
 
         assert!(!TaskService::mark_task_cancelled(&mut terminal));
         assert_eq!(terminal.state, TaskState::Success);
+    }
+
+    #[test]
+    fn test_extract_multicast_group_matches_exact_group_selector() {
+        let selector = oasis_core::core_types::SelectorExpression::new("\"web\" in groups");
+        assert_eq!(
+            TaskService::extract_multicast_group(&selector),
+            Some("web".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_multicast_group_rejects_complex_selector() {
+        let selector = oasis_core::core_types::SelectorExpression::new(
+            "\"web\" in groups and labels[\"env\"] == \"prod\"",
+        );
+        assert_eq!(TaskService::extract_multicast_group(&selector), None);
+    }
+
+    #[test]
+    fn test_build_group_task_message_preserves_per_agent_task_ids() {
+        let batch_id = BatchId::generate();
+        let request = BatchRequest {
+            command: "uptime".to_string(),
+            args: vec!["--pretty".to_string()],
+            selector: oasis_core::core_types::SelectorExpression::new("\"web\" in groups"),
+            timeout_seconds: 30,
+        };
+
+        let first_agent = AgentId::new("agent-1");
+        let second_agent = AgentId::new("agent-2");
+
+        let mut first_task = Task::new(
+            request.command.clone(),
+            request.args.clone(),
+            request.timeout_seconds,
+        )
+        .with_batch_id(batch_id.clone())
+        .with_agent_id(first_agent.clone());
+        first_task.transition_to(TaskState::Pending).unwrap();
+
+        let mut second_task = Task::new(
+            request.command.clone(),
+            request.args.clone(),
+            request.timeout_seconds,
+        )
+        .with_batch_id(batch_id.clone())
+        .with_agent_id(second_agent.clone());
+        second_task.transition_to(TaskState::Pending).unwrap();
+
+        let group_msg = TaskService::build_group_task_message(
+            &batch_id,
+            "web",
+            &request,
+            &[
+                (first_task.clone(), first_agent.clone()),
+                (second_task.clone(), second_agent.clone()),
+            ],
+        );
+
+        let expected = HashMap::from([
+            (
+                first_agent.as_str().to_string(),
+                first_task.task_id.as_str().to_string(),
+            ),
+            (
+                second_agent.as_str().to_string(),
+                second_task.task_id.as_str().to_string(),
+            ),
+        ]);
+
+        assert_eq!(group_msg.group, "web");
+        assert_eq!(group_msg.command, request.command);
+        assert_eq!(group_msg.args, request.args);
+        assert_eq!(group_msg.timeout_seconds, request.timeout_seconds);
+        assert_eq!(group_msg.agent_task_ids, expected);
+        assert_eq!(
+            group_msg.batch_id.as_ref().map(|id| id.value.as_str()),
+            Some(batch_id.as_str())
+        );
     }
 }

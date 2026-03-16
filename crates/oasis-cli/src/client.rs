@@ -1,15 +1,16 @@
 use crate::commands::agent::{AgentArgs, run_agent};
+use crate::commands::events::{EventsArgs, run_events};
 use crate::commands::exec::ExecArgs;
 use crate::commands::exec::run_exec;
 use crate::commands::file::{FileArgs, run_file};
 use crate::commands::rollout::{RolloutArgs, run_rollout};
 use crate::commands::system::{SystemArgs, run_system};
 use anyhow::{Context, Result};
+use backon::Retryable;
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use console::style;
 use oasis_core::backoff::network_connect_backoff;
-use backon::Retryable;
 use oasis_core::proto::oasis_service_client::OasisServiceClient;
 use std::io;
 use std::time::Duration;
@@ -24,21 +25,35 @@ use tonic::{Code, Status};
     about = "Oasis CLI 大规模集群节点管理命令行工具",
     after_help = r#"示例：
   # 在节点上执行命令
-  oasis-cli exec -t 'labels["environment"] == "prod"' -- /usr/bin/ps aux
-  oasis-cli exec -t "agent-1,agent-2" -- /usr/bin/uptime
-  oasis-cli exec -t "true" -- /usr/bin/uptime
+  oasis-cli exec run -t 'labels["environment"] == "prod"' -- /usr/bin/ps aux
+  oasis-cli exec run -t "agent-1,agent-2" -- /usr/bin/uptime
+  oasis-cli exec get <batch_id>
 
   # 管理文件
   oasis-cli file apply --src ./nginx.conf --dest /etc/nginx/nginx.conf -t 'labels["role"] == "web"'
+  oasis-cli file history --source-path ./nginx.conf
   oasis-cli file clear
+
+  # 查看事件流
+  oasis-cli events tail
+  oasis-cli events tail --subject 'events.file.apply_failed.>'
+
+  # 管理灰度发布
+  oasis-cli rollout create --name "配置更新" --strategy count:2,0 --file-src ./nginx.conf --file-dest /etc/nginx/nginx.conf
+  oasis-cli rollout pause <rollout_id>
 
   # 管理 agent 节点
   oasis-cli agent list --target 'labels["environment"] == "prod"' --verbose
   oasis-cli agent list --target 'labels["role"] == "db"' --verbose
 
+  # 生成 Shell 补全脚本
+  oasis-cli completion zsh
+
 更多用法：
   oasis-cli exec --help
+  oasis-cli events --help
   oasis-cli file --help
+  oasis-cli rollout --help
   oasis-cli agent --help"#
 )]
 pub struct Cli {
@@ -53,6 +68,7 @@ pub struct Cli {
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
     Agent(AgentArgs),
+    Events(EventsArgs),
     Exec(ExecArgs),
     File(FileArgs),
     System(SystemArgs),
@@ -68,6 +84,7 @@ pub enum Commands {
 pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<()> {
     match cli.command {
         Commands::System(args) => run_system(args).await?,
+        Commands::Events(args) => run_events(config, args).await?,
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "oasis-cli", &mut io::stdout());
@@ -82,7 +99,7 @@ pub async fn run(cli: Cli, config: &oasis_core::config::OasisConfig) -> Result<(
                 Commands::File(args) => run_file(client, args).await?,
                 Commands::Agent(args) => run_agent(client, args).await?,
                 Commands::Rollout(args) => run_rollout(client, args).await?,
-                Commands::System(_) | Commands::Completion { .. } => {
+                Commands::System(_) | Commands::Events(_) | Commands::Completion { .. } => {
                     unreachable!()
                 }
             }
@@ -272,7 +289,9 @@ where
     let classifier = std::sync::Arc::new(|e: &Status| is_transient_status(e));
 
     // 使用重试机制处理瞬态错误
-    (op).retry(&network_connect_backoff().build()).when(|e| classifier(e)).await
+    (op).retry(&network_connect_backoff().build())
+        .when(|e| classifier(e))
+        .await
 }
 
 #[macro_export]

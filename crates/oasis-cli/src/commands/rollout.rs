@@ -24,7 +24,9 @@ use std::path::PathBuf;
     --name "系统更新" \
     --target 'labels["role"] == "web"' \
     --strategy percentage:10,30,60,100 \
-    --command "apt update && apt upgrade -y" \
+    --command /bin/sh \
+    --args -lc \
+    --args "apt update && apt upgrade -y" \
     --timeout 300
 
   # 创建文件灰度发布
@@ -48,7 +50,7 @@ use std::path::PathBuf;
   # 恢复发布
   oasis-cli rollout resume rollout-12345678
 
-  # 回滚发布
+  # 回滚发布（命令发布需要提供回滚命令）
   oasis-cli rollout rollback rollout-12345678 --rollback-cmd "systemctl restart nginx"
 "#
 )]
@@ -88,7 +90,7 @@ pub struct CreateArgs {
     /// 灰度策略
     #[arg(
         long,
-        help = "灰度策略: percentage:10,30,100 或 count:2,5,0 或 groups:canary,prod"
+        help = "灰度策略: percentage:10,30,100 或 count:2,5,0"
     )]
     strategy: String,
 
@@ -546,7 +548,7 @@ fn parse_strategy(strategy_str: &str) -> Result<oasis_core::proto::RolloutStrate
         }
     } else {
         Err(anyhow!(
-            "策略格式无效，支持: percentage:10,30,100 或 count:2,5,0 或 groups:canary,prod"
+            "策略格式无效，支持: percentage:10,30,100 或 count:2,5,0"
         ))
     }
 }

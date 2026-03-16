@@ -236,10 +236,12 @@ impl FileManager {
             severity: ErrorSeverity::Error,
         })?;
 
-        kv.put(&key, payload.into()).await.map_err(|e| CoreError::Nats {
-            message: format!("Failed to publish file apply result: {}", e),
-            severity: ErrorSeverity::Error,
-        })?;
+        kv.put(&key, payload.into())
+            .await
+            .map_err(|e| CoreError::Nats {
+                message: format!("Failed to publish file apply result: {}", e),
+                severity: ErrorSeverity::Error,
+            })?;
 
         Ok(())
     }

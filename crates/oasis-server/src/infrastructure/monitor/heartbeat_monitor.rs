@@ -1,7 +1,14 @@
+use crate::infrastructure::services::EventBus;
 use async_nats::jetstream::Context;
 use dashmap::DashMap;
 use futures::StreamExt;
-use oasis_core::{agent_types::AgentStatus, constants::*, core_types::AgentId, error::Result};
+use oasis_core::{
+    agent_types::AgentStatus,
+    constants::*,
+    core_types::AgentId,
+    error::Result,
+    event_types::{OasisEvent, OasisEventKind},
+};
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +58,7 @@ pub struct HeartbeatMonitor {
     /// 心跳超时时间（秒）
     heartbeat_timeout: u64,
     shutdown_token: CancellationToken,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl HeartbeatMonitor {
@@ -65,7 +73,13 @@ impl HeartbeatMonitor {
             status_cache: Arc::new(DashMap::new()),
             heartbeat_timeout,
             shutdown_token,
+            event_bus: None,
         }
+    }
+
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     async fn initial_load(&self) -> Result<()> {
@@ -78,10 +92,13 @@ impl HeartbeatMonitor {
                 severity: oasis_core::error::ErrorSeverity::Error,
             })?;
 
-        let mut keys = store.keys().await.map_err(|e| oasis_core::error::CoreError::Nats {
-            message: format!("Failed to list heartbeat keys: {}", e),
-            severity: oasis_core::error::ErrorSeverity::Error,
-        })?;
+        let mut keys = store
+            .keys()
+            .await
+            .map_err(|e| oasis_core::error::CoreError::Nats {
+                message: format!("Failed to list heartbeat keys: {}", e),
+                severity: oasis_core::error::ErrorSeverity::Error,
+            })?;
 
         while let Some(key) = keys.next().await {
             match key {
@@ -90,8 +107,10 @@ impl HeartbeatMonitor {
                     if let Ok(Some(bytes)) = store.get(&k).await {
                         if let Ok(timestamp_str) = String::from_utf8(bytes.to_vec()) {
                             if let Ok(last_heartbeat) = timestamp_str.parse::<i64>() {
-                                self.status_cache
-                                    .insert(agent_id.clone(), AgentHeartbeatInfo::online(last_heartbeat));
+                                self.status_cache.insert(
+                                    agent_id.clone(),
+                                    AgentHeartbeatInfo::online(last_heartbeat),
+                                );
                             } else {
                                 warn!(
                                     "Invalid heartbeat timestamp for {}: {}",
@@ -146,6 +165,7 @@ impl HeartbeatMonitor {
         let status_cache = self.status_cache.clone();
         let heartbeat_timeout = self.heartbeat_timeout;
         let shutdown_token = self.shutdown_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             info!("Starting periodic heartbeat timeout scanner");
@@ -175,6 +195,15 @@ impl HeartbeatMonitor {
                                     info.updated_at = current_time;
                                     timeout_count += 1;
                                     debug!("Agent {} timed out (age: {}s)", agent_id, age);
+                                    if let Some(event_bus) = &event_bus {
+                                        let event = OasisEvent::new(OasisEventKind::AgentOffline {
+                                            agent_id: agent_id.clone(),
+                                            reason: format!("Heartbeat timed out after {} seconds", age),
+                                        });
+                                        if let Err(e) = event_bus.publish(&event).await {
+                                            warn!("Failed to publish agent offline event: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -199,6 +228,7 @@ impl HeartbeatMonitor {
         let jetstream = self.jetstream.clone();
         let status_cache = self.status_cache.clone();
         let shutdown_token = self.shutdown_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             info!("Starting heartbeat data watcher");
@@ -232,7 +262,7 @@ impl HeartbeatMonitor {
                                 msg = watcher.next() => {
                                     match msg {
                                         Some(Ok(entry)) => {
-                                            Self::handle_heartbeat_change(entry, &status_cache).await;
+                                            Self::handle_heartbeat_change(entry, &status_cache, event_bus.as_ref()).await;
                                         }
                                         Some(Err(e)) => {
                                             warn!("Error watching heartbeat changes: {}", e);
@@ -271,6 +301,7 @@ impl HeartbeatMonitor {
     async fn handle_heartbeat_change(
         entry: async_nats::jetstream::kv::Entry,
         status_cache: &Arc<DashMap<AgentId, AgentHeartbeatInfo>>,
+        event_bus: Option<&Arc<EventBus>>,
     ) {
         let key = entry.key;
 
@@ -281,9 +312,23 @@ impl HeartbeatMonitor {
                 // 心跳更新 - Agent 恢复在线
                 if let Ok(timestamp_str) = String::from_utf8(entry.value.to_vec()) {
                     if let Ok(last_heartbeat) = timestamp_str.parse::<i64>() {
+                        let was_online = status_cache
+                            .get(&agent_id)
+                            .map(|info| matches!(info.status, AgentStatus::Online))
+                            .unwrap_or(false);
                         status_cache
                             .insert(agent_id.clone(), AgentHeartbeatInfo::online(last_heartbeat));
                         debug!("Agent {} heartbeat updated: {}", agent_id, last_heartbeat);
+                        if !was_online {
+                            if let Some(event_bus) = event_bus {
+                                let event = OasisEvent::new(OasisEventKind::AgentOnline {
+                                    agent_id: agent_id.clone(),
+                                });
+                                if let Err(e) = event_bus.publish(&event).await {
+                                    warn!("Failed to publish agent online event: {}", e);
+                                }
+                            }
+                        }
                     } else {
                         warn!(
                             "Invalid heartbeat timestamp for {}: {}",
@@ -301,6 +346,15 @@ impl HeartbeatMonitor {
                     AgentHeartbeatInfo::removed("Explicitly deleted via API".to_string()),
                 );
                 info!("Agent {} explicitly removed from heartbeat store", agent_id);
+                if let Some(event_bus) = event_bus {
+                    let event = OasisEvent::new(OasisEventKind::AgentOffline {
+                        agent_id: agent_id.clone(),
+                        reason: "Explicitly deleted via API".to_string(),
+                    });
+                    if let Err(e) = event_bus.publish(&event).await {
+                        warn!("Failed to publish agent offline event: {}", e);
+                    }
+                }
             }
             async_nats::jetstream::kv::Operation::Purge => {
                 // 清除操作 - 也标记为已移除
@@ -309,6 +363,15 @@ impl HeartbeatMonitor {
                     AgentHeartbeatInfo::removed("Purged from storage".to_string()),
                 );
                 info!("Agent {} purged from heartbeat store", agent_id);
+                if let Some(event_bus) = event_bus {
+                    let event = OasisEvent::new(OasisEventKind::AgentOffline {
+                        agent_id: agent_id.clone(),
+                        reason: "Purged from storage".to_string(),
+                    });
+                    if let Err(e) = event_bus.publish(&event).await {
+                        warn!("Failed to publish agent offline event: {}", e);
+                    }
+                }
             }
         }
     }
@@ -327,6 +390,8 @@ impl HeartbeatMonitor {
     }
 
     pub fn get_agent_heartbeat_info(&self, agent_id: &AgentId) -> Option<AgentHeartbeatInfo> {
-        self.status_cache.get(agent_id).map(|entry| entry.value().clone())
+        self.status_cache
+            .get(agent_id)
+            .map(|entry| entry.value().clone())
     }
 }

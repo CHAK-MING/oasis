@@ -589,9 +589,13 @@ mod tests {
         )
         .await
         .unwrap();
-        FileHandlers::write_chunk(&upload_id, 0, &[1, 2, 3]).await.unwrap();
+        FileHandlers::write_chunk(&upload_id, 0, &[1, 2, 3])
+            .await
+            .unwrap();
 
-        let session = FileHandlers::get(&upload_id).await.expect("session should exist");
+        let session = FileHandlers::get(&upload_id)
+            .await
+            .expect("session should exist");
         assert!(FileHandlers::validate_committable_session(&session).is_err());
         assert!(FileHandlers::get(&upload_id).await.is_some());
 

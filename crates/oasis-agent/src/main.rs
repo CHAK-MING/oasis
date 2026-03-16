@@ -1,6 +1,6 @@
 use oasis_agent::{
-    agent_manager::AgentManager, cert_bootstrap::CertBootstrap,
-    cert_rotation::CertRotationManager, nats_client::ManagedNatsClient,
+    agent_manager::AgentManager, cert_bootstrap::CertBootstrap, cert_rotation::CertRotationManager,
+    nats_client::ManagedNatsClient,
 };
 use oasis_core::{
     config::{NatsConfig, TlsConfig},

@@ -14,7 +14,9 @@ fn main() -> Result<()> {
     // SAFETY: 在 tokio runtime 启动前设置环境变量（单线程安全）
     if std::env::var("CLICOLOR_FORCE").is_err() {
         #[allow(unsafe_code)]
-        unsafe { std::env::set_var("CLICOLOR_FORCE", "1") };
+        unsafe {
+            std::env::set_var("CLICOLOR_FORCE", "1")
+        };
     }
 
     tokio::runtime::Builder::new_multi_thread()

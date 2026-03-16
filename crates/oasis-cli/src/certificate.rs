@@ -1,12 +1,12 @@
 use anyhow::Result;
 use console::style;
+use rand::Rng;
 use rcgen::string::Ia5String;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedKey, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
     SanType,
 };
-use rand::Rng;
 use std::net::IpAddr;
 
 pub struct CertificateGenerator;

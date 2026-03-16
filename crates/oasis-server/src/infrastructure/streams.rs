@@ -1,6 +1,9 @@
 use backon::Retryable;
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
-use oasis_core::{JS_OBJ_ARTIFACTS, JS_STREAM_FILES, JS_STREAM_RESULTS, JS_STREAM_TASKS};
+use oasis_core::{
+    JS_OBJ_ARTIFACTS, JS_STREAM_EVENTS, JS_STREAM_FILES, JS_STREAM_GROUP_TASKS, JS_STREAM_RESULTS,
+    JS_STREAM_TASKS,
+};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -13,6 +16,9 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
     let tasks_max_age_sec = 3600; // 1小时
     let tasks_max_msgs = 10000;
     let tasks_max_bytes = 1024 * 1024 * 100; // 100MB
+    let group_tasks_max_age_sec = 3600; // 1小时
+    let group_tasks_max_msgs = 10000;
+    let group_tasks_max_bytes = 1024 * 1024 * 100; // 100MB
 
     let results_max_age_sec = 86400; // 24小时
     let results_max_msgs = 50000;
@@ -21,6 +27,9 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
     let files_max_age_sec = 3600; // 1小时
     let files_max_msgs = 5000;
     let files_max_bytes = 1024 * 1024 * 50; // 50MB
+    let events_max_age_sec = 7 * 86400; // 7天
+    let events_max_msgs = 100000;
+    let events_max_bytes = 1024 * 1024 * 200; // 200MB
 
     let artifacts_max_age_sec = 2592000; // 30天
     let artifacts_max_bytes = 1024 * 1024 * 1024; // 1GB
@@ -30,7 +39,8 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
     let desired_tasks_cfg = async_nats::jetstream::stream::Config {
         name: JS_STREAM_TASKS.to_string(),
         subjects: vec![
-            "tasks.exec.>".to_string(), // 执行任务 (tasks.exec.default, tasks.exec.agent.<id>)
+            "tasks.exec.default".to_string(),
+            "tasks.exec.agent.>".to_string(),
             "tasks.cancel.>".to_string(), // 取消任务 (tasks.cancel.agent.<id>.<task_id>)
         ],
         retention: async_nats::jetstream::stream::RetentionPolicy::WorkQueue,
@@ -43,6 +53,22 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
         ..Default::default()
     };
     ensure_or_update_stream(js, JS_STREAM_TASKS, desired_tasks_cfg).await?;
+
+    // 组播任务流 - 允许多个 group consumer 各自收到同一条消息
+    info!("Creating/updating group tasks stream...");
+    let desired_group_tasks_cfg = async_nats::jetstream::stream::Config {
+        name: JS_STREAM_GROUP_TASKS.to_string(),
+        subjects: vec!["tasks.exec.group.>".to_string()],
+        retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
+        max_age: Duration::from_secs(group_tasks_max_age_sec),
+        duplicate_window: Duration::from_secs(oasis_core::DUPLICATE_WINDOW_TASKS_SECS),
+        num_replicas: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        max_messages: group_tasks_max_msgs,
+        max_bytes: group_tasks_max_bytes,
+        ..Default::default()
+    };
+    ensure_or_update_stream(js, JS_STREAM_GROUP_TASKS, desired_group_tasks_cfg).await?;
 
     // 结果流 - 任务执行结果
     info!("Creating/updating results stream...");
@@ -75,6 +101,21 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
         ..Default::default()
     };
     ensure_or_update_stream(js, JS_STREAM_FILES, desired_files_cfg).await?;
+
+    info!("Creating/updating events stream...");
+    let desired_events_cfg = async_nats::jetstream::stream::Config {
+        name: JS_STREAM_EVENTS.to_string(),
+        subjects: vec!["events.>".to_string()],
+        retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
+        max_age: Duration::from_secs(events_max_age_sec),
+        duplicate_window: Duration::from_secs(60),
+        num_replicas: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        max_messages: events_max_msgs,
+        max_bytes: events_max_bytes,
+        ..Default::default()
+    };
+    ensure_or_update_stream(js, JS_STREAM_EVENTS, desired_events_cfg).await?;
 
     // 统一确保常用 KV buckets 存在
     ensure_kv_buckets(js).await?;
@@ -129,8 +170,8 @@ pub async fn ensure_streams(js: &async_nats::jetstream::Context) -> Result<()> {
 /// 统一确保常用 KV buckets 存在
 pub async fn ensure_kv_buckets(js: &async_nats::jetstream::Context) -> Result<()> {
     use oasis_core::{
-        JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS,
-        JS_KV_FILE_APPLY_RESULTS, JS_KV_ROLLOUTS,
+        JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, JS_KV_AGENT_LABELS, JS_KV_FILE_APPLY_RESULTS,
+        JS_KV_ROLLOUTS,
     };
     let mut kv_specs: Vec<(String, async_nats::jetstream::kv::Config)> = Vec::new();
 

@@ -291,10 +291,7 @@ async fn run_agent_deploy(
         std::fs::create_dir_all(&certs_dir)?;
         let ca_dst = certs_dir.join("nats-ca.pem");
         std::fs::copy(&ca_src, &ca_dst)?;
-        std::fs::set_permissions(
-            &ca_dst,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )?;
+        std::fs::set_permissions(&ca_dst, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         print_status("复制 NATS CA 证书", true);
     }
 
@@ -1118,8 +1115,14 @@ mod tests {
     fn test_agent_status_text_and_cell_support_degraded_and_removed() {
         assert_eq!(agent_status_text(AgentStatusEnum::AgentDegraded), "降级");
         assert_eq!(agent_status_text(AgentStatusEnum::AgentRemoved), "已移除");
-        assert_eq!(agent_status_cell(AgentStatusEnum::AgentDegraded).content(), "降级");
-        assert_eq!(agent_status_cell(AgentStatusEnum::AgentRemoved).content(), "已移除");
+        assert_eq!(
+            agent_status_cell(AgentStatusEnum::AgentDegraded).content(),
+            "降级"
+        );
+        assert_eq!(
+            agent_status_cell(AgentStatusEnum::AgentRemoved).content(),
+            "已移除"
+        );
     }
 
     #[test]

@@ -4,17 +4,19 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
 
+use crate::interface::grpc::errors::map_core_error;
+use crate::interface::grpc::server::OasisServer;
 use oasis_core::core_types::RolloutId;
 use oasis_core::proto;
 use oasis_core::rollout_types::*;
-use crate::interface::grpc::errors::map_core_error;
-use crate::interface::grpc::server::OasisServer;
 
 pub struct RolloutHandlers;
 
 impl RolloutHandlers {
     fn spawn_auto_advance_loop(
-        rollout_service: std::sync::Arc<crate::infrastructure::services::rollout_service::RolloutService>,
+        rollout_service: std::sync::Arc<
+            crate::infrastructure::services::rollout_service::RolloutService,
+        >,
         task_service: std::sync::Arc<crate::infrastructure::services::task_service::TaskService>,
         file_service: std::sync::Arc<crate::infrastructure::services::file_service::FileService>,
         rollout_id: RolloutId,

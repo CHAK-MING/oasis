@@ -22,9 +22,7 @@ pub struct AgentService {
 impl AgentService {
     fn merge_agent_info_status(
         mut info: AgentInfo,
-        heartbeat: Option<
-            crate::infrastructure::monitor::heartbeat_monitor::AgentHeartbeatInfo,
-        >,
+        heartbeat: Option<crate::infrastructure::monitor::heartbeat_monitor::AgentHeartbeatInfo>,
     ) -> AgentInfo {
         match heartbeat {
             Some(hb_info) => {
@@ -263,7 +261,8 @@ mod tests {
         let mut info = AgentInfo::new(AgentId::new("agent-1"));
         info.status = AgentStatus::Degraded;
 
-        let merged = AgentService::merge_agent_info_status(info, Some(AgentHeartbeatInfo::online(42)));
+        let merged =
+            AgentService::merge_agent_info_status(info, Some(AgentHeartbeatInfo::online(42)));
         assert_eq!(merged.status, AgentStatus::Degraded);
         assert_eq!(merged.last_heartbeat, 42);
     }

@@ -1,5 +1,6 @@
 //! 灰度发布服务
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
+use crate::infrastructure::services::event_bus::EventBus;
 use crate::infrastructure::services::file_service::FileService;
 use crate::infrastructure::services::task_service::TaskService;
 use async_nats::jetstream::Context;
@@ -8,6 +9,7 @@ use futures::StreamExt;
 use oasis_core::constants::JS_KV_ROLLOUTS;
 use oasis_core::core_types::{AgentId, BatchId, OperationId, RolloutId, SelectorExpression};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
+use oasis_core::event_types::{OasisEvent, OasisEventKind};
 use oasis_core::file_types::FileApplyExecution;
 use oasis_core::proto;
 use oasis_core::rollout_types::*;
@@ -21,8 +23,54 @@ use tracing::{error, info, warn};
 pub struct RolloutService {
     jetstream: Arc<Context>,
     task_monitor: Arc<TaskMonitor>,
+    event_bus: Option<Arc<EventBus>>,
     /// 内存中的发布状态缓存
     rollout_cache: Arc<DashMap<RolloutId, RolloutStatus>>,
+}
+
+fn transition_status(status: &mut RolloutStatus, next: RolloutState) {
+    if let Err(error) = status.transition_to(next) {
+        warn!("{error}");
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StageOutcomeEvent {
+    Completed {
+        stage_idx: u64,
+        completed_count: u32,
+        failed_count: u32,
+    },
+    Failed {
+        stage_idx: u64,
+        completed_count: u32,
+        failed_count: u32,
+        reason: Option<String>,
+    },
+}
+
+fn stage_outcome_event(status: &RolloutStatus, stage_idx: usize) -> Option<StageOutcomeEvent> {
+    let stage = status.stages.get(stage_idx)?;
+    let completed_at = stage.completed_at?;
+    let _ = completed_at;
+    let target_count = stage.target_agents.len() as u32;
+    let allowed_failures =
+        allowed_failures_for_target_count(target_count, status.config.max_failure_rate_percent);
+
+    if stage.failed_count > allowed_failures {
+        Some(StageOutcomeEvent::Failed {
+            stage_idx: stage_idx as u64,
+            completed_count: stage.completed_count,
+            failed_count: stage.failed_count,
+            reason: status.error_message.clone(),
+        })
+    } else {
+        Some(StageOutcomeEvent::Completed {
+            stage_idx: stage_idx as u64,
+            completed_count: stage.completed_count,
+            failed_count: stage.failed_count,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -49,7 +97,9 @@ mod tests {
                     revision: 7,
                     owner: None,
                     mode: None,
-                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    target: Some(oasis_core::core_types::SelectorExpression::from(
+                        "all".to_string(),
+                    )),
                     operation_id: Some(OP_ID_1.to_string()),
                 },
             },
@@ -146,7 +196,9 @@ mod tests {
                     revision: 9,
                     owner: None,
                     mode: None,
-                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    target: Some(oasis_core::core_types::SelectorExpression::from(
+                        "all".to_string(),
+                    )),
                     operation_id: Some(OP_ID_1.to_string()),
                 },
             },
@@ -194,7 +246,9 @@ mod tests {
                     revision: 9,
                     owner: None,
                     mode: None,
-                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    target: Some(oasis_core::core_types::SelectorExpression::from(
+                        "all".to_string(),
+                    )),
                     operation_id: Some(OP_ID_1.to_string()),
                 },
             },
@@ -236,14 +290,17 @@ mod tests {
             revision: 20,
             owner: None,
             mode: None,
-            target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+            target: Some(oasis_core::core_types::SelectorExpression::from(
+                "all".to_string(),
+            )),
             operation_id: Some(OP_ID_1.to_string()),
         };
 
         let snapshot = build_file_version_snapshot(file_config, Some(12));
         let SnapshotData::FileSnapshot {
             previous_revision, ..
-        } = snapshot.snapshot_data else {
+        } = snapshot.snapshot_data
+        else {
             panic!("expected file snapshot");
         };
         assert_eq!(previous_revision, Some(12));
@@ -257,7 +314,9 @@ mod tests {
             revision: 20,
             owner: None,
             mode: None,
-            target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+            target: Some(oasis_core::core_types::SelectorExpression::from(
+                "all".to_string(),
+            )),
             operation_id: Some(OP_ID_1.to_string()),
         };
 
@@ -282,8 +341,10 @@ mod tests {
             config,
             vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
         );
-        status.stages[0].version_snapshot = Some(build_file_version_snapshot(file_config.clone(), Some(10)));
-        status.stages[1].version_snapshot = Some(build_file_version_snapshot(file_config, Some(20)));
+        status.stages[0].version_snapshot =
+            Some(build_file_version_snapshot(file_config.clone(), Some(10)));
+        status.stages[1].version_snapshot =
+            Some(build_file_version_snapshot(file_config, Some(20)));
 
         assert_eq!(resolve_file_rollback_revision(&status), Some(10));
     }
@@ -361,7 +422,9 @@ mod tests {
                     revision: 9,
                     owner: None,
                     mode: None,
-                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    target: Some(oasis_core::core_types::SelectorExpression::from(
+                        "all".to_string(),
+                    )),
                     operation_id: Some(OP_ID_1.to_string()),
                 },
             },
@@ -445,6 +508,25 @@ mod tests {
             Some("agent_id in [agent-a]")
         );
         assert_eq!(file_config.operation_id, OP_ID_1);
+    }
+
+    #[test]
+    fn test_normalize_target_agents_sorts_and_deduplicates() {
+        let normalized = RolloutService::normalize_target_agents(vec![
+            AgentId::new("agent-c"),
+            AgentId::new("agent-a"),
+            AgentId::new("agent-b"),
+            AgentId::new("agent-a"),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                AgentId::new("agent-a"),
+                AgentId::new("agent-b"),
+                AgentId::new("agent-c"),
+            ]
+        );
     }
 
     #[test]
@@ -564,7 +646,13 @@ mod tests {
         enforce_stage_timeout(&mut status);
 
         assert_eq!(status.state, RolloutState::Failed);
-        assert!(status.error_message.as_deref().unwrap_or_default().contains("超时"));
+        assert!(
+            status
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("超时")
+        );
     }
 
     #[test]
@@ -581,7 +669,9 @@ mod tests {
                     revision: 7,
                     owner: None,
                     mode: None,
-                    target: Some(oasis_core::core_types::SelectorExpression::from("all".to_string())),
+                    target: Some(oasis_core::core_types::SelectorExpression::from(
+                        "all".to_string(),
+                    )),
                     operation_id: Some(OP_ID_1.to_string()),
                 },
             },
@@ -605,9 +695,95 @@ mod tests {
         assert_eq!(stage.failed_count, 1);
         assert_eq!(status.error_message.as_deref(), Some("dispatch failed"));
     }
+
+    #[test]
+    fn test_stage_outcome_event_marks_completed_stage() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "command rollout".to_string(),
+            target: SelectorExpression::new("all"),
+            strategy: RolloutStrategy::Count { stages: vec![2] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                timeout_seconds: 10,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 50,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.stages[0].completed_at = Some(chrono::Utc::now().timestamp());
+        status.stages[0].completed_count = 2;
+        status.stages[0].failed_count = 0;
+
+        assert_eq!(
+            stage_outcome_event(&status, 0),
+            Some(StageOutcomeEvent::Completed {
+                stage_idx: 0,
+                completed_count: 2,
+                failed_count: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_stage_outcome_event_marks_failed_stage_when_threshold_exceeded() {
+        let config = RolloutConfig {
+            rollout_id: RolloutId::generate(),
+            name: "command rollout".to_string(),
+            target: SelectorExpression::new("all"),
+            strategy: RolloutStrategy::Count { stages: vec![2] },
+            task_type: RolloutTaskType::Command {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                timeout_seconds: 10,
+            },
+            auto_advance: false,
+            advance_interval_seconds: 60,
+            stage_timeout_seconds: 600,
+            max_failure_rate_percent: 0,
+            auto_rollback: false,
+            rollback_command: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        let mut status = RolloutStatus::new(
+            config,
+            vec![AgentId::new("agent-a"), AgentId::new("agent-b")],
+        );
+        status.error_message = Some("threshold exceeded".to_string());
+        status.stages[0].completed_at = Some(chrono::Utc::now().timestamp());
+        status.stages[0].completed_count = 1;
+        status.stages[0].failed_count = 1;
+
+        assert_eq!(
+            stage_outcome_event(&status, 0),
+            Some(StageOutcomeEvent::Failed {
+                stage_idx: 0,
+                completed_count: 1,
+                failed_count: 1,
+                reason: Some("threshold exceeded".to_string()),
+            })
+        );
+    }
 }
 
 impl RolloutService {
+    fn normalize_target_agents(mut all_target_agents: Vec<AgentId>) -> Vec<AgentId> {
+        all_target_agents.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        all_target_agents.dedup_by(|a, b| a.as_str() == b.as_str());
+        all_target_agents
+    }
+
     fn build_stage_selector(target_agents: &[AgentId]) -> String {
         let agent_ids: Vec<String> = target_agents.iter().map(|id| id.to_string()).collect();
         format!("agent_id in [{}]", agent_ids.join(","))
@@ -649,6 +825,7 @@ impl RolloutService {
         let service = Self {
             jetstream,
             task_monitor,
+            event_bus: None,
             rollout_cache: Arc::new(DashMap::new()),
         };
 
@@ -660,19 +837,63 @@ impl RolloutService {
         Ok(service)
     }
 
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
+    }
+
+    async fn publish_stage_outcome_event(
+        &self,
+        rollout_id: &RolloutId,
+        outcome: StageOutcomeEvent,
+    ) {
+        let Some(event_bus) = &self.event_bus else {
+            return;
+        };
+
+        let event = match outcome {
+            StageOutcomeEvent::Completed {
+                stage_idx,
+                completed_count,
+                failed_count,
+            } => OasisEvent::new(OasisEventKind::RolloutStageCompleted {
+                rollout_id: rollout_id.clone(),
+                stage_idx,
+                completed_count,
+                failed_count,
+            }),
+            StageOutcomeEvent::Failed {
+                stage_idx,
+                completed_count,
+                failed_count,
+                reason,
+            } => OasisEvent::new(OasisEventKind::RolloutStageFailed {
+                rollout_id: rollout_id.clone(),
+                stage_idx,
+                completed_count,
+                failed_count,
+                reason,
+            }),
+        };
+
+        if let Err(e) = event_bus.publish(&event).await {
+            warn!("Failed to publish rollout stage event: {}", e);
+        }
+    }
+
     pub async fn advance_once(
         &self,
         rollout_id: &RolloutId,
         task_service: &TaskService,
         file_service: &FileService,
     ) -> Result<()> {
-        let stage_info = self
-            .get_next_stage_info(rollout_id)
-            .await?
-            .ok_or_else(|| CoreError::InvalidTask {
-                reason: "Rollout 已完成所有阶段".to_string(),
-                severity: ErrorSeverity::Error,
-            })?;
+        let stage_info =
+            self.get_next_stage_info(rollout_id)
+                .await?
+                .ok_or_else(|| CoreError::InvalidTask {
+                    reason: "Rollout 已完成所有阶段".to_string(),
+                    severity: ErrorSeverity::Error,
+                })?;
 
         let (target_agents, task_type) = stage_info;
 
@@ -693,29 +914,21 @@ impl RolloutService {
                     .submit_batch(batch_request, target_agents)
                     .await?;
 
-                self.mark_advance_next_stage(
-                    rollout_id,
-                    task_type,
-                    Some(batch_id),
-                    None,
-                )
-                .await
+                self.mark_advance_next_stage(rollout_id, task_type, Some(batch_id), None)
+                    .await
             }
             RolloutTaskType::FileDeployment { config } => {
                 let operation_id = OperationId::generate().to_string();
                 let previous_revision = file_service
                     .current_active_revision(&config.source_path)
                     .await?;
-                let version_snapshot =
-                    Some(build_file_version_snapshot(config.clone(), previous_revision));
+                let version_snapshot = Some(build_file_version_snapshot(
+                    config.clone(),
+                    previous_revision,
+                ));
 
-                self.mark_advance_next_stage(
-                    rollout_id,
-                    task_type.clone(),
-                    None,
-                    version_snapshot,
-                )
-                .await?;
+                self.mark_advance_next_stage(rollout_id, task_type.clone(), None, version_snapshot)
+                    .await?;
 
                 let file_config = Self::build_file_stage_config(
                     config,
@@ -768,9 +981,9 @@ impl RolloutService {
                 let command = rollback_command
                     .or(configured_rollback_command)
                     .ok_or_else(|| CoreError::InvalidTask {
-                    reason: "命令回滚需要提供 rollback_command".to_string(),
-                    severity: ErrorSeverity::Error,
-                })?;
+                        reason: "命令回滚需要提供 rollback_command".to_string(),
+                        severity: ErrorSeverity::Error,
+                    })?;
 
                 let batch_request = BatchRequest {
                     command: command.clone(),
@@ -821,29 +1034,27 @@ impl RolloutService {
                     }
                 };
 
-                let previous_revision = previous_revision.ok_or_else(|| CoreError::InvalidTask {
-                    reason: "缺少 previous_revision，无法回滚".to_string(),
-                    severity: ErrorSeverity::Error,
-                })?;
+                let previous_revision =
+                    previous_revision.ok_or_else(|| CoreError::InvalidTask {
+                        reason: "缺少 previous_revision，无法回滚".to_string(),
+                        severity: ErrorSeverity::Error,
+                    })?;
                 let snapshot_previous_revision = self
                     .rollout_cache
                     .get(rollout_id)
                     .and_then(|status| resolve_file_rollback_revision(status.value()))
                     .unwrap_or(previous_revision);
-                let file_history = file_service.get_file_history(&file_config.source_path).await?;
+                let file_history = file_service
+                    .get_file_history(&file_config.source_path)
+                    .await?;
                 let previous_revision = choose_file_rollback_revision(
                     snapshot_previous_revision,
                     file_config.revision,
                     file_history.as_ref(),
                 );
 
-                self.mark_rollback_stage(
-                    rollout_id,
-                    task_type,
-                    rollback_command,
-                    None,
-                )
-                .await?;
+                self.mark_rollback_stage(rollout_id, task_type, rollback_command, None)
+                    .await?;
 
                 let cfg = Self::build_file_stage_config(
                     &file_config,
@@ -902,7 +1113,7 @@ impl RolloutService {
                 });
             }
 
-            status.state = RolloutState::Paused;
+            transition_status(status, RolloutState::Paused);
             status.current_action = "发布已暂停".to_string();
             status.updated_at = chrono::Utc::now().timestamp();
             self.persist_rollout_to_jetstream(status).await?;
@@ -1018,6 +1229,8 @@ impl RolloutService {
         request: CreateRolloutRequest,
         all_target_agents: Vec<AgentId>,
     ) -> Result<RolloutId> {
+        let all_target_agents = Self::normalize_target_agents(all_target_agents);
+
         // 验证请求
         request.validate().map_err(|e| CoreError::InvalidTask {
             reason: e,
@@ -1233,7 +1446,7 @@ impl RolloutService {
                 }
             };
             status_val.updated_at = chrono::Utc::now().timestamp();
-            status_val.state = RolloutState::Running;
+            transition_status(status_val, RolloutState::Running);
             let current_stage = match status_val.current_stage_status_mut() {
                 Some(stage) => stage,
                 None => {
@@ -1268,7 +1481,7 @@ impl RolloutService {
         if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
             let status_val = status.value_mut();
 
-            status_val.state = RolloutState::RollingBack;
+            transition_status(status_val, RolloutState::RollingBack);
             status_val.updated_at = chrono::Utc::now().timestamp();
             match task_type {
                 RolloutTaskType::Command { .. } => {
@@ -1315,10 +1528,25 @@ impl RolloutService {
     ) -> Result<()> {
         if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
             let status_val = status.value_mut();
+            let stage_idx =
+                result_stage_index(status_val, status_val.state == RolloutState::RollingBack);
+            let previous_completed_at = stage_idx.and_then(|idx| {
+                status_val
+                    .stages
+                    .get(idx)
+                    .and_then(|stage| stage.completed_at)
+            });
             apply_file_stage_result(status_val, results);
             status_val.updated_at = chrono::Utc::now().timestamp();
             if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
                 warn!("Failed to persist file stage result: {}", e);
+            }
+            if let Some(stage_idx) = stage_idx {
+                if previous_completed_at.is_none() {
+                    if let Some(outcome) = stage_outcome_event(status_val, stage_idx) {
+                        self.publish_stage_outcome_event(rollout_id, outcome).await;
+                    }
+                }
             }
             Ok(())
         } else {
@@ -1338,10 +1566,26 @@ impl RolloutService {
     ) -> Result<()> {
         if let Some(mut status) = self.rollout_cache.get_mut(rollout_id) {
             let status_val = status.value_mut();
+            let stage_idx = result_stage_index(status_val, is_rolling_back);
+            let previous_completed_at = stage_idx.and_then(|idx| {
+                status_val
+                    .stages
+                    .get(idx)
+                    .and_then(|stage| stage.completed_at)
+            });
             mark_stage_operation_error(status_val, is_rolling_back, error_message);
             status_val.updated_at = chrono::Utc::now().timestamp();
             if let Err(e) = self.persist_rollout_to_jetstream(status_val).await {
                 warn!("Failed to persist rollout operation error: {}", e);
+            }
+            if !is_rolling_back {
+                if let Some(stage_idx) = stage_idx {
+                    if previous_completed_at.is_none() {
+                        if let Some(outcome) = stage_outcome_event(status_val, stage_idx) {
+                            self.publish_stage_outcome_event(rollout_id, outcome).await;
+                        }
+                    }
+                }
             }
             Ok(())
         } else {
@@ -1366,10 +1610,13 @@ impl RolloutService {
                 });
             }
             if let Some(stage_idx) = rollback_stage_index(&status) {
-                let stage = status.stages.get(stage_idx).ok_or_else(|| CoreError::Internal {
-                    message: format!("Missing rollback stage for rollout {}", rollout_id),
-                    severity: ErrorSeverity::Error,
-                })?;
+                let stage = status
+                    .stages
+                    .get(stage_idx)
+                    .ok_or_else(|| CoreError::Internal {
+                        message: format!("Missing rollback stage for rollout {}", rollout_id),
+                        severity: ErrorSeverity::Error,
+                    })?;
                 return Ok(Some((
                     stage.target_agents.clone(),
                     status.config.task_type.clone(),
@@ -1405,12 +1652,17 @@ impl RolloutService {
 
             // 先确定要更新的阶段
             let is_rolling_back = status.state == RolloutState::RollingBack;
+            let rollout_id = status.config.rollout_id.clone();
 
             // 获取阶段并更新统计信息
             let stage_idx = match result_stage_index(status, is_rolling_back) {
                 Some(idx) => idx,
                 None => return,
             };
+            let previous_completed_at = status
+                .stages
+                .get(stage_idx)
+                .and_then(|stage| stage.completed_at);
 
             if let Some(stage) = status.stages.get_mut(stage_idx) {
                 if let Some(batch_id) = &stage.batch_id {
@@ -1421,7 +1673,9 @@ impl RolloutService {
                                 self.task_monitor.latest_execution_from_cache(&task_id)
                             {
                                 match execution.state {
-                                    TaskState::Running | TaskState::Cancelling => started_count += 1,
+                                    TaskState::Running | TaskState::Cancelling => {
+                                        started_count += 1
+                                    }
                                     TaskState::Success => completed_count += 1,
                                     TaskState::Failed => {
                                         failed_count += 1;
@@ -1468,6 +1722,12 @@ impl RolloutService {
             if let Err(e) = self.persist_rollout_to_jetstream(status).await {
                 error!("Failed to persist status update: {}", e);
             }
+
+            if !is_rolling_back && previous_completed_at.is_none() {
+                if let Some(outcome) = stage_outcome_event(status, stage_idx) {
+                    self.publish_stage_outcome_event(&rollout_id, outcome).await;
+                }
+            }
         }
     }
 
@@ -1502,11 +1762,14 @@ pub(crate) fn mark_stage_operation_error(
     stage.failed_count = stage.target_agents.len() as u32;
     stage.completed_at = Some(chrono::Utc::now().timestamp());
     status.error_message = Some(error_message);
-    status.state = if is_rolling_back {
-        RolloutState::RollbackFailed
-    } else {
-        RolloutState::Failed
-    };
+    transition_status(
+        status,
+        if is_rolling_back {
+            RolloutState::RollbackFailed
+        } else {
+            RolloutState::Failed
+        },
+    );
 }
 
 fn apply_command_stage_result(
@@ -1531,32 +1794,31 @@ fn apply_command_stage_result(
     stage.completed_at = Some(chrono::Utc::now().timestamp());
 
     let target_count = stage.target_agents.len() as u32;
-    let allowed_failures = allowed_failures_for_target_count(target_count, max_failure_rate_percent);
+    let allowed_failures =
+        allowed_failures_for_target_count(target_count, max_failure_rate_percent);
     if failed_count > allowed_failures {
         if is_rolling_back {
-            status.state = RolloutState::RollbackFailed;
+            transition_status(status, RolloutState::RollbackFailed);
         } else {
-            status.state = RolloutState::Failed;
+            transition_status(status, RolloutState::Failed);
             status.error_message = Some(format!(
                 "阶段失败率超过阈值: {}/{} (允许失败数: {})",
-                failed_count,
-                target_count,
-                allowed_failures
+                failed_count, target_count, allowed_failures
             ));
         }
         return;
     }
 
     if is_rolling_back {
-        status.state = RolloutState::RolledBack;
+        transition_status(status, RolloutState::RolledBack);
         return;
     }
 
     status.current_stage_idx += 1;
     if status.current_stage_idx >= status.stages.len() as u64 {
-        status.state = RolloutState::Completed;
+        transition_status(status, RolloutState::Completed);
     } else {
-        status.state = RolloutState::Running;
+        transition_status(status, RolloutState::Running);
     }
 }
 
@@ -1612,34 +1874,36 @@ fn apply_file_stage_result(status: &mut RolloutStatus, results: &[FileApplyExecu
     stage.completed_at = Some(chrono::Utc::now().timestamp());
 
     let target_count = stage.target_agents.len() as u32;
-    let allowed_failures = allowed_failures_for_target_count(target_count, max_failure_rate_percent);
+    let allowed_failures =
+        allowed_failures_for_target_count(target_count, max_failure_rate_percent);
     if failed_count > allowed_failures {
-        status.state = if is_rolling_back {
-            RolloutState::RollbackFailed
-        } else {
-            RolloutState::Failed
-        };
+        transition_status(
+            status,
+            if is_rolling_back {
+                RolloutState::RollbackFailed
+            } else {
+                RolloutState::Failed
+            },
+        );
         if !is_rolling_back {
             status.error_message = Some(format!(
                 "阶段失败率超过阈值: {}/{} (允许失败数: {})",
-                failed_count,
-                target_count,
-                allowed_failures
+                failed_count, target_count, allowed_failures
             ));
         }
         return;
     }
 
     if is_rolling_back {
-        status.state = RolloutState::RolledBack;
+        transition_status(status, RolloutState::RolledBack);
         return;
     }
 
     status.current_stage_idx += 1;
     if status.current_stage_idx >= status.stages.len() as u64 {
-        status.state = RolloutState::Completed;
+        transition_status(status, RolloutState::Completed);
     } else {
-        status.state = RolloutState::Running;
+        transition_status(status, RolloutState::Running);
     }
 }
 
@@ -1717,11 +1981,14 @@ fn resume_rollout_state(status: &mut RolloutStatus) {
         .and_then(|stage| stage.started_at)
         .is_some();
 
-    status.state = if has_started_current_stage {
-        RolloutState::Running
-    } else {
-        RolloutState::Created
-    };
+    transition_status(
+        status,
+        if has_started_current_stage {
+            RolloutState::Running
+        } else {
+            RolloutState::Created
+        },
+    );
     status.current_action = "恢复发布".to_string();
 }
 
@@ -1748,11 +2015,8 @@ fn enforce_stage_timeout(status: &mut RolloutStatus) -> bool {
 
     stage.completed_at = Some(now);
     stage.failed_count = stage.target_agents.len() as u32;
-    status.state = RolloutState::Failed;
-    status.error_message = Some(format!(
-        "阶段执行超时，超过 {} 秒",
-        stage_timeout_seconds
-    ));
+    transition_status(status, RolloutState::Failed);
+    status.error_message = Some(format!("阶段执行超时，超过 {} 秒", stage_timeout_seconds));
     true
 }
 

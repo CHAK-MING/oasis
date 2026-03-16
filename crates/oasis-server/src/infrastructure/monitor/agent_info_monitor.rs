@@ -10,8 +10,8 @@ use oasis_core::{
 };
 use prost::Message;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

@@ -1,7 +1,9 @@
 // JetStream 资源命名（避免使用不被支持的字符，如 '.' 和 '_'）
 pub const JS_STREAM_TASKS: &str = "OASIS-TASKS"; // subjects: tasks.exec.>
+pub const JS_STREAM_GROUP_TASKS: &str = "OASIS-GROUP-TASKS"; // subjects: tasks.exec.group.>
 pub const JS_STREAM_RESULTS: &str = "OASIS-RESULTS"; // subjects: results.>
 pub const JS_STREAM_FILES: &str = "OASIS-FILES"; // subjects: files.>
+pub const JS_STREAM_EVENTS: &str = "OASIS-EVENTS"; // subjects: events.>
 
 // KV 存储结构
 pub const JS_KV_AGENT_INFOS: &str = "OASIS-AGENT-INFOS"; // facts (版本化，非TTL)
@@ -173,6 +175,11 @@ pub fn tasks_unicast_subject(agent_id: &AgentId) -> String {
     format!("tasks.exec.agent.{agent_id}")
 }
 
+/// 指定 group 的组播 subject
+pub fn tasks_group_subject(group: &str) -> String {
+    format!("tasks.exec.group.{group}")
+}
+
 /// 生成默认工作队列消费者名称（共享）
 /// 注意：默认消费者是共享的，在工作队列流上同一个 subject 只能有一个消费者
 pub fn default_consumer_name() -> &'static str {
@@ -186,6 +193,21 @@ pub fn unicast_consumer_name(agent_id: &AgentId) -> String {
         UNICAST_CONSUMER_PREFIX,
         UNICAST_CONSUMER_PREFIX_VERSION,
         agent_id.as_str()
+    )
+}
+
+/// 生成 group 消费者名称（每个 Agent+Group 独立）
+pub fn group_consumer_name(agent_id: &AgentId, group: &str) -> String {
+    use regex::Regex;
+    static RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9-]").unwrap());
+    let normalized_group = RE.replace_all(group, "-");
+    format!(
+        "{}group-{}-{}-{}",
+        UNICAST_CONSUMER_PREFIX,
+        UNICAST_CONSUMER_PREFIX_VERSION,
+        agent_id.as_str(),
+        normalized_group.trim_matches('-')
     )
 }
 

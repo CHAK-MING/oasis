@@ -134,10 +134,11 @@ impl CaService {
         })?;
         let ca_cert_der = ca_pem.contents().to_vec();
 
-        let (_, ca_x509) = X509Certificate::from_der(&ca_cert_der).map_err(|e| CoreError::Internal {
-            message: format!("Failed to parse CA cert DER: {e}"),
-            severity: ErrorSeverity::Critical,
-        })?;
+        let (_, ca_x509) =
+            X509Certificate::from_der(&ca_cert_der).map_err(|e| CoreError::Internal {
+                message: format!("Failed to parse CA cert DER: {e}"),
+                severity: ErrorSeverity::Critical,
+            })?;
 
         let (dn, _) = build_dn_from_x509_subject(&ca_x509);
 
@@ -156,7 +157,9 @@ impl CaService {
             ca_issuer,
             ca_cert_pem,
             ca_cert_der,
-            token_store: Arc::new(RwLock::new(Self::load_token_store(&token_store_path).await?)),
+            token_store: Arc::new(RwLock::new(
+                Self::load_token_store(&token_store_path).await?,
+            )),
             token_store_path,
             enrollment_store: Arc::new(RwLock::new(
                 Self::load_enrollment_store(&enrollment_store_path).await?,
@@ -242,13 +245,18 @@ impl CaService {
                 }
             };
 
-            if let Err(e) = self.validate_renewal(&request.agent_id, &request.csr_pem, current_cert_pem) {
+            if let Err(e) =
+                self.validate_renewal(&request.agent_id, &request.csr_pem, current_cert_pem)
+            {
                 error!(error = %e, "Invalid renewal request");
                 return CsrResponse::error(format!("Invalid renewal request: {e}"));
             }
         }
 
-        match self.issue_certificate_for_agent(&request.agent_id, &request.csr_pem).await {
+        match self
+            .issue_certificate_for_agent(&request.agent_id, &request.csr_pem)
+            .await
+        {
             Ok((cert_pem, expires_at)) => {
                 info!(agent_id = %request.agent_id.as_str(), "Issued certificate");
                 CsrResponse::success(cert_pem, self.ca_cert_pem.clone(), expires_at)
@@ -260,7 +268,11 @@ impl CaService {
         }
     }
 
-    async fn issue_certificate_for_agent(&self, agent_id: &AgentId, csr_pem: &str) -> Result<(String, i64)> {
+    async fn issue_certificate_for_agent(
+        &self,
+        agent_id: &AgentId,
+        csr_pem: &str,
+    ) -> Result<(String, i64)> {
         let mut csr_params = CertificateSigningRequestParams::from_pem(csr_pem).map_err(|e| {
             CoreError::Internal {
                 message: format!("Failed to parse CSR: {e}"),
@@ -281,12 +293,13 @@ impl CaService {
         );
         csr_params.params.distinguished_name = dn;
 
-        csr_params.params.subject_alt_names = vec![SanType::URI(uri_san.try_into().map_err(|_| {
-            CoreError::Internal {
-                message: "Invalid URI SAN".to_string(),
-                severity: ErrorSeverity::Error,
-            }
-        })?)];
+        csr_params.params.subject_alt_names =
+            vec![SanType::URI(uri_san.try_into().map_err(|_| {
+                CoreError::Internal {
+                    message: "Invalid URI SAN".to_string(),
+                    severity: ErrorSeverity::Error,
+                }
+            })?)];
 
         csr_params.params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
@@ -302,28 +315,37 @@ impl CaService {
         csr_params.params.not_after = not_after;
         csr_params.params.use_authority_key_identifier_extension = true;
 
-        let cert = csr_params.signed_by(&self.ca_issuer).map_err(|e| CoreError::Internal {
-            message: format!("Failed to sign certificate: {e}"),
-            severity: ErrorSeverity::Error,
-        })?;
+        let cert = csr_params
+            .signed_by(&self.ca_issuer)
+            .map_err(|e| CoreError::Internal {
+                message: format!("Failed to sign certificate: {e}"),
+                severity: ErrorSeverity::Error,
+            })?;
 
         let cert_pem = cert.pem();
         Ok((cert_pem, not_after.unix_timestamp()))
     }
 
-    fn validate_renewal(&self, claimed_agent_id: &AgentId, csr_pem: &str, current_cert_pem: &str) -> Result<()> {
-        let current_pem = ::pem::parse(current_cert_pem.as_bytes()).map_err(|e| CoreError::Internal {
-            message: format!("Failed to parse current cert PEM: {e}"),
-            severity: ErrorSeverity::Error,
-        })?;
+    fn validate_renewal(
+        &self,
+        claimed_agent_id: &AgentId,
+        csr_pem: &str,
+        current_cert_pem: &str,
+    ) -> Result<()> {
+        let current_pem =
+            ::pem::parse(current_cert_pem.as_bytes()).map_err(|e| CoreError::Internal {
+                message: format!("Failed to parse current cert PEM: {e}"),
+                severity: ErrorSeverity::Error,
+            })?;
         let current_cert_der = current_pem.contents().to_vec();
 
         verify_with_webpki(&current_cert_der, &self.ca_cert_der)?;
 
-        let (_, current_cert) = X509Certificate::from_der(&current_cert_der).map_err(|e| CoreError::Internal {
-            message: format!("Failed to parse current cert DER: {e}"),
-            severity: ErrorSeverity::Error,
-        })?;
+        let (_, current_cert) =
+            X509Certificate::from_der(&current_cert_der).map_err(|e| CoreError::Internal {
+                message: format!("Failed to parse current cert DER: {e}"),
+                severity: ErrorSeverity::Error,
+            })?;
 
         let agent_id_from_cert = extract_agent_id_from_cert(&current_cert)?;
         if &agent_id_from_cert != claimed_agent_id {
@@ -338,10 +360,11 @@ impl CaService {
             severity: ErrorSeverity::Error,
         })?;
         let csr_der = csr_pem.contents().to_vec();
-        let (_, csr) = X509CertificationRequest::from_der(&csr_der).map_err(|e| CoreError::Internal {
-            message: format!("Failed to parse CSR DER: {e}"),
-            severity: ErrorSeverity::Error,
-        })?;
+        let (_, csr) =
+            X509CertificationRequest::from_der(&csr_der).map_err(|e| CoreError::Internal {
+                message: format!("Failed to parse CSR DER: {e}"),
+                severity: ErrorSeverity::Error,
+            })?;
 
         let csr_pubkey = csr.certification_request_info.subject_pki.raw;
         let cert_pubkey = current_cert.public_key().raw;
@@ -367,10 +390,12 @@ impl CaService {
     }
 
     fn enrollment_pepper(&self) -> Result<&str> {
-        self.enrollment_master_secret.as_deref().ok_or_else(|| CoreError::Config {
-            message: "Enrollment secret is not configured on the server".to_string(),
-            severity: ErrorSeverity::Error,
-        })
+        self.enrollment_master_secret
+            .as_deref()
+            .ok_or_else(|| CoreError::Config {
+                message: "Enrollment secret is not configured on the server".to_string(),
+                severity: ErrorSeverity::Error,
+            })
     }
 
     fn hash_enrollment_secret(&self, secret: &str) -> Result<String> {
@@ -440,10 +465,12 @@ impl CaService {
 
     async fn persist_enrollment_store(&self, store: &EnrollmentSecretStore) -> Result<()> {
         if let Some(parent) = self.enrollment_store_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| CoreError::Io {
-                message: format!("Failed to create enrollment secret store directory: {e}"),
-                severity: ErrorSeverity::Critical,
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| CoreError::Io {
+                    message: format!("Failed to create enrollment secret store directory: {e}"),
+                    severity: ErrorSeverity::Critical,
+                })?;
         }
 
         let bytes = serde_json::to_vec_pretty(store).map_err(|e| CoreError::Internal {
@@ -474,10 +501,12 @@ impl CaService {
 
     async fn persist_token_store(&self, store: &TokenStore) -> Result<()> {
         if let Some(parent) = self.token_store_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| CoreError::Io {
-                message: format!("Failed to create bootstrap token store directory: {e}"),
-                severity: ErrorSeverity::Critical,
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| CoreError::Io {
+                    message: format!("Failed to create bootstrap token store directory: {e}"),
+                    severity: ErrorSeverity::Critical,
+                })?;
         }
 
         let bytes = serde_json::to_vec_pretty(store).map_err(|e| CoreError::Internal {
@@ -591,14 +620,20 @@ fn build_dn_from_x509_subject(cert: &X509Certificate<'_>) -> (DistinguishedName,
                 dn.push(DnType::CommonName, DnValue::Utf8String(value.to_string()));
                 has_any = true;
             } else if *oid == oid_registry::OID_X509_ORGANIZATION_NAME {
-                dn.push(DnType::OrganizationName, DnValue::Utf8String(value.to_string()));
+                dn.push(
+                    DnType::OrganizationName,
+                    DnValue::Utf8String(value.to_string()),
+                );
                 has_any = true;
             }
         }
     }
 
     if !has_any {
-        dn.push(DnType::CommonName, DnValue::Utf8String("Oasis CA".to_string()));
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String("Oasis CA".to_string()),
+        );
     }
 
     (dn, has_any)
@@ -628,10 +663,11 @@ fn validate_csr_sig_alg(csr_pem: &str) -> Result<()> {
         severity: ErrorSeverity::Error,
     })?;
 
-    let (_, csr) = X509CertificationRequest::from_der(pem.contents()).map_err(|e| CoreError::Internal {
-        message: format!("Failed to parse CSR DER: {e}"),
-        severity: ErrorSeverity::Error,
-    })?;
+    let (_, csr) =
+        X509CertificationRequest::from_der(pem.contents()).map_err(|e| CoreError::Internal {
+            message: format!("Failed to parse CSR DER: {e}"),
+            severity: ErrorSeverity::Error,
+        })?;
 
     let algo = csr.signature_algorithm.algorithm;
     let allowed = [
@@ -686,10 +722,10 @@ fn verify_with_webpki(end_entity_der: &[u8], ca_der: &[u8]) -> Result<()> {
     let anchors = webpki::TlsClientTrustAnchors(&anchors);
 
     cert.verify_is_valid_tls_client_cert(supported_sig_algs, &anchors, &[], now)
-    .map_err(|e| CoreError::Internal {
-        message: format!("Certificate verification failed: {e:?}"),
-        severity: ErrorSeverity::Error,
-    })?;
+        .map_err(|e| CoreError::Internal {
+            message: format!("Certificate verification failed: {e:?}"),
+            severity: ErrorSeverity::Error,
+        })?;
 
     Ok(())
 }
@@ -698,8 +734,8 @@ fn verify_with_webpki(end_entity_der: &[u8], ca_der: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use oasis_core::csr_types::CsrGenerator;
+    use rcgen::{BasicConstraints, IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256};
     use tempfile::tempdir;
-    use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, IsCa, BasicConstraints, KeyUsagePurpose};
 
     fn now_timestamp() -> i64 {
         SystemTime::now()
@@ -710,44 +746,59 @@ mod tests {
 
     async fn create_test_ca() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let temp_dir = tempdir().unwrap();
-        
+
         let mut ca_params = CertificateParams::default();
-        ca_params.distinguished_name.push(DnType::CommonName, "Test CA");
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Test CA");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,
             KeyUsagePurpose::DigitalSignature,
         ];
-        
+
         let ca_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let ca_cert = ca_params.self_signed(&ca_key_pair).unwrap();
-        
+
         let ca_cert_path = temp_dir.path().join("ca.pem");
         let ca_key_path = temp_dir.path().join("ca-key.pem");
-        
-        tokio::fs::write(&ca_cert_path, ca_cert.pem()).await.unwrap();
-        tokio::fs::write(&ca_key_path, ca_key_pair.serialize_pem()).await.unwrap();
-        
+
+        tokio::fs::write(&ca_cert_path, ca_cert.pem())
+            .await
+            .unwrap();
+        tokio::fs::write(&ca_key_path, ca_key_pair.serialize_pem())
+            .await
+            .unwrap();
+
         (temp_dir, ca_cert_path, ca_key_path)
     }
 
     #[tokio::test]
     async fn test_ca_service_new() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        
+
         let result = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await;
-        assert!(result.is_ok(), "Failed to create CA Service: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to create CA Service: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
     async fn test_create_bootstrap_token() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent");
-        let token = ca_service.create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600)).await.unwrap();
-        
+        let token = ca_service
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         assert!(!token.token.is_empty());
         assert_eq!(token.agent_id, agent_id);
         assert!(token.is_valid());
@@ -762,7 +813,9 @@ mod tests {
             .await
             .unwrap();
 
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let secret = ca_service
             .create_enrollment_secret(&AgentId::new("deploy-agent"))
             .await
@@ -779,20 +832,35 @@ mod tests {
             .await
             .unwrap();
 
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let agent_id = AgentId::new("rotate-agent");
-        let first = ca_service.create_enrollment_secret(&agent_id).await.unwrap();
-        let second = ca_service.create_enrollment_secret(&agent_id).await.unwrap();
+        let first = ca_service
+            .create_enrollment_secret(&agent_id)
+            .await
+            .unwrap();
+        let second = ca_service
+            .create_enrollment_secret(&agent_id)
+            .await
+            .unwrap();
 
-        assert_ne!(first, second, "newly issued enrollment secret should rotate");
-        assert!(ca_service
-            .validate_enrollment_secret(&agent_id, &second)
-            .await
-            .is_ok());
-        assert!(ca_service
-            .validate_enrollment_secret(&agent_id, &first)
-            .await
-            .is_err());
+        assert_ne!(
+            first, second,
+            "newly issued enrollment secret should rotate"
+        );
+        assert!(
+            ca_service
+                .validate_enrollment_secret(&agent_id, &second)
+                .await
+                .is_ok()
+        );
+        assert!(
+            ca_service
+                .validate_enrollment_secret(&agent_id, &first)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -804,14 +872,20 @@ mod tests {
             .unwrap();
 
         let agent_id = AgentId::new("persist-enroll-agent");
-        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let secret = first.create_enrollment_secret(&agent_id).await.unwrap();
 
-        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        assert!(second
-            .validate_enrollment_secret(&agent_id, &secret)
+        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
             .await
-            .is_ok());
+            .unwrap();
+        assert!(
+            second
+                .validate_enrollment_secret(&agent_id, &secret)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -822,7 +896,9 @@ mod tests {
             .await
             .unwrap();
 
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let agent_id = AgentId::new("expired-enroll-agent");
         let secret = ca_service
             .create_enrollment_secret_with_ttl(&agent_id, 1)
@@ -830,146 +906,219 @@ mod tests {
             .unwrap();
         tokio::time::sleep(StdDuration::from_secs(2)).await;
 
-        assert!(ca_service
-            .validate_enrollment_secret(&agent_id, &secret)
-            .await
-            .is_err());
+        assert!(
+            ca_service
+                .validate_enrollment_secret(&agent_id, &secret)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_handle_csr_request_with_valid_token() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-001");
-        let token = ca_service.create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600)).await.unwrap();
-        
+        let token = ca_service
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id).unwrap();
-        
+
         let request = CsrRequest {
             agent_id: agent_id.clone(),
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response = ca_service.handle_csr_request(request).await;
-        
+
         assert!(response.success, "Response should be successful");
-        assert!(response.certificate_pem.is_some(), "Certificate should be present");
-        assert!(response.ca_certificate_pem.is_some(), "CA certificate should be present");
-        assert!(response.expires_at.is_some(), "Expiration time should be present");
-        assert!(response.error_message.is_none(), "No error message should be present");
+        assert!(
+            response.certificate_pem.is_some(),
+            "Certificate should be present"
+        );
+        assert!(
+            response.ca_certificate_pem.is_some(),
+            "CA certificate should be present"
+        );
+        assert!(
+            response.expires_at.is_some(),
+            "Expiration time should be present"
+        );
+        assert!(
+            response.error_message.is_none(),
+            "No error message should be present"
+        );
     }
 
     #[tokio::test]
     async fn test_handle_csr_request_with_invalid_token() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-002");
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id).unwrap();
-        
+
         let request = CsrRequest {
             agent_id,
             csr_pem,
             bootstrap_token: Some("invalid-token-12345".to_string()),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response = ca_service.handle_csr_request(request).await;
-        
+
         assert!(!response.success, "Response should fail");
-        assert!(response.error_message.is_some(), "Error message should be present");
-        assert!(response.certificate_pem.is_none(), "No certificate should be issued");
+        assert!(
+            response.error_message.is_some(),
+            "Error message should be present"
+        );
+        assert!(
+            response.certificate_pem.is_none(),
+            "No certificate should be issued"
+        );
     }
 
     #[tokio::test]
     async fn test_handle_csr_request_with_agent_id_mismatch() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id_1 = AgentId::new("agent-1");
         let agent_id_2 = AgentId::new("agent-2");
-        
-        let token = ca_service.create_bootstrap_token(agent_id_1, StdDuration::from_secs(3600)).await.unwrap();
-        
+
+        let token = ca_service
+            .create_bootstrap_token(agent_id_1, StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id_2).unwrap();
-        
+
         let request = CsrRequest {
             agent_id: agent_id_2,
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response = ca_service.handle_csr_request(request).await;
-        
-        assert!(!response.success, "Response should fail due to agent ID mismatch");
+
+        assert!(
+            !response.success,
+            "Response should fail due to agent ID mismatch"
+        );
         assert!(response.error_message.unwrap().contains("mismatch"));
     }
 
     #[tokio::test]
     async fn test_token_consumed_after_use() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-003");
-        let token = ca_service.create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600)).await.unwrap();
-        
+        let token = ca_service
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id).unwrap();
-        
+
         let request1 = CsrRequest {
             agent_id: agent_id.clone(),
             csr_pem: csr_pem.clone(),
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response1 = ca_service.handle_csr_request(request1).await;
         assert!(response1.success, "First request should succeed");
-        
+
         let request2 = CsrRequest {
             agent_id,
             csr_pem,
             bootstrap_token: Some(token.token.clone()),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response2 = ca_service.handle_csr_request(request2).await;
-        assert!(!response2.success, "Second request with same token should fail");
+        assert!(
+            !response2.success,
+            "Second request with same token should fail"
+        );
     }
 
     #[tokio::test]
     async fn test_cleanup_expired_tokens() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-004");
-        let _expired_token = ca_service.create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(0)).await.unwrap();
-        let valid_token = ca_service.create_bootstrap_token(agent_id, StdDuration::from_secs(3600)).await.unwrap();
-        
+        let _expired_token = ca_service
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(0))
+            .await
+            .unwrap();
+        let valid_token = ca_service
+            .create_bootstrap_token(agent_id, StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         tokio::time::sleep(StdDuration::from_millis(100)).await;
-        
+
         ca_service.cleanup_expired_tokens().await;
-        
+
         let token_store = ca_service.token_store.read().await;
-        assert_eq!(token_store.tokens.len(), 1, "Should have only 1 valid token");
-        assert!(token_store.tokens.contains_key(&valid_token.token), "Valid token should still exist");
+        assert_eq!(
+            token_store.tokens.len(),
+            1,
+            "Should have only 1 valid token"
+        );
+        assert!(
+            token_store.tokens.contains_key(&valid_token.token),
+            "Valid token should still exist"
+        );
     }
 
     #[tokio::test]
@@ -977,17 +1126,24 @@ mod tests {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
         let agent_id = AgentId::new("persisted-agent");
 
-        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let first = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let token = first
             .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
             .await
             .unwrap();
 
-        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let second = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
 
         let request = CsrRequest {
             agent_id,
-            csr_pem: CsrGenerator::new().unwrap().generate_csr(&AgentId::new("persisted-agent")).unwrap(),
+            csr_pem: CsrGenerator::new()
+                .unwrap()
+                .generate_csr(&AgentId::new("persisted-agent"))
+                .unwrap(),
             bootstrap_token: Some(token.token),
             current_cert_pem: None,
             enrollment_secret: None,
@@ -995,7 +1151,10 @@ mod tests {
         };
 
         let response = second.handle_csr_request(request).await;
-        assert!(response.success, "persisted bootstrap token should remain valid after restart");
+        assert!(
+            response.success,
+            "persisted bootstrap token should remain valid after restart"
+        );
     }
 
     #[tokio::test]
@@ -1006,7 +1165,9 @@ mod tests {
             .await
             .unwrap();
 
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let agent_id = AgentId::new("reenroll-agent");
         let generator = CsrGenerator::new().unwrap();
         let enrollment_secret = ca_service
@@ -1016,7 +1177,9 @@ mod tests {
 
         let request = CsrRequest {
             agent_id,
-            csr_pem: generator.generate_csr(&AgentId::new("reenroll-agent")).unwrap(),
+            csr_pem: generator
+                .generate_csr(&AgentId::new("reenroll-agent"))
+                .unwrap(),
             bootstrap_token: None,
             current_cert_pem: None,
             enrollment_secret: Some(enrollment_secret),
@@ -1024,7 +1187,10 @@ mod tests {
         };
 
         let response = ca_service.handle_csr_request(request).await;
-        assert!(response.success, "valid enrollment secret should issue certificate");
+        assert!(
+            response.success,
+            "valid enrollment secret should issue certificate"
+        );
     }
 
     #[tokio::test]
@@ -1035,7 +1201,9 @@ mod tests {
             .await
             .unwrap();
 
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
         let agent_id = AgentId::new("stale-reenroll-agent");
         let generator = CsrGenerator::new().unwrap();
         let enrollment_secret = ca_service
@@ -1055,45 +1223,53 @@ mod tests {
         };
 
         let response = ca_service.handle_csr_request(request).await;
-        assert!(!response.success, "stale enrollment request should be rejected");
-        assert!(response
-            .error_message
-            .unwrap()
-            .contains("timestamp"));
+        assert!(
+            !response.success,
+            "stale enrollment request should be rejected"
+        );
+        assert!(response.error_message.unwrap().contains("timestamp"));
     }
 
     #[tokio::test]
     async fn test_issued_certificate_has_correct_properties() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-005");
-        let token = ca_service.create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600)).await.unwrap();
-        
+        let token = ca_service
+            .create_bootstrap_token(agent_id.clone(), StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id).unwrap();
-        
+
         let request = CsrRequest {
             agent_id: agent_id.clone(),
             csr_pem,
             bootstrap_token: Some(token.token),
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response = ca_service.handle_csr_request(request).await;
         assert!(response.success);
-        
+
         let cert_pem = response.certificate_pem.unwrap();
         assert!(cert_pem.contains("-----BEGIN CERTIFICATE-----"));
         assert!(cert_pem.contains("-----END CERTIFICATE-----"));
-        
+
         let pem = ::pem::parse(cert_pem.as_bytes()).unwrap();
         let (_, cert) = X509Certificate::from_der(pem.contents()).unwrap();
-        
+
         assert!(!cert.is_ca());
-        
+
         let agent_id_from_cert = extract_agent_id_from_cert(&cert).unwrap();
         assert_eq!(agent_id_from_cert, agent_id);
     }
@@ -1101,24 +1277,37 @@ mod tests {
     #[tokio::test]
     async fn test_handle_csr_request_without_token_requires_current_cert() {
         let (_temp_dir, ca_cert_path, ca_key_path) = create_test_ca().await;
-        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365).await.unwrap();
-        
+        let ca_service = CaService::new(&ca_cert_path, &ca_key_path, 24 * 365)
+            .await
+            .unwrap();
+
         let agent_id = AgentId::new("test-agent-006");
         let generator = CsrGenerator::new().unwrap();
         let csr_pem = generator.generate_csr(&agent_id).unwrap();
-        
+
         let request = CsrRequest {
             agent_id,
             csr_pem,
             bootstrap_token: None,
             current_cert_pem: None,
             enrollment_secret: None,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         };
-        
+
         let response = ca_service.handle_csr_request(request).await;
-        
-        assert!(!response.success, "Request without token or current cert should fail");
-        assert!(response.error_message.unwrap().contains("current certificate"));
+
+        assert!(
+            !response.success,
+            "Request without token or current cert should fail"
+        );
+        assert!(
+            response
+                .error_message
+                .unwrap()
+                .contains("current certificate")
+        );
     }
 }

@@ -3,7 +3,7 @@ use crate::infrastructure::monitor::agent_info_monitor::AgentInfoMonitor;
 use crate::infrastructure::monitor::heartbeat_monitor::HeartbeatMonitor;
 use crate::infrastructure::monitor::task_monitor::TaskMonitor;
 use crate::infrastructure::services::{
-    AgentService, CaService, FileService, RolloutService, TaskService,
+    AgentService, CaService, EventBus, FileService, RolloutService, TaskService,
 };
 use crate::{
     infrastructure::lifecycle::LifecycleManager, interface::server_manager::GrpcServerManager,
@@ -74,15 +74,20 @@ impl Bootstrap {
         crate::infrastructure::streams::ensure_streams(&jetstream).await?;
         debug!("JetStream streams and KV buckets ensured");
 
+        let event_bus = Arc::new(EventBus::new(jetstream.clone()));
+
         // 5. 启动监控服务
         // 启动任务结果监听，并注册到生命周期管理器，设置到TaskService
 
         // 启动心跳监控
-        let heartbeat_monitor = Arc::new(HeartbeatMonitor::new(
-            jetstream.clone(),
-            config.server.heartbeat_ttl_sec,
-            lifecycle_manager.shutdown_token(),
-        ));
+        let heartbeat_monitor = Arc::new(
+            HeartbeatMonitor::new(
+                jetstream.clone(),
+                config.server.heartbeat_ttl_sec,
+                lifecycle_manager.shutdown_token(),
+            )
+            .with_event_bus(event_bus.clone()),
+        );
         let heartbeat_monitor_handle = heartbeat_monitor.clone().spawn();
 
         // 启动 AgentInfo 监控
@@ -182,17 +187,21 @@ impl Bootstrap {
             .register_low_priority_service("ca_token_cleanup".to_string(), ca_cleanup_handle);
 
         // 启动 TaskMonitor
-        let task_monitor = Arc::new(TaskMonitor::new(
-            jetstream.clone(),
-            lifecycle_manager.shutdown_token(),
-        ));
+        let task_monitor = Arc::new(
+            TaskMonitor::new(jetstream.clone(), lifecycle_manager.shutdown_token())
+                .with_event_bus(event_bus.clone()),
+        );
         let task_monitor_handle = task_monitor.clone().spawn();
 
         let task_service =
             Arc::new(TaskService::new(jetstream.clone(), task_monitor.clone()).await?);
         debug!("TaskService initialized");
 
-        let file_service = Arc::new(FileService::new(jetstream.clone()).await?);
+        let file_service = Arc::new(
+            FileService::new(jetstream.clone())
+                .await?
+                .with_event_bus(event_bus.clone()),
+        );
         debug!("FileService initialized");
 
         let agent_service = Arc::new(AgentService::new(
@@ -203,8 +212,11 @@ impl Bootstrap {
         ));
         debug!("AgentService initialized");
 
-        let rollout_service =
-            Arc::new(RolloutService::new(jetstream.clone(), task_monitor.clone()).await?);
+        let rollout_service = Arc::new(
+            RolloutService::new(jetstream.clone(), task_monitor.clone())
+                .await?
+                .with_event_bus(event_bus.clone()),
+        );
         debug!("RolloutService initialized");
 
         // 7. 构造ApplicationContext

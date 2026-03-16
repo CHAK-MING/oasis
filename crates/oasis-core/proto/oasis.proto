@@ -62,6 +62,15 @@ message TaskMsg {
   int64 updated_at = 9;
 }
 
+message GroupTaskMsg {
+  BatchId batch_id = 1;
+  string group = 2;
+  string command = 3;
+  repeated string args = 4;
+  uint32 timeout_seconds = 5;
+  map<string, string> agent_task_ids = 6;
+}
+
 message BatchMsg {
   BatchId batch_id = 1;
   string command = 2;

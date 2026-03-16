@@ -133,9 +133,13 @@ fn decode_base64_prefixed(s: &str) -> String {
 
 fn task_output_summary(execution: &TaskExecutionMsg) -> (&'static str, bool) {
     match execution.state() {
-        TaskStateEnum::TaskCreated | TaskStateEnum::TaskPending => ("任务已创建，尚未开始输出", false),
+        TaskStateEnum::TaskCreated | TaskStateEnum::TaskPending => {
+            ("任务已创建，尚未开始输出", false)
+        }
         TaskStateEnum::TaskCancelling => ("任务取消请求已发出，等待 Agent 确认", false),
-        TaskStateEnum::TaskRunning if execution.stdout.is_empty() && execution.stderr.is_empty() => {
+        TaskStateEnum::TaskRunning
+            if execution.stdout.is_empty() && execution.stderr.is_empty() =>
+        {
             ("任务正在执行，尚未产生输出", false)
         }
         _ => ("任务输出获取成功", true),
@@ -193,7 +197,10 @@ async fn run_exec_output(
     }
     print_info(&format!("Task ID: {}", style(&args.task_id).bold()));
     print_info(&format!("Agent: {}", style(agent_id).bold()));
-    print_info(&format!("状态: {}", style(state_to_cn(execution.state())).bold()));
+    print_info(&format!(
+        "状态: {}",
+        style(state_to_cn(execution.state())).bold()
+    ));
 
     if let Some(exit_code) = execution.exit_code {
         print_info(&format!("退出码: {}", style(exit_code).bold()));

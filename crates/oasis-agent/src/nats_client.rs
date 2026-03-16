@@ -31,6 +31,7 @@ impl NatsClient {
         // 这里只是尝试获取，如果不存在会失败，但是由 Server 负责创建
         // Agent 不负责创建 JetStream 资源
         let _ = self.jetstream.get_stream(JS_STREAM_TASKS).await;
+        let _ = self.jetstream.get_stream(JS_STREAM_GROUP_TASKS).await;
         let _ = self.jetstream.get_stream(JS_STREAM_RESULTS).await;
         let _ = self.jetstream.get_stream(JS_STREAM_FILES).await;
         let _ = self.jetstream.get_key_value(JS_KV_AGENT_INFOS).await;
