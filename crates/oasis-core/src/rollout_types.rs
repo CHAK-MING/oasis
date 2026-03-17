@@ -426,75 +426,47 @@ impl RolloutStatus {
         config: &RolloutConfig,
         all_agents: &[AgentId],
     ) -> Vec<RolloutStageStatus> {
-        let mut stages = Vec::new();
         let total_agents = all_agents.len();
+        let stage_specs = match &config.strategy {
+            RolloutStrategy::Percentage { stages } => stages
+                .iter()
+                .map(|&p| {
+                    let count = if p == 100 { total_agents } else { (total_agents * p as usize / 100).max(1) };
+                    (count, format!("{}%", p))
+                })
+                .collect::<Vec<_>>(),
+            RolloutStrategy::Count { stages } => stages
+                .iter()
+                .map(|&c| {
+                    let count = if c == 0 { total_agents } else { c as usize };
+                    (count, format!("{}个节点", count))
+                })
+                .collect::<Vec<_>>(),
+        };
 
-        match &config.strategy {
-            RolloutStrategy::Percentage {
-                stages: percentages,
-            } => {
-                let mut remaining_agents: Vec<_> = all_agents.to_vec();
+        let mut remaining_agents: Vec<_> = all_agents.to_vec();
+        let mut stages = Vec::new();
 
-                for (i, &percentage) in percentages.iter().enumerate() {
-                    let target_count = if percentage == 100 {
-                        remaining_agents.len()
-                    } else {
-                        (total_agents * percentage as usize / 100).max(1)
-                    };
+        for (i, (target_count, label)) in stage_specs.into_iter().enumerate() {
+            let stage_agents: Vec<_> = remaining_agents
+                .drain(..target_count.min(remaining_agents.len()))
+                .collect();
 
-                    let stage_agents: Vec<_> = remaining_agents
-                        .drain(..target_count.min(remaining_agents.len()))
-                        .collect();
+            stages.push(RolloutStageStatus {
+                stage_name: format!("阶段{} ({})", i + 1, label),
+                target_agents: stage_agents,
+                batch_id: None,
+                started_count: 0,
+                completed_count: 0,
+                failed_count: 0,
+                started_at: None,
+                completed_at: None,
+                failed_executions: Vec::new(),
+                version_snapshot: None,
+            });
 
-                    stages.push(RolloutStageStatus {
-                        stage_name: format!("阶段{} ({}%)", i + 1, percentage),
-                        target_agents: stage_agents,
-                        batch_id: None,
-                        started_count: 0,
-                        completed_count: 0,
-                        failed_count: 0,
-                        started_at: None,
-                        completed_at: None,
-                        failed_executions: Vec::new(),
-                        version_snapshot: None,
-                    });
-
-                    if remaining_agents.is_empty() {
-                        break;
-                    }
-                }
-            }
-            RolloutStrategy::Count { stages: counts } => {
-                let mut remaining_agents: Vec<_> = all_agents.to_vec();
-
-                for (i, &count) in counts.iter().enumerate() {
-                    let target_count = if count == 0 {
-                        remaining_agents.len()
-                    } else {
-                        count as usize
-                    };
-
-                    let stage_agents: Vec<_> = remaining_agents
-                        .drain(..target_count.min(remaining_agents.len()))
-                        .collect();
-
-                    stages.push(RolloutStageStatus {
-                        stage_name: format!("阶段{} ({}个节点)", i + 1, stage_agents.len()),
-                        target_agents: stage_agents,
-                        batch_id: None,
-                        started_count: 0,
-                        completed_count: 0,
-                        failed_count: 0,
-                        started_at: None,
-                        completed_at: None,
-                        failed_executions: Vec::new(),
-                        version_snapshot: None,
-                    });
-
-                    if remaining_agents.is_empty() {
-                        break;
-                    }
-                }
+            if remaining_agents.is_empty() {
+                break;
             }
         }
 

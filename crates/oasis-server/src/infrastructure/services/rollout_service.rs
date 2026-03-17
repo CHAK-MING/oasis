@@ -1119,11 +1119,7 @@ impl RolloutService {
             self.persist_rollout_to_jetstream(status).await?;
             Ok(())
         } else {
-            Err(CoreError::NotFound {
-                entity_type: "Rollout".to_string(),
-                entity_id: rollout_id.to_string(),
-                severity: ErrorSeverity::Error,
-            })
+            Err(CoreError::rollout_not_found(rollout_id))
         }
     }
 
@@ -1142,11 +1138,7 @@ impl RolloutService {
             self.persist_rollout_to_jetstream(status).await?;
             Ok(status.clone())
         } else {
-            Err(CoreError::NotFound {
-                entity_type: "Rollout".to_string(),
-                entity_id: rollout_id.to_string(),
-                severity: ErrorSeverity::Error,
-            })
+            Err(CoreError::rollout_not_found(rollout_id))
         }
     }
 
@@ -1308,11 +1300,7 @@ impl RolloutService {
                         .insert(rollout_id.clone(), status.clone());
                     Ok(status)
                 }
-                Err(_) => Err(CoreError::NotFound {
-                    entity_type: "Rollout".to_string(),
-                    entity_id: rollout_id.to_string(),
-                    severity: ErrorSeverity::Error,
-                }),
+                Err(_) => Err(CoreError::rollout_not_found(rollout_id)),
             }
         }
     }
@@ -1677,11 +1665,7 @@ impl RolloutService {
                                         started_count += 1
                                     }
                                     TaskState::Success => completed_count += 1,
-                                    TaskState::Failed => {
-                                        failed_count += 1;
-                                        failed_executions.push(execution);
-                                    }
-                                    TaskState::Timeout => {
+                                    TaskState::Failed | TaskState::Timeout => {
                                         failed_count += 1;
                                         failed_executions.push(execution);
                                     }
@@ -2020,6 +2004,6 @@ fn enforce_stage_timeout(status: &mut RolloutStatus) -> bool {
     true
 }
 
-fn allowed_failures_for_target_count(target_count: u32, max_failure_rate_percent: u32) -> u32 {
+const fn allowed_failures_for_target_count(target_count: u32, max_failure_rate_percent: u32) -> u32 {
     target_count.saturating_mul(max_failure_rate_percent) / 100
 }

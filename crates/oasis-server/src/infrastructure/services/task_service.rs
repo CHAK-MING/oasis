@@ -154,7 +154,7 @@ impl TaskService {
             resolved_agent_ids.len()
         );
 
-        // 步骤1: 并发创建所有任务（但不缓存）
+        // 并发创建所有任务（但不缓存）
         let task_futures: Vec<_> = resolved_agent_ids
             .into_iter()
             .map(|agent_id| {
@@ -169,7 +169,6 @@ impl TaskService {
                     task = task.with_batch_id(batch_id);
                     task = task.with_agent_id(agent_id.clone());
 
-                    // 转换状态为 Pending
                     task.transition_to(TaskState::Pending)
                         .map_err(|e| CoreError::Internal {
                             message: format!("Failed to transition task state: {}", e),
@@ -181,11 +180,10 @@ impl TaskService {
             })
             .collect();
 
-        // 步骤2: 等待所有任务创建完成
         let tasks_and_agents: Vec<(Task, AgentId)> =
             futures_util::future::try_join_all(task_futures).await?;
 
-        // 步骤3: 批量发布所有任务
+        // 批量发布所有任务
         let mut task_ids = Vec::with_capacity(tasks_and_agents.len());
         let multicast_group =
             Self::extract_multicast_group(&request.selector).filter(|_| tasks_and_agents.len() > 1);
@@ -261,9 +259,7 @@ impl TaskService {
             task_ids.len()
         );
 
-        // 步骤5: 一次性批量缓存（避免竞态条件）
-
-        // 5.1 创建 Batch 对象并缓存
+        // 一次性批量缓存（避免竞态条件）
         let batch = Batch {
             batch_id: batch_id.clone(),
             command: request.command.clone(),
@@ -273,17 +269,14 @@ impl TaskService {
         };
         self.task_monitor.cache_insert_batch(batch);
 
-        // 5.2 一次性插入 BatchId -> Vec<TaskId> 映射
         self.task_monitor
             .cache_insert_batch_tasks(batch_id.clone(), task_ids.clone());
 
-        // 5.3 批量插入 TaskId -> BatchId 反向映射
         for task_id in &task_ids {
             self.task_monitor
                 .cache_insert_task_batch(task_id.clone(), batch_id.clone());
         }
 
-        // 5.4 批量缓存所有任务
         for (task, _) in tasks_and_agents {
             self.task_monitor.cache_insert_task(task);
         }
@@ -373,11 +366,7 @@ impl TaskService {
             });
         }
 
-        Err(CoreError::NotFound {
-            entity_type: "task".to_string(),
-            entity_id: task_id.to_string(),
-            severity: oasis_core::error::ErrorSeverity::Error,
-        })
+        Err(CoreError::task_not_found(task_id))
     }
 
     /// 列出批次
@@ -455,11 +444,7 @@ impl TaskService {
             self.task_monitor
                 .task_cache
                 .get(task_id)
-                .ok_or_else(|| CoreError::NotFound {
-                    entity_type: "task".to_string(),
-                    entity_id: task_id.to_string(),
-                    severity: ErrorSeverity::Error,
-                })?;
+                .ok_or_else(|| CoreError::task_not_found(task_id))?;
 
         let agent_id = &task.agent_id;
         let subject = format!("tasks.cancel.agent.{}.{}", agent_id, task_id);

@@ -238,6 +238,31 @@ impl TaskExecution {
             duration_ms: Some(duration_ms),
         }
     }
+
+    /// 创建已完成的执行记录（通用构建器，适用于各种终态）
+    pub fn completed(
+        task_id: TaskId,
+        agent_id: AgentId,
+        state: TaskState,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        started_at: i64,
+        finished_at: i64,
+        duration_ms: f64,
+    ) -> Self {
+        Self {
+            task_id,
+            agent_id,
+            state,
+            exit_code,
+            stdout,
+            stderr,
+            started_at,
+            finished_at: Some(finished_at),
+            duration_ms: Some(duration_ms),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

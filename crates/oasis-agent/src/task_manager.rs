@@ -563,34 +563,34 @@ impl TaskManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                TaskExecution {
-                    task_id: task.task_id.clone(),
-                    agent_id: self.agent_id.clone(),
-                    state: TaskState::Success,
-                    exit_code: Some(0),
-                    stdout: "Labels updated successfully".to_string(),
-                    stderr: String::new(),
-                    started_at: start_time,
-                    finished_at: Some(finish_time),
-                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-                }
+                TaskExecution::completed(
+                    task.task_id.clone(),
+                    self.agent_id.clone(),
+                    TaskState::Success,
+                    Some(0),
+                    "Labels updated successfully".to_string(),
+                    String::new(),
+                    start_time,
+                    finish_time,
+                    start_instant.elapsed().as_millis() as f64,
+                )
             }
             Err(e) => {
                 let finish_time = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                TaskExecution {
-                    task_id: task.task_id.clone(),
-                    agent_id: self.agent_id.clone(),
-                    state: TaskState::Failed,
-                    exit_code: Some(1),
-                    stdout: String::new(),
-                    stderr: format!("Failed to update labels: {}", e),
-                    started_at: start_time,
-                    finished_at: Some(finish_time),
-                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-                }
+                TaskExecution::completed(
+                    task.task_id.clone(),
+                    self.agent_id.clone(),
+                    TaskState::Failed,
+                    Some(1),
+                    String::new(),
+                    format!("Failed to update labels: {}", e),
+                    start_time,
+                    finish_time,
+                    start_instant.elapsed().as_millis() as f64,
+                )
             }
         }
     }
@@ -658,17 +658,17 @@ impl TaskManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                return TaskExecution {
-                    task_id: task.task_id.clone(),
-                    agent_id: self.agent_id.clone(),
-                    state: TaskState::Failed,
-                    exit_code: Some(-1),
-                    stdout: String::new(),
-                    stderr: format!("Command execution failed: {}", e),
-                    started_at: start_time,
-                    finished_at: Some(finish_time),
-                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-                };
+                return TaskExecution::completed(
+                    task.task_id.clone(),
+                    self.agent_id.clone(),
+                    TaskState::Failed,
+                    Some(-1),
+                    String::new(),
+                    format!("Command execution failed: {}", e),
+                    start_time,
+                    finish_time,
+                    start_instant.elapsed().as_millis() as f64,
+                );
             }
         };
 
@@ -710,51 +710,51 @@ impl TaskManager {
                     TaskState::Failed
                 };
 
-                TaskExecution {
-                    task_id: task.task_id.clone(),
-                    agent_id: self.agent_id.clone(),
+                TaskExecution::completed(
+                    task.task_id.clone(),
+                    self.agent_id.clone(),
                     state,
-                    exit_code: Some(exit_code),
-                    stdout: Self::encode_output(&output.stdout),
-                    stderr: Self::encode_output(&output.stderr),
-                    started_at: start_time,
-                    finished_at: Some(finish_time),
-                    duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-                }
+                    Some(exit_code),
+                    Self::encode_output(&output.stdout),
+                    Self::encode_output(&output.stderr),
+                    start_time,
+                    finish_time,
+                    start_instant.elapsed().as_millis() as f64,
+                )
             }
-            Err(ExecutionError::Cancelled) => TaskExecution {
-                task_id: task.task_id.clone(),
-                agent_id: self.agent_id.clone(),
-                state: TaskState::Cancelled,
-                exit_code: Some(-1),
-                stdout: String::new(),
-                stderr: "Task cancelled".to_string(),
-                started_at: start_time,
-                finished_at: Some(finish_time),
-                duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-            },
-            Err(ExecutionError::Timeout(_)) => TaskExecution {
-                task_id: task.task_id.clone(),
-                agent_id: self.agent_id.clone(),
-                state: TaskState::Timeout,
-                exit_code: Some(-1),
-                stdout: String::new(),
-                stderr: format!("Command timed out after {} seconds", task.timeout_seconds),
-                started_at: start_time,
-                finished_at: Some(finish_time),
-                duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-            },
-            Err(ExecutionError::Failed(e)) => TaskExecution {
-                task_id: task.task_id.clone(),
-                agent_id: self.agent_id.clone(),
-                state: TaskState::Failed,
-                exit_code: Some(-1),
-                stdout: String::new(),
-                stderr: format!("Command execution failed: {}", e),
-                started_at: start_time,
-                finished_at: Some(finish_time),
-                duration_ms: Some(start_instant.elapsed().as_millis() as f64),
-            },
+            Err(ExecutionError::Cancelled) => TaskExecution::completed(
+                task.task_id.clone(),
+                self.agent_id.clone(),
+                TaskState::Cancelled,
+                Some(-1),
+                String::new(),
+                "Task cancelled".to_string(),
+                start_time,
+                finish_time,
+                start_instant.elapsed().as_millis() as f64,
+            ),
+            Err(ExecutionError::Timeout(_)) => TaskExecution::completed(
+                task.task_id.clone(),
+                self.agent_id.clone(),
+                TaskState::Timeout,
+                Some(-1),
+                String::new(),
+                format!("Command timed out after {} seconds", task.timeout_seconds),
+                start_time,
+                finish_time,
+                start_instant.elapsed().as_millis() as f64,
+            ),
+            Err(ExecutionError::Failed(e)) => TaskExecution::completed(
+                task.task_id.clone(),
+                self.agent_id.clone(),
+                TaskState::Failed,
+                Some(-1),
+                String::new(),
+                format!("Command execution failed: {}", e),
+                start_time,
+                finish_time,
+                start_instant.elapsed().as_millis() as f64,
+            ),
         }
     }
 

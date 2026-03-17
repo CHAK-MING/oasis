@@ -316,6 +316,22 @@ impl CoreError {
             severity: ErrorSeverity::Error,
         }
     }
+
+    pub fn not_found(entity_type: impl Into<String>, entity_id: impl std::fmt::Display) -> Self {
+        CoreError::NotFound {
+            entity_type: entity_type.into(),
+            entity_id: entity_id.to_string(),
+            severity: ErrorSeverity::Error,
+        }
+    }
+
+    pub fn rollout_not_found(rollout_id: impl std::fmt::Display) -> Self {
+        Self::not_found("Rollout", rollout_id)
+    }
+
+    pub fn task_not_found(task_id: impl std::fmt::Display) -> Self {
+        Self::not_found("task", task_id)
+    }
 }
 
 /// Core 操作的 Result 类型别名
