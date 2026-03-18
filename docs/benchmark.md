@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **这份文档记录了 Oasis 在最近一次真实 NATS 环境与纯内存路径下的基准测试结果。**
-> 测试覆盖了控制面单跳延迟、广播扇出、CPU 热路径以及持续吞吐量等核心指标。
+> **测试覆盖**：控制面单跳延迟、广播扇出、CPU 热路径以及持续吞吐量。
 
 ## 🎯 结论速览
 
@@ -18,10 +18,10 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 ## 总览
 
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `nats_io/request_reply` | `152.32-158.87 µs` | 真实 NATS TLS 请求-响应 |
 | `e2e_latency/roundtrip` | `146.48-151.67 µs` | Server → NATS → Agent → NATS → Server |
-| `e2e_latency/broadcast_to_agents/1000` | `8.02-9.95 ms` | 千节点广播链路 |
+| `e2e_latency/broadcast_to_agents/1000` | `8.0171-9.9480 ms` | 千节点广播链路 |
 | `throughput/sustained` | `186,930 tasks/sec` | 持续 10 秒真实吞吐 |
 | `fanout/map_to_proto/10000` | `1.8281 ms` | 扇出结果映射 |
 
@@ -32,7 +32,7 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 ![Core Latency](./assets/benchmark/bench_01_core_latency.png)
 
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `nats_io/request_reply` | `152.32-158.87 µs` | 单次消息往返 |
 | `nats_io/jetstream_kv_put_get` | `234.50-246.13 µs` | JetStream KV 读写 |
 | `e2e_latency/dispatch_only` | `18.814-18.990 µs` | 纯派发开销 |
@@ -53,7 +53,7 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 ![Serialization Overhead](./assets/benchmark/bench_03_serialization.png)
 
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `proto/submit_batch` encode | `98.5 ns` | 批量任务请求编码 |
 | `proto/submit_batch` decode | `287.8 ns` | 批量任务请求解码 |
 | `proto/agent_info` encode | `206.4 ns` | Agent 元数据编码 |
@@ -67,10 +67,8 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 
 ### Fanout 与聚合
 
-![Fanout Hotpath](./assets/benchmark/bench_04_fanout_hotpath.png)
-
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `fanout/aggregate/100` | `160.46 ns` | 100 条结果聚合 |
 | `fanout/aggregate/1000` | `1.4818 µs` | 1000 条结果聚合 |
 | `fanout/aggregate/5000` | `7.3803 µs` | 5000 条结果聚合 |
@@ -82,10 +80,10 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 
 ### Selector 解析与求值
 
-![Selector Performance](./assets/benchmark/bench_05_selector.png)
+![Selector Performance](./assets/benchmark/bench_04_selector.png)
 
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `selector/parse/all` | `860.9 ns` | 空表达式解析 |
 | `selector/parse/labels["role"] == "web"` | `1.335 µs` | 单条件解析 |
 | `selector/parse/system["os"] == "linux"` | `1.192 µs` | 系统字段解析 |
@@ -103,10 +101,10 @@ Oasis 的当前性能画像非常稳定，能够轻松应对高并发管控场�
 
 ## 真实 NATS I/O 与吞吐
 
-![Throughput](./assets/benchmark/bench_06_throughput.png)
+![Throughput](./assets/benchmark/bench_05_throughput.png)
 
 | 场景 | 结果 | 说明 |
-|------|------|------|
+|:--|:--:|:--|
 | `nats_io/request_reply` | `152.32-158.87 µs` | 真实 NATS TLS 请求-响应 |
 | `nats_io/jetstream_kv_put_get` | `234.50-246.13 µs` | 真实 JetStream KV 读写 |
 | `throughput/dispatch_batch/100` | `225.49-240.26 µs` | 100 条任务批量下发 |
