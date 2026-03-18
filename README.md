@@ -43,6 +43,22 @@ Oasis 是一个专为大规模 Linux 节点设计的统一管控系统，主要�
 
 ---
 
+## 📈 性能概览
+
+下面是最近一次真实环境下的基准结果摘要，详细图表和明细见 [benchmark.md](./docs/benchmark.md)。
+
+![Oasis Benchmark Summary](./docs/assets/benchmark/benchmark-summary.png)
+
+| 场景 | 结果 | 说明 |
+|------|------|------|
+| `nats_io/request_reply` | `152.32-158.87 µs` | 真实 NATS TLS 请求-响应 |
+| `e2e_latency/roundtrip` | `146.48-151.67 µs` | Server → NATS → Agent → NATS → Server |
+| `e2e_latency/broadcast_to_agents/1000` | `8.02-9.95 ms` | 千节点广播链路 |
+| `throughput/sustained` | `186,930 tasks/sec` | 持续 10 秒真实吞吐 |
+| `fanout/map_to_proto/10000` | `1.8281 ms` | 扇出结果映射 |
+
+---
+
 ## 🚀 快速开始
 
 ### 1. 构建项目
@@ -107,6 +123,7 @@ graph TD
 
 > 提示：部分文档仍在持续完善中，如有疑问请通过 Issue 反馈。
 
+*   [**Benchmark**](./docs/benchmark.md) —— **最新 bench 图表与明细数据**
 *   [**DeepWiki 知识库**](https://deepwiki.com/CHAK-MING/oasis) —— **核心功能参考与最佳实践**
 
 ---

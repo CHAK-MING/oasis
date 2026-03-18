@@ -1,6 +1,7 @@
 target/
-docs/
 certs/
+
+docs/scripts/
 
 data/
 
