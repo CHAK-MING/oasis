@@ -203,7 +203,7 @@ impl AgentService {
         // 由于AgentInfoMonitor会监听KV的变更，这里更新会被自动同步到缓存
         // 但为了确保立即生效，我们也直接更新缓存
         self.engine
-            .update_agent_info(agent_id.clone(), current_agent_info.clone())
+            .update_agent_info(agent_id.clone(), current_agent_info)
             .await;
 
         info!(

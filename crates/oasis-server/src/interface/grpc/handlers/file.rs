@@ -25,7 +25,7 @@ struct UploadSession {
 
 /// 上传会话管理器
 struct SessionManager {
-    sessions: DashMap<String, UploadSession>,
+    sessions: std::sync::Arc<DashMap<String, UploadSession>>,
     max_sessions: usize,
     max_memory_mb: usize,
     session_ttl: Duration,
@@ -34,7 +34,7 @@ struct SessionManager {
 impl SessionManager {
     fn new() -> Self {
         let manager = Self {
-            sessions: DashMap::new(),
+            sessions: std::sync::Arc::new(DashMap::new()),
             max_sessions: 100,                     // 最大并发会话数
             max_memory_mb: 1024,                   // 最大内存使用 1GB
             session_ttl: Duration::from_secs(600), // 10分钟 TTL
@@ -272,16 +272,12 @@ impl FileHandlers {
         let upload_id = uuid::Uuid::now_v7().to_string();
 
         // 创建会话
-        let received = FileHandlers::create(
-            upload_id.clone(),
-            req.source_path.clone(),
-            req.size,
-            req.checksum,
-        )
-        .await
-        .map_err(|e| {
-            Status::resource_exhausted(format!("Failed to create upload session: {}", e))
-        })?;
+        let received =
+            FileHandlers::create(upload_id.clone(), req.source_path, req.size, req.checksum)
+                .await
+                .map_err(|e| {
+                    Status::resource_exhausted(format!("Failed to create upload session: {}", e))
+                })?;
 
         // 记录会话统计信息
         let (total, expired, memory_mb) = FileHandlers::get_stats().await;
@@ -365,10 +361,17 @@ impl FileHandlers {
             )));
         }
 
+        let UploadSession {
+            source_path,
+            size,
+            buffer,
+            ..
+        } = session;
+
         let upload_result = srv
             .context()
             .file_service
-            .upload(&session.source_path, session.buffer.clone())
+            .upload(&source_path, buffer)
             .await
             .map_err(|e| Status::internal(format!("Failed to store file: {}", e)))?;
 
@@ -376,7 +379,7 @@ impl FileHandlers {
 
         debug!(
             "File uploaded successfully: {} (size: {}, sha256: {})",
-            session.source_path, session.size, checksum
+            source_path, size, checksum
         );
 
         Ok(Response::new(oasis_core::proto::FileOperationResult {
@@ -394,9 +397,8 @@ impl FileHandlers {
     ) -> std::result::Result<Response<oasis_core::proto::FileOperationResult>, Status> {
         let req = request.into_inner();
 
-        let config = req
+        let mut config = req
             .config
-            .clone()
             .ok_or_else(|| Status::invalid_argument("config is required for file apply"))?;
 
         if config.source_path.is_empty() {
@@ -421,7 +423,6 @@ impl FileHandlers {
         }
 
         // 下载文件数据
-        let mut config = config;
         if config.operation_id.trim().is_empty() {
             config.operation_id = OperationId::generate().to_string();
         }
@@ -504,7 +505,7 @@ impl FileHandlers {
             .ok_or_else(|| Status::invalid_argument("config is required for rollback file"))?;
 
         // 解析选择器
-        let selector_expr = &config
+        let selector_expr = config
             .target
             .as_ref()
             .map(|t| t.expression.as_str())

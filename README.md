@@ -3,7 +3,7 @@
 
 # Oasis
 
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/CHAK-MING/oasis)
+[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/CHAK-MING/oasis)
 
 ## 🧐 什么是 Oasis？
 

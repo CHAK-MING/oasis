@@ -56,7 +56,9 @@ impl TaskManager {
         task_id: &TaskId,
         completed_tasks: &Arc<DashMap<TaskId, TaskExecution>>,
     ) -> Option<TaskExecution> {
-        completed_tasks.get(task_id).map(|entry| entry.value().clone())
+        completed_tasks
+            .get(task_id)
+            .map(|entry| entry.value().clone())
     }
 
     fn cache_completed_execution(
@@ -429,7 +431,9 @@ impl TaskManager {
             );
             msg.ack_with(async_nats::jetstream::AckKind::Progress)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to mark duplicate task as in-progress: {}", e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to mark duplicate task as in-progress: {}", e)
+                })?;
             return Ok(());
         }
 
@@ -1227,9 +1231,8 @@ mod tests {
                 &completed_task_order,
             );
 
-            let cached =
-                TaskManager::completed_execution(&TaskId::new("task-1"), &completed_tasks)
-                    .expect("terminal execution should be cached");
+            let cached = TaskManager::completed_execution(&TaskId::new("task-1"), &completed_tasks)
+                .expect("terminal execution should be cached");
             assert_eq!(cached.state, TaskState::Success);
             assert_eq!(cached.stdout, "ok");
         }
@@ -1238,7 +1241,8 @@ mod tests {
         fn test_cache_completed_execution_ignores_non_terminal_result() {
             let completed_tasks = Arc::new(DashMap::new());
             let completed_task_order = Arc::new(std::sync::Mutex::new(VecDeque::new()));
-            let execution = TaskExecution::running(TaskId::new("task-running"), AgentId::new("agent-1"));
+            let execution =
+                TaskExecution::running(TaskId::new("task-running"), AgentId::new("agent-1"));
 
             TaskManager::cache_completed_execution(
                 &execution,

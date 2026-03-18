@@ -88,10 +88,7 @@ pub struct CreateArgs {
     target: String,
 
     /// 灰度策略
-    #[arg(
-        long,
-        help = "灰度策略: percentage:10,30,100 或 count:2,5,0"
-    )]
+    #[arg(long, help = "灰度策略: percentage:10,30,100 或 count:2,5,0")]
     strategy: String,
 
     /// 执行命令（与文件部署二选一）

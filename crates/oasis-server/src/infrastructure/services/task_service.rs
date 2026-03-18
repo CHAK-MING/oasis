@@ -104,7 +104,9 @@ impl TaskService {
     fn build_group_task_message(
         batch_id: &BatchId,
         group: &str,
-        request: &BatchRequest,
+        command: &str,
+        args: &[String],
+        timeout_seconds: u32,
         tasks_and_agents: &[(Task, AgentId)],
     ) -> oasis_core::proto::GroupTaskMsg {
         let agent_task_ids = tasks_and_agents
@@ -122,9 +124,9 @@ impl TaskService {
                 value: batch_id.as_str().to_string(),
             }),
             group: group.to_string(),
-            command: request.command.clone(),
-            args: request.args.clone(),
-            timeout_seconds: request.timeout_seconds,
+            command: command.to_string(),
+            args: args.to_vec(),
+            timeout_seconds,
             agent_task_ids,
         }
     }
@@ -146,11 +148,17 @@ impl TaskService {
         resolved_agent_ids: Vec<AgentId>,
     ) -> Result<BatchId> {
         let batch_id = BatchId::generate();
+        let BatchRequest {
+            command,
+            args,
+            selector,
+            timeout_seconds,
+        } = request;
 
         info!(
             "Submitting batch: {} with command: {} to {} agents",
             batch_id,
-            request.command,
+            command,
             resolved_agent_ids.len()
         );
 
@@ -158,14 +166,11 @@ impl TaskService {
         let task_futures: Vec<_> = resolved_agent_ids
             .into_iter()
             .map(|agent_id| {
-                let request = request.clone();
+                let command = command.clone();
+                let args = args.clone();
                 let batch_id = batch_id.clone();
                 async move {
-                    let mut task = Task::new(
-                        request.command.clone(),
-                        request.args.clone(),
-                        request.timeout_seconds,
-                    );
+                    let mut task = Task::new(command, args, timeout_seconds);
                     task = task.with_batch_id(batch_id);
                     task = task.with_agent_id(agent_id.clone());
 
@@ -186,12 +191,18 @@ impl TaskService {
         // 批量发布所有任务
         let mut task_ids = Vec::with_capacity(tasks_and_agents.len());
         let multicast_group =
-            Self::extract_multicast_group(&request.selector).filter(|_| tasks_and_agents.len() > 1);
+            Self::extract_multicast_group(&selector).filter(|_| tasks_and_agents.len() > 1);
 
         if let Some(group) = multicast_group.as_deref() {
             let subject = constants::tasks_group_subject(group);
-            let group_task =
-                Self::build_group_task_message(&batch_id, group, &request, &tasks_and_agents);
+            let group_task = Self::build_group_task_message(
+                &batch_id,
+                group,
+                &command,
+                &args,
+                timeout_seconds,
+                &tasks_and_agents,
+            );
             let payload = group_task.encode_to_vec();
             let headers = Self::group_publish_headers(&batch_id, group, &payload);
 
@@ -262,9 +273,9 @@ impl TaskService {
         // 一次性批量缓存（避免竞态条件）
         let batch = Batch {
             batch_id: batch_id.clone(),
-            command: request.command.clone(),
-            args: request.args.clone(),
-            timeout_seconds: request.timeout_seconds,
+            command,
+            args,
+            timeout_seconds,
             created_at: chrono::Utc::now().timestamp(),
         };
         self.task_monitor.cache_insert_batch(batch);
@@ -440,11 +451,11 @@ impl TaskService {
 
     /// 发布取消消息
     async fn publish_cancel_message(&self, task_id: &TaskId) -> Result<()> {
-        let task =
-            self.task_monitor
-                .task_cache
-                .get(task_id)
-                .ok_or_else(|| CoreError::task_not_found(task_id))?;
+        let task = self
+            .task_monitor
+            .task_cache
+            .get(task_id)
+            .ok_or_else(|| CoreError::task_not_found(task_id))?;
 
         let agent_id = &task.agent_id;
         let subject = format!("tasks.cancel.agent.{}.{}", agent_id, task_id);
@@ -559,7 +570,9 @@ mod tests {
         let group_msg = TaskService::build_group_task_message(
             &batch_id,
             "web",
-            &request,
+            &request.command,
+            &request.args,
+            request.timeout_seconds,
             &[
                 (first_task.clone(), first_agent.clone()),
                 (second_task.clone(), second_agent.clone()),

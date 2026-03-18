@@ -219,7 +219,12 @@ impl From<&BatchRequest> for proto::BatchRequestMsg {
 
 impl From<BatchRequest> for proto::BatchRequestMsg {
     fn from(request: BatchRequest) -> Self {
-        (&request).into()
+        Self {
+            command: request.command,
+            args: request.args,
+            target: Some(proto::SelectorExpression::from(request.selector)),
+            timeout_seconds: request.timeout_seconds,
+        }
     }
 }
 
@@ -495,7 +500,10 @@ impl From<&proto::SubmitBatchRequest> for BatchRequest {
 
 impl From<proto::SubmitBatchRequest> for BatchRequest {
     fn from(proto: proto::SubmitBatchRequest) -> Self {
-        (&proto).into()
+        proto
+            .batch_request
+            .map(BatchRequest::from)
+            .unwrap_or_default()
     }
 }
 
@@ -963,6 +971,132 @@ impl From<&proto::RolloutStatusMsg> for RolloutStatus {
     }
 }
 
+impl From<proto::RolloutStatusMsg> for RolloutStatus {
+    fn from(msg: proto::RolloutStatusMsg) -> Self {
+        let cfg = msg.config.unwrap_or_default();
+        let strategy = match cfg.strategy.and_then(|s| s.strategy) {
+            Some(crate::proto::rollout_strategy_msg::Strategy::Percentage(p)) => {
+                RolloutStrategy::Percentage {
+                    stages: p.stages.into_iter().map(|v| v as u8).collect(),
+                }
+            }
+            Some(crate::proto::rollout_strategy_msg::Strategy::Count(c)) => {
+                RolloutStrategy::Count { stages: c.stages }
+            }
+            None => RolloutStrategy::default(),
+        };
+        let fallback_file_config = || crate::file_types::FileConfig {
+            source_path: String::new(),
+            destination_path: String::new(),
+            revision: 0,
+            owner: None,
+            mode: None,
+            target: None,
+            operation_id: None,
+        };
+
+        let task_type = match cfg.task_type.and_then(|t| t.task_type) {
+            Some(crate::proto::rollout_task_type_msg::TaskType::Command(cmd)) => {
+                RolloutTaskType::Command {
+                    command: cmd.command,
+                    args: cmd.args,
+                    timeout_seconds: cmd.timeout_seconds,
+                }
+            }
+            Some(crate::proto::rollout_task_type_msg::TaskType::FileDeployment(file)) => {
+                let fc = match file.config {
+                    Some(config) => match crate::file_types::FileConfig::try_from(config) {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            warn!("Invalid rollout file config: {}", e);
+                            fallback_file_config()
+                        }
+                    },
+                    None => {
+                        warn!("Missing rollout file config in task type");
+                        fallback_file_config()
+                    }
+                };
+                RolloutTaskType::FileDeployment { config: fc }
+            }
+            None => RolloutTaskType::Command {
+                command: String::new(),
+                args: vec![],
+                timeout_seconds: 60,
+            },
+        };
+        let rollout_id = cfg
+            .rollout_id
+            .map(|id| RolloutId::from(id.value))
+            .unwrap_or_else(|| {
+                warn!("Missing rollout_id in RolloutConfigMsg, using 'unknown'");
+                RolloutId::from("unknown".to_string())
+            });
+        let target = cfg.target.map(SelectorExpression::from).unwrap_or_else(|| {
+            warn!("Missing rollout target selector, using empty selector");
+            SelectorExpression::from(String::new())
+        });
+
+        let rollout_config = RolloutConfig {
+            rollout_id,
+            name: cfg.name,
+            target,
+            strategy,
+            task_type,
+            auto_advance: cfg.auto_advance,
+            advance_interval_seconds: cfg.advance_interval_seconds,
+            stage_timeout_seconds: cfg.stage_timeout_seconds,
+            max_failure_rate_percent: cfg.max_failure_rate_percent,
+            auto_rollback: cfg.auto_rollback,
+            rollback_command: cfg.rollback_command,
+            created_at: cfg.created_at,
+        };
+
+        let mut stages: Vec<RolloutStageStatus> = Vec::with_capacity(msg.stages.len());
+        for s in msg.stages {
+            let target_agents: Vec<AgentId> = s
+                .target_agents
+                .into_iter()
+                .map(|id| AgentId::from(id.value))
+                .collect();
+            let failed_execs: Vec<TaskExecution> = s
+                .failed_executions
+                .into_iter()
+                .map(TaskExecution::from)
+                .collect();
+            stages.push(RolloutStageStatus {
+                stage_name: s.stage_name,
+                target_agents,
+                batch_id: s.batch_id.map(|b| BatchId::from(b.value)),
+                started_count: s.started_count,
+                completed_count: s.completed_count,
+                failed_count: s.failed_count,
+                started_at: s.started_at,
+                completed_at: s.completed_at,
+                failed_executions: failed_execs,
+                version_snapshot: None,
+            });
+        }
+
+        let all_target_agents: Vec<AgentId> = msg
+            .all_target_agents
+            .into_iter()
+            .map(|id| AgentId::from(id.value))
+            .collect();
+
+        RolloutStatus {
+            config: rollout_config,
+            state: RolloutState::from(msg.state),
+            current_stage_idx: msg.current_stage_idx,
+            stages,
+            all_target_agents,
+            updated_at: msg.updated_at,
+            error_message: msg.error_message,
+            current_action: msg.current_action.unwrap_or_default(),
+        }
+    }
+}
+
 // ===== RolloutConfig 转换 =====
 
 impl From<&RolloutConfig> for proto::RolloutConfigMsg {
@@ -1396,12 +1530,12 @@ mod tests {
             timeout_seconds: 60,
         };
 
-        let proto_msg: proto::BatchRequestMsg = (&request).into();
+        let proto_msg: proto::BatchRequestMsg = request.into();
         let back: BatchRequest = proto_msg.into();
 
-        assert_eq!(request.command, back.command);
-        assert_eq!(request.args, back.args);
-        assert_eq!(request.timeout_seconds, back.timeout_seconds);
+        assert_eq!(back.command, "echo");
+        assert_eq!(back.args, vec!["hello".to_string()]);
+        assert_eq!(back.timeout_seconds, 60);
     }
 
     #[test]

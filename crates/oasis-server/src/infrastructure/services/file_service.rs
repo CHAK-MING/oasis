@@ -1,8 +1,8 @@
 //! File Service - 直接管理文件数据
 //! 使用 oasis-core 的统一类型，提供简洁的文件管理接口
 
-use async_nats::jetstream::{Context, object_store::ObjectStore};
 use crate::infrastructure::services::event_bus::EventBus;
+use async_nats::jetstream::{Context, object_store::ObjectStore};
 use oasis_core::core_types::AgentId;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -14,8 +14,10 @@ use futures::StreamExt;
 use oasis_core::backoff::{fast_backoff, network_publish_backoff};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
 use oasis_core::{
-    FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS, core_types::OperationId, file_types::*,
+    FILES_SUBJECT_PREFIX, JS_KV_FILE_APPLY_RESULTS,
+    core_types::OperationId,
     event_types::{OasisEvent, OasisEventKind},
+    file_types::*,
     kv_key_file_apply_result,
 };
 
@@ -1139,7 +1141,10 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0].kind, OasisEventKind::FileApplied { .. }));
-        assert!(matches!(events[1].kind, OasisEventKind::FileApplyFailed { .. }));
+        assert!(matches!(
+            events[1].kind,
+            OasisEventKind::FileApplyFailed { .. }
+        ));
         assert_eq!(events[0].subject(), "events.file.applied.agent-a");
         assert_eq!(events[1].subject(), "events.file.apply_failed.agent-b");
     }

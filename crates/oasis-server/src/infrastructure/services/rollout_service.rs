@@ -1161,7 +1161,7 @@ impl RolloutService {
                             if let Some(bytes) = entry {
                                 match oasis_core::proto::RolloutStatusMsg::decode(bytes.as_ref()) {
                                     Ok(proto_status) => {
-                                        let status: RolloutStatus = (&proto_status).into();
+                                        let status: RolloutStatus = proto_status.into();
                                         let rollout_id = status.config.rollout_id.clone();
                                         self.rollout_cache.insert(rollout_id.clone(), status);
                                         loaded_count += 1;
@@ -1200,8 +1200,7 @@ impl RolloutService {
             })?;
 
         let key = format!("rollout.{}", rollout_status.config.rollout_id);
-        let proto: oasis_core::proto::RolloutStatusMsg =
-            oasis_core::proto::RolloutStatusMsg::from(rollout_status.clone());
+        let proto: oasis_core::proto::RolloutStatusMsg = rollout_status.into();
         let data = proto.encode_to_vec();
 
         kv_store
@@ -1330,7 +1329,7 @@ impl RolloutService {
                         severity: ErrorSeverity::Error,
                     }
                 })?;
-            let status: RolloutStatus = (&proto).into();
+            let status: RolloutStatus = proto.into();
             Ok(status)
         } else {
             Err(CoreError::NotFound {
@@ -2004,6 +2003,9 @@ fn enforce_stage_timeout(status: &mut RolloutStatus) -> bool {
     true
 }
 
-const fn allowed_failures_for_target_count(target_count: u32, max_failure_rate_percent: u32) -> u32 {
+const fn allowed_failures_for_target_count(
+    target_count: u32,
+    max_failure_rate_percent: u32,
+) -> u32 {
     target_count.saturating_mul(max_failure_rate_percent) / 100
 }

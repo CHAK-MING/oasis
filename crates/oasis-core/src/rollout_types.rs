@@ -431,7 +431,11 @@ impl RolloutStatus {
             RolloutStrategy::Percentage { stages } => stages
                 .iter()
                 .map(|&p| {
-                    let count = if p == 100 { total_agents } else { (total_agents * p as usize / 100).max(1) };
+                    let count = if p == 100 {
+                        total_agents
+                    } else {
+                        (total_agents * p as usize / 100).max(1)
+                    };
                     (count, format!("{}%", p))
                 })
                 .collect::<Vec<_>>(),
