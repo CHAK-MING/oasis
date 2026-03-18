@@ -47,8 +47,6 @@ Oasis 是一个专为大规模 Linux 节点设计的统一管控系统，主要�
 
 下面是最近一次真实环境下的基准结果摘要，详细图表和明细见 [benchmark.md](./docs/benchmark.md)。
 
-![Oasis Benchmark Summary](./docs/assets/benchmark/benchmark-summary.png)
-
 | 场景 | 结果 | 说明 |
 |:--|:--|:--|
 | `nats_io/request_reply` | `152.32-158.87 µs` | 真实 NATS TLS 请求-响应 |
