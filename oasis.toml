@@ -17,3 +17,19 @@ certs_dir = "./certs"
 [server]
 listen_addr = "0.0.0.0:50051"
 heartbeat_ttl_sec = 60
+
+[rate_limit]
+[rate_limit.nats]
+max_operations = 100
+time_window_ms = 1000
+max_wait_time_ms = 500
+
+[rate_limit.heartbeat]
+max_operations = 10
+time_window_ms = 1000
+max_wait_time_ms = 100
+
+[rate_limit.task_publish]
+max_operations = 20
+time_window_ms = 1000
+max_wait_time_ms = 1000

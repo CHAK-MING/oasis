@@ -5,7 +5,9 @@ use oasis_core::csr_types::{
     CsrGenerator, CsrRequest, CsrResponse, cert_needs_renewal, load_private_key, save_credentials,
 };
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
+use oasis_core::rate_limit::{RateLimiterCollection, rate_limited_operation};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
@@ -16,6 +18,7 @@ pub struct CertBootstrap {
     bootstrap_token: Option<String>,
     enrollment_secret: Option<String>,
     renew_before_days: u32,
+    rate_limits: Arc<RateLimiterCollection>,
 }
 
 impl CertBootstrap {
@@ -33,7 +36,13 @@ impl CertBootstrap {
             bootstrap_token,
             enrollment_secret,
             renew_before_days: 30,
+            rate_limits: Arc::new(RateLimiterCollection::default()),
         }
+    }
+
+    pub fn with_rate_limits(mut self, rate_limits: Arc<RateLimiterCollection>) -> Self {
+        self.rate_limits = rate_limits;
+        self
     }
 
     pub fn with_renew_before_days(mut self, days: u32) -> Self {
@@ -180,70 +189,79 @@ impl CertBootstrap {
     }
 
     async fn send_csr_request(&self, request: CsrRequest) -> Result<CsrResponse> {
-        if !self.nats_url.starts_with("tls://") {
-            return Err(CoreError::Config {
-                message: "Certificate bootstrap requires TLS (tls://)".to_string(),
-                severity: ErrorSeverity::Critical,
-            });
-        }
+        rate_limited_operation(
+            &self.rate_limits.nats,
+            || async {
+                if !self.nats_url.starts_with("tls://") {
+                    return Err(CoreError::Config {
+                        message: "Certificate bootstrap requires TLS (tls://)".to_string(),
+                        severity: ErrorSeverity::Critical,
+                    });
+                }
 
-        let ca_path = self.certs_dir.join("nats-ca.pem");
-        if !ca_path.exists() {
-            return Err(CoreError::Config {
-                message: format!("Missing CA certificate: {}", ca_path.display()),
-                severity: ErrorSeverity::Critical,
-            });
-        }
+                let ca_path = self.certs_dir.join("nats-ca.pem");
+                if !ca_path.exists() {
+                    return Err(CoreError::Config {
+                        message: format!("Missing CA certificate: {}", ca_path.display()),
+                        severity: ErrorSeverity::Critical,
+                    });
+                }
 
-        let connect_opts = async_nats::ConnectOptions::new()
-            .require_tls(true)
-            .add_root_certificates(ca_path);
+                let connect_opts = async_nats::ConnectOptions::new()
+                    .require_tls(true)
+                    .add_root_certificates(ca_path);
 
-        info!(
-            "Connecting to NATS for certificate request: {}",
-            self.nats_url
-        );
+                info!(
+                    "Connecting to NATS for certificate request: {}",
+                    self.nats_url
+                );
 
-        let client = async_nats::connect_with_options(&self.nats_url, connect_opts)
-            .await
-            .map_err(|e| CoreError::Internal {
-                message: format!("Failed to connect to NATS for bootstrap: {e}"),
-                severity: ErrorSeverity::Critical,
-            })?;
+                let client = async_nats::connect_with_options(&self.nats_url, connect_opts)
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to connect to NATS for bootstrap: {e}"),
+                        severity: ErrorSeverity::Critical,
+                    })?;
 
-        let request_json = serde_json::to_string(&request).map_err(|e| CoreError::Internal {
-            message: format!("Failed to serialize CSR request: {e}"),
-            severity: ErrorSeverity::Error,
-        })?;
+                let request_json =
+                    serde_json::to_string(&request).map_err(|e| CoreError::Internal {
+                        message: format!("Failed to serialize CSR request: {e}"),
+                        severity: ErrorSeverity::Error,
+                    })?;
 
-        let subject = "oasis.ca.csr";
-        let response = client
-            .request(subject.to_string(), request_json.into())
-            .await
-            .map_err(|e| CoreError::Internal {
-                message: format!("Failed to send CSR request: {e}"),
-                severity: ErrorSeverity::Error,
-            })?;
+                let subject = "oasis.ca.csr";
+                let response = client
+                    .request(subject.to_string(), request_json.into())
+                    .await
+                    .map_err(|e| CoreError::Internal {
+                        message: format!("Failed to send CSR request: {e}"),
+                        severity: ErrorSeverity::Error,
+                    })?;
 
-        let response: CsrResponse =
-            serde_json::from_slice(&response.payload).map_err(|e| CoreError::Internal {
-                message: format!("Failed to parse CSR response: {e}"),
-                severity: ErrorSeverity::Error,
-            })?;
+                let response: CsrResponse =
+                    serde_json::from_slice(&response.payload).map_err(|e| CoreError::Internal {
+                        message: format!("Failed to parse CSR response: {e}"),
+                        severity: ErrorSeverity::Error,
+                    })?;
 
-        if !response.success {
-            return Err(CoreError::Internal {
-                message: format!(
-                    "Certificate request failed: {}",
-                    response
-                        .error_message
-                        .unwrap_or_else(|| "Unknown error".to_string())
-                ),
-                severity: ErrorSeverity::Error,
-            });
-        }
+                if !response.success {
+                    return Err(CoreError::Internal {
+                        message: format!(
+                            "Certificate request failed: {}",
+                            response
+                                .error_message
+                                .unwrap_or_else(|| "Unknown error".to_string())
+                        ),
+                        severity: ErrorSeverity::Error,
+                    });
+                }
 
-        Ok(response)
+                Ok(response)
+            },
+            None,
+            "csr_request",
+        )
+        .await
     }
 
     async fn save_response(&self, private_key_pem: &str, response: CsrResponse) -> Result<()> {

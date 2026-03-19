@@ -4,6 +4,7 @@
 use crate::infrastructure::services::event_bus::EventBus;
 use async_nats::jetstream::{Context, object_store::ObjectStore};
 use oasis_core::core_types::AgentId;
+use oasis_core::rate_limit::{RateLimiterCollection, rate_limited_operation};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
@@ -164,10 +165,14 @@ pub struct FileService {
     jetstream: Arc<Context>,
     lock_manager: FileLockManager,
     event_bus: Option<Arc<EventBus>>,
+    rate_limits: Arc<RateLimiterCollection>,
 }
 
 impl FileService {
-    pub async fn new(jetstream: Arc<Context>) -> Result<Self> {
+    pub async fn new(
+        jetstream: Arc<Context>,
+        rate_limits: Arc<RateLimiterCollection>,
+    ) -> Result<Self> {
         Self::ensure_object_store(&jetstream).await?;
         let lock_manager = FileLockManager::new(jetstream.clone()).await?;
 
@@ -175,6 +180,7 @@ impl FileService {
             jetstream,
             lock_manager,
             event_bus: None,
+            rate_limits,
         })
     }
 
@@ -462,21 +468,29 @@ impl FileService {
         headers.insert("Nats-Msg-Id", dedupe_key);
 
         // 发布并等待 ACK
-        (|| async {
-            let ack = self
-                .jetstream
-                .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
+        rate_limited_operation(
+            &self.rate_limits.task_publish,
+            || async {
+                (|| async {
+                    let ack = self
+                        .jetstream
+                        .publish_with_headers(subject.clone(), headers.clone(), data.clone().into())
+                        .await
+                        .map_err(|e| CoreError::Internal {
+                            message: format!("Failed to publish file task: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })?;
+                    ack.await.map_err(|e| CoreError::Internal {
+                        message: format!("Failed to confirm file task publish: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })
+                })
+                .retry(&network_publish_backoff().build())
                 .await
-                .map_err(|e| CoreError::Internal {
-                    message: format!("Failed to publish file task: {}", e),
-                    severity: ErrorSeverity::Error,
-                })?;
-            ack.await.map_err(|e| CoreError::Internal {
-                message: format!("Failed to confirm file task publish: {}", e),
-                severity: ErrorSeverity::Error,
-            })
-        })
-        .retry(&network_publish_backoff().build())
+            },
+            None,
+            "file_task_publish",
+        )
         .await?;
 
         debug!("Published file apply task to subject: {}", subject);

@@ -5,6 +5,7 @@ use std::{num::NonZeroU32, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::config::{RateLimitBucketSettings, RateLimitSettings};
 use crate::error::{CoreError, Result};
 
 /// 限流器类型
@@ -65,6 +66,17 @@ impl RateLimitConfig {
             })
             .allow_burst(self.max_operations);
         RateLimiter::direct(quota)
+    }
+
+    pub fn from_settings(settings: &RateLimitBucketSettings) -> Result<Self> {
+        let max_operations = NonZeroU32::new(settings.max_operations)
+            .ok_or_else(|| CoreError::config_error("max_operations must be greater than 0"))?;
+
+        Ok(Self {
+            max_operations,
+            time_window: Duration::from_millis(settings.time_window_ms),
+            max_wait_time: settings.max_wait_time_ms.map(Duration::from_millis),
+        })
     }
 }
 
@@ -130,11 +142,22 @@ pub struct RateLimiterCollection {
 
 impl Default for RateLimiterCollection {
     fn default() -> Self {
-        Self {
-            nats: CancellableRateLimiter::new(RateLimitConfig::nats()),
-            heartbeat: CancellableRateLimiter::new(RateLimitConfig::heartbeat()),
-            task_publish: CancellableRateLimiter::new(RateLimitConfig::task_publish()),
-        }
+        Self::from_settings(&RateLimitSettings::default())
+            .expect("default rate limit settings are valid")
+    }
+}
+
+impl RateLimiterCollection {
+    pub fn from_settings(settings: &RateLimitSettings) -> Result<Self> {
+        Ok(Self {
+            nats: CancellableRateLimiter::new(RateLimitConfig::from_settings(&settings.nats)?),
+            heartbeat: CancellableRateLimiter::new(RateLimitConfig::from_settings(
+                &settings.heartbeat,
+            )?),
+            task_publish: CancellableRateLimiter::new(RateLimitConfig::from_settings(
+                &settings.task_publish,
+            )?),
+        })
     }
 }
 
@@ -162,4 +185,76 @@ where
     }
 
     operation().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RateLimitBucketSettings, RateLimitSettings};
+    use crate::error::CoreError;
+
+    #[test]
+    fn test_rate_limiter_collection_from_settings_uses_configured_values() {
+        let settings = RateLimitSettings {
+            nats: RateLimitBucketSettings {
+                max_operations: 7,
+                time_window_ms: 250,
+                max_wait_time_ms: Some(50),
+            },
+            heartbeat: RateLimitBucketSettings {
+                max_operations: 3,
+                time_window_ms: 750,
+                max_wait_time_ms: Some(25),
+            },
+            task_publish: RateLimitBucketSettings {
+                max_operations: 11,
+                time_window_ms: 2_000,
+                max_wait_time_ms: None,
+            },
+        };
+
+        let collection = RateLimiterCollection::from_settings(&settings).unwrap();
+
+        assert_eq!(
+            collection.nats.max_wait_time,
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            collection.heartbeat.max_wait_time,
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(collection.task_publish.max_wait_time, None);
+        assert!(collection.nats.try_permission());
+        assert!(collection.heartbeat.try_permission());
+        assert!(collection.task_publish.try_permission());
+    }
+
+    #[test]
+    fn test_rate_limiter_collection_rejects_zero_operations() {
+        let settings = RateLimitSettings {
+            nats: RateLimitBucketSettings {
+                max_operations: 0,
+                time_window_ms: 250,
+                max_wait_time_ms: Some(50),
+            },
+            heartbeat: RateLimitBucketSettings {
+                max_operations: 3,
+                time_window_ms: 750,
+                max_wait_time_ms: Some(25),
+            },
+            task_publish: RateLimitBucketSettings {
+                max_operations: 11,
+                time_window_ms: 2_000,
+                max_wait_time_ms: None,
+            },
+        };
+
+        let err = RateLimiterCollection::from_settings(&settings).unwrap_err();
+        match err {
+            CoreError::Config { message, .. } => {
+                assert!(message.contains("max_operations must be greater than 0"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
 }

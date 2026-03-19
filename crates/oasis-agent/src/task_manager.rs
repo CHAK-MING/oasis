@@ -7,6 +7,7 @@ use oasis_core::{
     constants::*,
     core_types::{AgentId, BatchId, TaskId},
     error::Result,
+    rate_limit::{RateLimiterCollection, rate_limited_operation},
     shutdown::{ExecutionError, execute_process_with_cancellation},
     task_types::{Task, TaskExecution, TaskState},
 };
@@ -29,6 +30,7 @@ pub struct TaskManager {
     cancelled_tasks: Arc<DashSet<TaskId>>,
     completed_tasks: Arc<DashMap<TaskId, TaskExecution>>,
     completed_task_order: Arc<std::sync::Mutex<VecDeque<TaskId>>>,
+    rate_limits: Arc<RateLimiterCollection>,
 }
 
 impl TaskManager {
@@ -90,6 +92,7 @@ impl TaskManager {
         nats_client: ManagedNatsClient,
         shutdown_token: CancellationToken,
         groups: Vec<String>,
+        rate_limits: Arc<RateLimiterCollection>,
     ) -> Self {
         Self {
             agent_id,
@@ -100,6 +103,7 @@ impl TaskManager {
             cancelled_tasks: Arc::new(DashSet::new()),
             completed_tasks: Arc::new(DashMap::new()),
             completed_task_order: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            rate_limits,
         }
     }
 
@@ -794,15 +798,24 @@ impl TaskManager {
         );
         headers.insert("Nats-Msg-Id", dedupe_key);
 
-        let ack = self
-            .nats_client
-            .current()
-            .await
-            .jetstream
-            .publish_with_headers(subject.clone(), headers, data.into())
-            .await?;
+        rate_limited_operation(
+            &self.rate_limits.task_publish,
+            || async {
+                let ack = self
+                    .nats_client
+                    .current()
+                    .await
+                    .jetstream
+                    .publish_with_headers(subject.clone(), headers, data.into())
+                    .await?;
 
-        ack.await?;
+                ack.await?;
+                Ok(())
+            },
+            Some(self.shutdown_token.clone()),
+            "agent_task_publish_result",
+        )
+        .await?;
         info!("Published task result: {}", execution.task_id);
 
         Ok(())

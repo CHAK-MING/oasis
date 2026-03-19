@@ -1,5 +1,6 @@
 //! 提供通用的 NATS 连接逻辑，支持 TLS 和 JetStream 功能。
 
+use crate::backoff::{full_jitter_delay_for_attempt, nats_reconnect_backoff};
 use crate::error::{CoreError, ErrorSeverity, Result};
 use async_nats::ConnectOptions;
 use async_nats::{Client, jetstream};
@@ -75,6 +76,10 @@ impl NatsClientFactory {
         options = options
             .ping_interval(Duration::from_secs(20))
             .connection_timeout(Duration::from_secs(5))
+            .reconnect_delay_callback({
+                let reconnect_backoff = nats_reconnect_backoff();
+                move |attempts| full_jitter_delay_for_attempt(&reconnect_backoff, attempts)
+            })
             .event_callback(|event| async move {
                 match event {
                     async_nats::Event::Connected => {

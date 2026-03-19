@@ -8,6 +8,7 @@ use oasis_core::{
     config_strategy::ConfigStrategy,
     core_types::AgentId,
     error::Result,
+    rate_limit::RateLimiterCollection,
     shutdown::GracefulShutdown,
     telemetry::init_tracing_with,
 };
@@ -96,6 +97,8 @@ async fn main() -> Result<()> {
     info!("  Agent ID: {}", agent_id);
     info!("  NATS URL: {}", cfg.nats.url);
 
+    let rate_limits = std::sync::Arc::new(RateLimiterCollection::from_settings(&cfg.rate_limit)?);
+
     // 读取 bootstrap token（用于首次证书请求）
     let bootstrap_token = std::env::var("OASIS_BOOTSTRAP_TOKEN").ok();
     let enrollment_secret = load_enrollment_secret(&cfg.tls.certs_dir);
@@ -108,6 +111,7 @@ async fn main() -> Result<()> {
         bootstrap_token,
         enrollment_secret,
     )
+    .with_rate_limits(rate_limits.clone())
     .with_renew_before_days(cfg.tls.renew_before_days);
 
     if cert_bootstrap.bootstrap_if_needed().await? {
@@ -148,6 +152,7 @@ async fn main() -> Result<()> {
         nats_client,
         info,
         shutdown.child_token(),
+        rate_limits,
     );
 
     // 启动 Agent

@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use oasis_core::config_strategies::ServerConfigStrategy;
 use oasis_core::config_strategy::ConfigStrategy;
 use oasis_core::error::Result;
+use oasis_core::rate_limit::{RateLimiterCollection, rate_limited_operation};
 use oasis_core::{config::OasisConfig, nats::NatsClientFactory};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,7 +75,9 @@ impl Bootstrap {
         crate::infrastructure::streams::ensure_streams(&jetstream).await?;
         debug!("JetStream streams and KV buckets ensured");
 
-        let event_bus = Arc::new(EventBus::new(jetstream.clone()));
+        let rate_limits = Arc::new(RateLimiterCollection::from_settings(&config.rate_limit)?);
+
+        let event_bus = Arc::new(EventBus::new(jetstream.clone(), rate_limits.clone()));
 
         // 5. 启动监控服务
         // 启动任务结果监听，并注册到生命周期管理器，设置到TaskService
@@ -111,6 +114,7 @@ impl Bootstrap {
         );
 
         // CA CSR responder
+        let csr_rate_limits = rate_limits.clone();
         let ca_responder_handle = {
             let ca_service = ca_service.clone();
             let client = nats_raw.clone();
@@ -157,7 +161,23 @@ impl Bootstrap {
                                 }
                             };
 
-                            if let Err(e) = client.publish(reply, payload.into()).await {
+                            if let Err(e) = rate_limited_operation(
+                                &csr_rate_limits.nats,
+                                || async {
+                                    client
+                                        .publish(reply, payload.into())
+                                        .await
+                                        .map_err(|e| oasis_core::error::CoreError::Nats {
+                                            message: format!("Failed to publish CSR response: {}", e),
+                                            severity: oasis_core::error::ErrorSeverity::Error,
+                                        })?;
+                                    Ok(())
+                                },
+                                None,
+                                "csr_response_publish",
+                            )
+                            .await
+                            {
                                 error!("Failed to publish CSR response: {}", e);
                             }
                         }
@@ -193,12 +213,13 @@ impl Bootstrap {
         );
         let task_monitor_handle = task_monitor.clone().spawn();
 
-        let task_service =
-            Arc::new(TaskService::new(jetstream.clone(), task_monitor.clone()).await?);
+        let task_service = Arc::new(
+            TaskService::new(jetstream.clone(), task_monitor.clone(), rate_limits.clone()).await?,
+        );
         debug!("TaskService initialized");
 
         let file_service = Arc::new(
-            FileService::new(jetstream.clone())
+            FileService::new(jetstream.clone(), rate_limits.clone())
                 .await?
                 .with_event_bus(event_bus.clone()),
         );

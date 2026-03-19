@@ -18,6 +18,8 @@ pub struct OasisConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub ca: CaConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitSettings,
 }
 
 impl OasisConfig {
@@ -251,6 +253,86 @@ impl Default for CaConfig {
     }
 }
 
+/// 限流配置
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitSettings {
+    #[serde(default = "default_nats_rate_limit")]
+    pub nats: RateLimitBucketSettings,
+    #[serde(default = "default_heartbeat_rate_limit")]
+    pub heartbeat: RateLimitBucketSettings,
+    #[serde(default = "default_task_publish_rate_limit")]
+    pub task_publish: RateLimitBucketSettings,
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        Self {
+            nats: default_nats_rate_limit(),
+            heartbeat: default_heartbeat_rate_limit(),
+            task_publish: default_task_publish_rate_limit(),
+        }
+    }
+}
+
+/// 单个限流桶配置
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitBucketSettings {
+    #[serde(default = "default_rate_limit_max_operations")]
+    pub max_operations: u32,
+    #[serde(default = "default_rate_limit_time_window_ms")]
+    pub time_window_ms: u64,
+    #[serde(default = "default_rate_limit_max_wait_ms")]
+    pub max_wait_time_ms: Option<u64>,
+}
+
+impl Default for RateLimitBucketSettings {
+    fn default() -> Self {
+        Self {
+            max_operations: default_rate_limit_max_operations(),
+            time_window_ms: default_rate_limit_time_window_ms(),
+            max_wait_time_ms: default_rate_limit_max_wait_ms(),
+        }
+    }
+}
+
+fn default_rate_limit_max_operations() -> u32 {
+    100
+}
+
+fn default_rate_limit_time_window_ms() -> u64 {
+    1_000
+}
+
+fn default_rate_limit_max_wait_ms() -> Option<u64> {
+    Some(1_000)
+}
+
+fn default_nats_rate_limit() -> RateLimitBucketSettings {
+    RateLimitBucketSettings {
+        max_operations: 100,
+        time_window_ms: 1_000,
+        max_wait_time_ms: Some(500),
+    }
+}
+
+fn default_heartbeat_rate_limit() -> RateLimitBucketSettings {
+    RateLimitBucketSettings {
+        max_operations: 10,
+        time_window_ms: 1_000,
+        max_wait_time_ms: Some(100),
+    }
+}
+
+fn default_task_publish_rate_limit() -> RateLimitBucketSettings {
+    RateLimitBucketSettings {
+        max_operations: 20,
+        time_window_ms: 1_000,
+        max_wait_time_ms: Some(1_000),
+    }
+}
+
 /// 服务器特定配置
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -444,6 +526,7 @@ mod tests {
             let config = OasisConfig::default();
             assert_eq!(config.nats.url, "tls://127.0.0.1:4222");
             assert_eq!(config.grpc.url, "https://127.0.0.1:50051");
+            assert_eq!(config.rate_limit, RateLimitSettings::default());
         }
 
         #[test]
@@ -499,6 +582,58 @@ mod tests {
             assert_eq!(config.nats, deserialized.nats);
             assert_eq!(config.grpc, deserialized.grpc);
             assert_eq!(config.telemetry, deserialized.telemetry);
+            assert_eq!(config.rate_limit, deserialized.rate_limit);
+        }
+
+        #[test]
+        fn test_rate_limit_defaults_match_previous_presets() {
+            let config = OasisConfig::default();
+
+            assert_eq!(config.rate_limit.nats.max_operations, 100);
+            assert_eq!(config.rate_limit.nats.time_window_ms, 1_000);
+            assert_eq!(config.rate_limit.nats.max_wait_time_ms, Some(500));
+
+            assert_eq!(config.rate_limit.heartbeat.max_operations, 10);
+            assert_eq!(config.rate_limit.heartbeat.time_window_ms, 1_000);
+            assert_eq!(config.rate_limit.heartbeat.max_wait_time_ms, Some(100));
+
+            assert_eq!(config.rate_limit.task_publish.max_operations, 20);
+            assert_eq!(config.rate_limit.task_publish.time_window_ms, 1_000);
+            assert_eq!(config.rate_limit.task_publish.max_wait_time_ms, Some(1_000));
+        }
+
+        #[test]
+        fn test_rate_limit_nested_toml_roundtrip() {
+            let toml = r#"
+                [rate_limit.nats]
+                max_operations = 42
+                time_window_ms = 250
+                max_wait_time_ms = 75
+
+                [rate_limit.heartbeat]
+                max_operations = 7
+                time_window_ms = 500
+                max_wait_time_ms = 25
+
+                [rate_limit.task_publish]
+                max_operations = 11
+                time_window_ms = 2_000
+                max_wait_time_ms = 900
+            "#;
+
+            let config: OasisConfig = toml::from_str(toml).unwrap();
+
+            assert_eq!(config.rate_limit.nats.max_operations, 42);
+            assert_eq!(config.rate_limit.nats.time_window_ms, 250);
+            assert_eq!(config.rate_limit.nats.max_wait_time_ms, Some(75));
+
+            assert_eq!(config.rate_limit.heartbeat.max_operations, 7);
+            assert_eq!(config.rate_limit.heartbeat.time_window_ms, 500);
+            assert_eq!(config.rate_limit.heartbeat.max_wait_time_ms, Some(25));
+
+            assert_eq!(config.rate_limit.task_publish.max_operations, 11);
+            assert_eq!(config.rate_limit.task_publish.time_window_ms, 2_000);
+            assert_eq!(config.rate_limit.task_publish.max_wait_time_ms, Some(900));
         }
     }
 }

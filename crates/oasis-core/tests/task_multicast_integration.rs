@@ -19,6 +19,7 @@ use oasis_core::{
     constants::{JS_STREAM_GROUP_TASKS, JS_STREAM_RESULTS, JS_STREAM_TASKS},
     core_types::{AgentId, SelectorExpression},
     nats::NatsClientFactory,
+    rate_limit::RateLimiterCollection,
     task_types::{BatchRequest, TaskState},
 };
 use oasis_server::infrastructure::{
@@ -135,9 +136,11 @@ async fn test_group_multicast_executes_once_per_group_and_fan_outs_to_all_agents
     let shutdown = CancellationToken::new();
     let task_monitor = Arc::new(TaskMonitor::new(jetstream.clone(), shutdown.clone()));
     let task_monitor_handle = task_monitor.clone().spawn();
-    let task_service = TaskService::new(jetstream.clone(), task_monitor.clone())
-        .await
-        .expect("task service should initialize");
+    let rate_limits = Arc::new(RateLimiterCollection::default());
+    let task_service =
+        TaskService::new(jetstream.clone(), task_monitor.clone(), rate_limits.clone())
+            .await
+            .expect("task service should initialize");
 
     let agent_one = ManagedNatsClient::connect_with_oasis_config(&nats, &tls)
         .await
@@ -151,12 +154,14 @@ async fn test_group_multicast_executes_once_per_group_and_fan_outs_to_all_agents
         agent_one,
         shutdown.child_token(),
         vec!["web".to_string()],
+        rate_limits.clone(),
     );
     let agent_two_manager = TaskManager::new(
         AgentId::new("group-agent-2"),
         agent_two,
         shutdown.child_token(),
         vec!["web".to_string()],
+        rate_limits.clone(),
     );
 
     let agent_one_handle = tokio::spawn({

@@ -4,6 +4,7 @@
 //! 通过单一事实来源 `BackoffConfig` 统一管理策略，既用于生成执行器，也用于预估延迟。
 
 use backon::ExponentialBuilder;
+use rand::Rng;
 use std::time::Duration;
 
 /// 重试策略配置
@@ -90,6 +91,36 @@ pub fn network_connect_backoff() -> BackoffConfig {
     }
 }
 
+/// 用于 NATS 断线后的重连退避。
+///
+/// 这个策略比普通网络连接更保守一点，目标是把同一时刻的大量重连请求
+/// 打散到一个更宽的时间窗口里，降低 mTLS 握手峰值。
+pub fn nats_reconnect_backoff() -> BackoffConfig {
+    BackoffConfig {
+        min_delay: Duration::from_millis(250),
+        max_delay: Duration::from_secs(30),
+        factor: 2.0,
+        max_times: None,
+    }
+}
+
+/// 基于指数退避上限生成 full jitter 延迟。
+///
+/// 规则：在 `[0, cap]` 区间内均匀采样。这样可以避免所有 Agent
+/// 在同一退避窗口末尾再次同步唤醒。
+pub fn full_jitter_delay_for_attempt(config: &BackoffConfig, attempt: usize) -> Duration {
+    let attempt = attempt.min(u32::MAX as usize) as u32;
+    let cap = config.estimate_delay(attempt);
+    let cap_ms = cap.as_millis().min(u128::from(u64::MAX)) as u64;
+
+    if cap_ms == 0 {
+        return Duration::from_millis(0);
+    }
+
+    let jitter_ms = rand::rng().random_range(0..=cap_ms);
+    Duration::from_millis(jitter_ms)
+}
+
 pub fn fast_backoff() -> BackoffConfig {
     BackoffConfig {
         min_delay: Duration::from_millis(100),
@@ -99,7 +130,24 @@ pub fn fast_backoff() -> BackoffConfig {
     }
 }
 
-/// 兼容旧 API 的辅助函数，但现在有了真正的配置支持
-pub fn delay_for_attempt(config: &BackoffConfig, attempt: u32) -> Duration {
-    config.estimate_delay(attempt)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nats_reconnect_backoff_defaults() {
+        let config = nats_reconnect_backoff();
+        assert_eq!(config.min_delay, Duration::from_millis(250));
+        assert_eq!(config.max_delay, Duration::from_secs(30));
+        assert_eq!(config.factor, 2.0);
+        assert_eq!(config.max_times, None);
+    }
+
+    #[test]
+    fn test_full_jitter_delay_stays_within_cap() {
+        let config = nats_reconnect_backoff();
+        let cap = config.estimate_delay(4);
+        let delay = full_jitter_delay_for_attempt(&config, 4);
+        assert!(delay <= cap);
+    }
 }

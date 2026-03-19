@@ -5,7 +5,9 @@ use oasis_core::{
     constants::{JS_KV_AGENT_HEARTBEAT, JS_KV_AGENT_INFOS, kv_key_facts, kv_key_heartbeat},
     core_types::AgentId,
     error::Result,
+    rate_limit::{RateLimiterCollection, rate_limited_operation},
 };
+use std::sync::Arc;
 use std::{collections::HashMap, net::UdpSocket};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio_util::sync::CancellationToken;
@@ -47,6 +49,7 @@ pub struct AgentManager {
     nats_client: ManagedNatsClient,
     info: HashMap<String, String>,
     shutdown_token: CancellationToken,
+    rate_limits: Arc<RateLimiterCollection>,
 }
 
 impl AgentManager {
@@ -55,12 +58,14 @@ impl AgentManager {
         nats_client: ManagedNatsClient,
         info: HashMap<String, String>,
         shutdown_token: CancellationToken,
+        rate_limits: Arc<RateLimiterCollection>,
     ) -> Self {
         Self {
             agent_id,
             nats_client,
             info,
             shutdown_token,
+            rate_limits,
         }
     }
 
@@ -73,6 +78,7 @@ impl AgentManager {
             self.nats_client.clone(),
             self.shutdown_token.clone(),
             TaskManager::parse_groups_from_info(&self.info),
+            self.rate_limits.clone(),
         );
 
         let file_manager = FileManager::new(
@@ -168,24 +174,32 @@ impl AgentManager {
     }
 
     async fn send_heartbeat_with_status(&self, status: AgentStatus) -> Result<()> {
-        let kv = self
-            .nats_client
-            .current()
-            .await
-            .jetstream
-            .get_key_value(JS_KV_AGENT_HEARTBEAT)
-            .await?;
-        let key = kv_key_heartbeat(self.agent_id.as_str());
-        let timestamp = chrono::Utc::now().timestamp();
+        rate_limited_operation(
+            &self.rate_limits.heartbeat,
+            || async {
+                let kv = self
+                    .nats_client
+                    .current()
+                    .await
+                    .jetstream
+                    .get_key_value(JS_KV_AGENT_HEARTBEAT)
+                    .await?;
+                let key = kv_key_heartbeat(self.agent_id.as_str());
+                let timestamp = chrono::Utc::now().timestamp();
 
-        let heartbeat_data = timestamp.to_string();
-        kv.put(&key, heartbeat_data.into()).await?;
-        debug!(
-            "Sent heartbeat for agent: {} with status: {:?}",
-            self.agent_id, status
-        );
+                let heartbeat_data = timestamp.to_string();
+                kv.put(&key, heartbeat_data.into()).await?;
+                debug!(
+                    "Sent heartbeat for agent: {} with status: {:?}",
+                    self.agent_id, status
+                );
 
-        Ok(())
+                Ok(())
+            },
+            Some(self.shutdown_token.clone()),
+            "agent_heartbeat",
+        )
+        .await
     }
 
     async fn publish_agent_info(&self, status: AgentStatus) -> Result<()> {

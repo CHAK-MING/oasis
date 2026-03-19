@@ -19,6 +19,7 @@ use oasis_core::{
     core_types::{AgentId, OperationId},
     event_types::{OasisEvent, OasisEventKind},
     nats::NatsClientFactory,
+    rate_limit::RateLimiterCollection,
 };
 use oasis_server::infrastructure::{services::event_bus::EventBus, streams};
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
@@ -97,7 +98,10 @@ async fn test_event_bus_publishes_json_event_to_events_stream() {
         agent_id: AgentId::new("event-agent-1"),
     });
     let expected_subject = event.subject();
-    let event_bus = EventBus::new(jetstream.clone());
+    let event_bus = EventBus::new(
+        jetstream.clone(),
+        Arc::new(RateLimiterCollection::default()),
+    );
     event_bus
         .publish(&event)
         .await
@@ -153,7 +157,10 @@ async fn test_event_bus_publishes_file_apply_failed_event() {
         revision: 42,
         reason: "permission denied".to_string(),
     });
-    let event_bus = EventBus::new(jetstream.clone());
+    let event_bus = EventBus::new(
+        jetstream.clone(),
+        Arc::new(RateLimiterCollection::default()),
+    );
     event_bus
         .publish(&event)
         .await

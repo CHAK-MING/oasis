@@ -5,6 +5,7 @@ use async_nats::jetstream::Context;
 use oasis_core::constants;
 use oasis_core::core_types::{AgentId, BatchId, TaskId};
 use oasis_core::error::{CoreError, ErrorSeverity, Result};
+use oasis_core::rate_limit::{RateLimiterCollection, rate_limited_operation};
 use oasis_core::task_types::*;
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -18,6 +19,7 @@ pub struct TaskService {
     jetstream: Arc<Context>,
     /// 任务监控器 - 维护任务与执行缓存
     task_monitor: Arc<TaskMonitor>,
+    rate_limits: Arc<RateLimiterCollection>,
 }
 
 impl TaskService {
@@ -132,12 +134,17 @@ impl TaskService {
     }
 
     /// 创建新的任务服务
-    pub async fn new(jetstream: Arc<Context>, task_monitor: Arc<TaskMonitor>) -> Result<Self> {
+    pub async fn new(
+        jetstream: Arc<Context>,
+        task_monitor: Arc<TaskMonitor>,
+        rate_limits: Arc<RateLimiterCollection>,
+    ) -> Result<Self> {
         info!("Initializing TaskService");
 
         Ok(Self {
             jetstream,
             task_monitor,
+            rate_limits,
         })
     }
 
@@ -206,22 +213,31 @@ impl TaskService {
             let payload = group_task.encode_to_vec();
             let headers = Self::group_publish_headers(&batch_id, group, &payload);
 
-            let ack = self
-                .jetstream
-                .publish_with_headers(subject, headers, payload.into())
-                .await
-                .map_err(|e| CoreError::Nats {
-                    message: format!("Failed to publish group task: {}", e),
-                    severity: ErrorSeverity::Error,
-                })?;
+            rate_limited_operation(
+                &self.rate_limits.task_publish,
+                || async {
+                    let ack = self
+                        .jetstream
+                        .publish_with_headers(subject, headers, payload.into())
+                        .await
+                        .map_err(|e| CoreError::Nats {
+                            message: format!("Failed to publish group task: {}", e),
+                            severity: ErrorSeverity::Error,
+                        })?;
 
-            ack.await.map_err(|e| CoreError::Nats {
-                message: format!(
-                    "Failed to confirm group task publish for batch {} and group {}: {}",
-                    batch_id, group, e
-                ),
-                severity: ErrorSeverity::Error,
-            })?;
+                    ack.await.map_err(|e| CoreError::Nats {
+                        message: format!(
+                            "Failed to confirm group task publish for batch {} and group {}: {}",
+                            batch_id, group, e
+                        ),
+                        severity: ErrorSeverity::Error,
+                    })?;
+                    Ok(())
+                },
+                None,
+                "task_publish_group",
+            )
+            .await?;
 
             task_ids.extend(
                 tasks_and_agents
@@ -243,14 +259,23 @@ impl TaskService {
 
                 let headers = Self::task_publish_headers(&task.task_id, &payload);
 
-                let ack_future = self
-                    .jetstream
-                    .publish_with_headers(subject, headers, payload.into())
-                    .await
-                    .map_err(|e| CoreError::Nats {
-                        message: format!("Failed to publish unicast task: {}", e),
-                        severity: ErrorSeverity::Error,
-                    })?;
+                let ack_future = rate_limited_operation(
+                    &self.rate_limits.task_publish,
+                    || async {
+                        let ack = self
+                            .jetstream
+                            .publish_with_headers(subject, headers, payload.into())
+                            .await
+                            .map_err(|e| CoreError::Nats {
+                                message: format!("Failed to publish unicast task: {}", e),
+                                severity: ErrorSeverity::Error,
+                            })?;
+                        Ok(ack)
+                    },
+                    None,
+                    "task_publish_unicast",
+                )
+                .await?;
 
                 ack_futures.push((task.task_id.clone(), ack_future));
                 task_ids.push(task.task_id.clone());
@@ -471,19 +496,28 @@ impl TaskService {
 
         let headers = Self::cancel_publish_headers(task_id);
 
-        let ack = self
-            .jetstream
-            .publish_with_headers(subject, headers, payload.into())
-            .await
-            .map_err(|e| CoreError::Nats {
-                message: format!("Failed to publish cancel: {}", e),
-                severity: ErrorSeverity::Error,
-            })?;
+        rate_limited_operation(
+            &self.rate_limits.task_publish,
+            || async {
+                let ack = self
+                    .jetstream
+                    .publish_with_headers(subject, headers, payload.into())
+                    .await
+                    .map_err(|e| CoreError::Nats {
+                        message: format!("Failed to publish cancel: {}", e),
+                        severity: ErrorSeverity::Error,
+                    })?;
 
-        ack.await.map_err(|e| CoreError::Nats {
-            message: format!("Failed to confirm cancel publish: {}", e),
-            severity: ErrorSeverity::Error,
-        })?;
+                ack.await.map_err(|e| CoreError::Nats {
+                    message: format!("Failed to confirm cancel publish: {}", e),
+                    severity: ErrorSeverity::Error,
+                })?;
+                Ok(())
+            },
+            None,
+            "task_publish_cancel",
+        )
+        .await?;
 
         Ok(())
     }
